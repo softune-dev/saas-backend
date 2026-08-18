@@ -8,10 +8,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import cache, crud, media, notifications, queue
+from app import cache, crud, media, notifications, queue, vercel
 from app.db import get_db
 from app.models import OrderCounter, Site, SitePage, Template
 from app.schemas import (
+    DomainStatusOut,
     Page,
     SiteCreate,
     SiteOut,
@@ -119,6 +120,22 @@ async def create_site(payload: SiteCreate, user: CurrentUser, db: DB) -> Site:
 @router.get("/sites/{site_id}", response_model=SiteOut)
 async def get_site(site_id: uuid.UUID, user: CurrentUser, db: DB) -> Site:
     return await crud.get_scoped(db, Site, user.tenant_id, site_id)
+
+
+@router.get("/sites/{site_id}/domain-status", response_model=DomainStatusOut)
+async def get_domain_status(site_id: uuid.UUID, user: CurrentUser, db: DB) -> DomainStatusOut:
+    """Real DNS check against Vercel — is site.custom_domain actually
+    pointed at Vercel right now? See vercel.check_domain_connected.
+
+    Separate endpoint, not folded into SiteOut, because it's a live network
+    call to Vercel on every request — fine on-demand when the merchant is
+    looking at their Domains settings, wrong to pay on every site fetch.
+    """
+    site = await crud.get_scoped(db, Site, user.tenant_id, site_id)
+    if not site.custom_domain:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No custom domain set on this site.")
+    connected = await vercel.check_domain_connected(site.custom_domain)
+    return DomainStatusOut(domain=site.custom_domain, connected=connected)
 
 
 @router.patch("/sites/{site_id}", response_model=SiteOut)

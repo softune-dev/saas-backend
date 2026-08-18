@@ -179,6 +179,17 @@ class SiteOut(ORMModel):
     updated_at: datetime
 
 
+class DomainStatusOut(BaseModel):
+    """connected=None means the check itself couldn't be answered (no
+    Vercel token configured, or the request failed) — distinct from
+    connected=False (checked, and DNS genuinely isn't pointed at Vercel
+    yet). The dashboard shows a third "unknown" state for None rather than
+    a false negative."""
+
+    domain: str
+    connected: bool | None
+
+
 # =============================================================================
 #  Pages
 # =============================================================================

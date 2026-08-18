@@ -67,3 +67,37 @@ async def add_domain_to_project(domain: str, project_id: str) -> bool:
     except httpx.HTTPError as exc:
         log.warning("vercel: request failed attaching %s: %s", domain, exc)
         return False
+
+
+async def check_domain_connected(domain: str) -> bool | None:
+    """Is `domain`'s DNS actually pointed at Vercel right now?
+
+    Calls Vercel's domain CONFIG check (v6/domains/{domain}/config), not the
+    project-domains endpoint add_domain_to_project uses — this one reports
+    the real-world DNS state (misconfigured or not) regardless of which
+    project the domain is attached to, which is what a merchant setting up
+    their own DNS actually needs to know: "is it working yet," not "is it
+    registered with Vercel."
+
+    Returns None (not False) when the check itself couldn't be answered —
+    token missing, network error, etc. — so the caller can show "unknown"
+    rather than a false "not connected."
+    """
+    if not settings.vercel_api_token:
+        return None
+
+    params = {"teamId": settings.vercel_team_id} if settings.vercel_team_id else {}
+    try:
+        async with httpx.AsyncClient(timeout=10) as http:
+            response = await http.get(
+                f"{_API_BASE}/v6/domains/{domain}/config",
+                params=params,
+                headers={"Authorization": f"Bearer {settings.vercel_api_token}"},
+            )
+        if response.status_code != 200:
+            return None
+        body = response.json()
+        return not bool(body.get("misconfigured", True))
+    except httpx.HTTPError as exc:
+        log.warning("vercel: domain config check failed for %s: %s", domain, exc)
+        return None
