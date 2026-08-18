@@ -43,6 +43,9 @@ JOB_SEND_ORDER_NOTIFICATIONS = "send_order_notifications"
 # Attach a newly-published site's subdomain to its template's Vercel
 # project — see app/vercel.py's module docstring for why this exists.
 JOB_ATTACH_DOMAIN = "attach_domain"
+# Mirror of the above: detach a domain a site no longer uses (custom_domain
+# changed or was cleared) so it stops serving that site's storefront.
+JOB_DETACH_DOMAIN = "detach_domain"
 
 
 async def connect() -> aio_pika.abc.AbstractChannel:

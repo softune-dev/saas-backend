@@ -26,6 +26,7 @@ from app.db import SessionLocal, engine
 from app.models import Notification, Site
 from app.queue import (
     JOB_ATTACH_DOMAIN,
+    JOB_DETACH_DOMAIN,
     JOB_GENERATE_SITEMAP,
     JOB_REVALIDATE_SITE,
     JOB_SEND_EMAIL,
@@ -121,6 +122,37 @@ async def handle_attach_domain(payload: dict) -> None:
     await vercel.add_domain_to_project(host, project_id)
 
 
+async def handle_detach_domain(payload: dict) -> None:
+    """Remove a domain a site no longer uses from its template's Vercel
+    project — see app/vercel.py's remove_domain_from_project.
+
+    The domain to remove is carried in the payload (payload["domain"]), not
+    re-derived from the site record: by the time this job runs, the site's
+    custom_domain has already been overwritten in the database with the NEW
+    value (or null) — the old one only still exists in this message.
+    """
+    from app import vercel
+
+    site_id = payload.get("site_id")
+    domain = payload.get("domain")
+    if not domain:
+        return
+
+    async with SessionLocal() as db:
+        site = (
+            await db.execute(select(Site).where(Site.id == site_id))
+        ).scalar_one_or_none()
+
+    if site is None:
+        log.warning("detach_domain: site %s no longer exists, dropping job", site_id)
+        return
+    project_id = site.template.vercel_project_id
+    if not project_id:
+        return
+
+    await vercel.remove_domain_from_project(domain, project_id)
+
+
 async def handle_generate_sitemap(payload: dict) -> None:
     """Placeholder for search-engine pings after a publish.
 
@@ -180,6 +212,7 @@ HANDLERS = {
     JOB_SEND_EMAIL: handle_send_email,
     JOB_SEND_ORDER_NOTIFICATIONS: handle_send_order_notifications,
     JOB_ATTACH_DOMAIN: handle_attach_domain,
+    JOB_DETACH_DOMAIN: handle_detach_domain,
 }
 
 

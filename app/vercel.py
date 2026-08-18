@@ -69,6 +69,41 @@ async def add_domain_to_project(domain: str, project_id: str) -> bool:
         return False
 
 
+async def remove_domain_from_project(domain: str, project_id: str) -> bool:
+    """Detach `domain` from the given Vercel project — the mirror of
+    add_domain_to_project. Without this, "Remove" in the dashboard would
+    only clear our own database field while the domain kept silently
+    serving that site's storefront on Vercel's side, since nothing else
+    would ever tell Vercel to let it go. Returns True on success, including
+    "already not attached" (404) — idempotent, same reasoning as add."""
+    if not settings.vercel_api_token or not project_id:
+        log.info(
+            "vercel: skipping domain detach for %s (token or project id not configured)",
+            domain,
+        )
+        return False
+
+    params = {"teamId": settings.vercel_team_id} if settings.vercel_team_id else {}
+    try:
+        async with httpx.AsyncClient(timeout=10) as http:
+            response = await http.delete(
+                f"{_API_BASE}/v9/projects/{project_id}/domains/{domain}",
+                params=params,
+                headers={"Authorization": f"Bearer {settings.vercel_api_token}"},
+            )
+        if response.status_code in (200, 204, 404):
+            log.info("vercel: detached %s from project %s", domain, project_id)
+            return True
+        log.warning(
+            "vercel: failed to detach %s from project %s: %s",
+            domain, project_id, response.status_code,
+        )
+        return False
+    except httpx.HTTPError as exc:
+        log.warning("vercel: request failed detaching %s: %s", domain, exc)
+        return False
+
+
 async def check_domain_connected(domain: str) -> bool | None:
     """Is `domain`'s DNS actually pointed at Vercel right now?
 

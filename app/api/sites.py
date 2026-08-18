@@ -174,6 +174,16 @@ async def update_site(
             # once the site is actually live; an unpublished site has
             # nothing for a domain to point at yet.
             await queue.publish(queue.JOB_ATTACH_DOMAIN, {"site_id": str(site.id)})
+    if old_domain and old_domain != site.custom_domain:
+        # The OLD custom domain is now unused — detach it from Vercel too,
+        # not just cleared from our own database, or it would silently
+        # keep serving this site's storefront forever. Not gated to
+        # "published": the domain may have been attached during an earlier
+        # published state that's since changed, and detaching an
+        # already-unattached domain is a harmless no-op anyway.
+        await queue.publish(
+            queue.JOB_DETACH_DOMAIN, {"site_id": str(site.id), "domain": old_domain}
+        )
     return site
 
 
