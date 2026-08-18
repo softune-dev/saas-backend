@@ -272,7 +272,13 @@ async def list_orders(
     user: CurrentUser,
     db: DB,
     order_status: Annotated[str | None, Query(alias="status")] = None,
-    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    # 500, not the usual 100 — the dashboard's Sales Analysis widget buckets
+    # raw orders into 6 calendar months client-side (see dashboard-view.tsx),
+    # and 100 orders covers well under 6 months for any store with real
+    # volume, silently leaving older months blank even though the data
+    # exists. 500 covers 6 months at ~2.7 orders/day before this needs a
+    # real server-side monthly-aggregation endpoint instead.
+    limit: Annotated[int, Query(ge=1, le=500)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> dict:
     await _owned_site(db, user.tenant_id, site_id)
