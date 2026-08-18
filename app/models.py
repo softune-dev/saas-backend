@@ -64,7 +64,7 @@ class Tenant(Base, TimestampMixin):
     id: Mapped[uuid.UUID] = _pk()
     slug: Mapped[str] = mapped_column(CITEXT, unique=True)
     name: Mapped[str] = mapped_column(Text)
-    plan: Mapped[str] = mapped_column(Text, default="free")
+    plan: Mapped[str] = mapped_column(Text, default="demo")
     status: Mapped[str] = mapped_column(Text, default="active")
     settings: Mapped[dict] = mapped_column(JSONB, default=dict)
 

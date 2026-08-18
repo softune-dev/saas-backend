@@ -32,7 +32,7 @@ async def test_register_creates_tenant_with_slug(client):
     me = await client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
     tenant = me.json()["tenant"]
     assert tenant["slug"]
-    assert tenant["plan"] == "free"
+    assert tenant["plan"] == "demo"
     await _cleanup([tenant["id"]])
 
 

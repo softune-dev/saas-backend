@@ -34,17 +34,19 @@ log = logging.getLogger(__name__)
 
 # Daily AI request cap per tenant plan. NOT finalized pricing — deliberately
 # just a dict, not a database column or migration, so it's a one-line change
-# whenever the real plan lineup settles. 0 means no AI access at all (the
-# Starter tier, by design — see the pricing conversation this mirrors).
-# "free" is what every tenant actually has today (no plan-selection flow
-# exists yet); mapped to the same allowance as Growth rather than 0 so
-# today's real usage isn't cut off by a business decision that hasn't
-# shipped yet. Any plan value not listed falls back to DEFAULT_AI_DAILY_CAP.
+# whenever the real plan lineup settles. Four real plans, no "free" tier:
+#   - demo: internal/trial tenants (today's only two real tenants) — enough
+#     allowance to actually try the assistant, not a token amount.
+#   - starter: 0 means no AI access at all, by design, not just a low cap.
+#   - growth / business: real paid-tier allowances.
+# Any plan value not listed falls back to DEFAULT_AI_DAILY_CAP (same as
+# growth) rather than silently 0 — an unrecognized plan should never look
+# like "AI isn't included," that's what 0 explicitly means.
 PLAN_AI_DAILY_CAP: dict[str, int] = {
+    "demo": 50,
     "starter": 0,
     "growth": 80,
     "business": 250,
-    "free": 80,
 }
 DEFAULT_AI_DAILY_CAP = 80
 
