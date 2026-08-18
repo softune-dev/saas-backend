@@ -1,0 +1,71 @@
+# Production stack for the VM — api + worker + redis + rabbitmq + Caddy.
+#
+#   docker compose -f docker-compose.prod.yml up -d --build
+#   docker compose -f docker-compose.prod.yml logs -f api worker
+#   docker compose -f docker-compose.prod.yml ps
+#
+# Redis and RabbitMQ deliberately have NO `ports:` mapping — they're only
+# reachable by api/worker over this compose file's internal network, never
+# from outside the VM. Only Caddy publishes 80/443 to the host.
+
+services:
+  api:
+    build: .
+    restart: always
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672/
+    depends_on:
+      - redis
+      - rabbitmq
+    expose:
+      - "8000"
+
+  worker:
+    build: .
+    restart: always
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672/
+    depends_on:
+      - redis
+      - rabbitmq
+    command: ["python", "-m", "app.worker"]
+
+  redis:
+    image: redis:7-alpine
+    restart: always
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    restart: always
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+
+  caddy:
+    image: caddy:2-alpine
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    command: caddy run --config /etc/caddyfile
+    depends_on:
+      - api
+
+volumes:
+  redis_data:
+  rabbitmq_data:
+  caddy_data:
+  caddy_config:
