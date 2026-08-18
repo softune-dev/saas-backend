@@ -33,16 +33,19 @@ _API_BASE = "https://api.vercel.com"
 async def add_domain_to_project(domain: str, project_id: str) -> bool:
     """Attach `domain` to the given Vercel project. Returns True on success.
 
-    Re-adding a domain already attached to THIS project is a genuine no-op
-    success (200/201) — Vercel doesn't error on that. A 409
-    "domain_already_in_use" means something else entirely: the domain is
-    attached to a DIFFERENT project right now, a real conflict, not a
-    success. (Confirmed the hard way: this used to be treated as success
-    here, which masked a real failure — a domain still claimed by an old
-    project silently "succeeded" attaching to the new one while actually
-    doing nothing, and the merchant's site 404'd.) Only a caller who has
-    since freed the domain from whatever else held it should expect a retry
-    to succeed.
+    A 409 "domain_already_in_use" is ambiguous by status code alone —
+    Vercel returns it BOTH when the domain is already attached to THIS
+    exact project (a harmless no-op, should count as success) and when
+    it's attached to a genuinely DIFFERENT project (a real conflict).
+    The response body's error.domain.projectId says which one it is —
+    that's what decides the outcome here, not the status code on its own.
+
+    (This distinction used to be missing entirely in both directions at
+    different times: first ALL 409s were treated as success, silently
+    masking real cross-project conflicts; then, overcorrecting, ALL 409s
+    were treated as failure, which broke the actually-harmless same-project
+    case and spammed false failures into the logs. Checking the actual
+    project id in the error body is the real fix.)
     """
     if not settings.vercel_api_token or not project_id:
         log.info(
@@ -63,7 +66,15 @@ async def add_domain_to_project(domain: str, project_id: str) -> bool:
         if response.status_code in (200, 201):
             log.info("vercel: attached %s to project %s", domain, project_id)
             return True
+
         body = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+        if response.status_code == 409:
+            error = body.get("error", {})
+            existing_project = error.get("domain", {}).get("projectId") or error.get("projectId")
+            if error.get("code") == "domain_already_in_use" and existing_project == project_id:
+                log.info("vercel: %s already attached to project %s (no-op)", domain, project_id)
+                return True
+
         log.warning(
             "vercel: failed to attach %s to project %s: %s %s",
             domain, project_id, response.status_code, body,
