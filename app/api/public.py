@@ -211,6 +211,7 @@ async def get_site_config(host: str, db: DB) -> dict:
             "framework": site.template.framework,
             "theme": site.theme,
             "business": site.business,
+            "about": site.about,
             # Raw site-wide SEO — separate from each page's already-resolved
             # `seo` block below. Templates use this for things that apply
             # once per site rather than per page: tracking script ids,

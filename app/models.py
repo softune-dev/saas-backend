@@ -132,6 +132,12 @@ class Site(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(Text, default="draft")
     theme: Mapped[dict] = mapped_column(JSONB, default=dict)
     business: Mapped[dict] = mapped_column(JSONB, default=dict)
+    # Dedicated About Us page content — {heading, image, paragraphs: str[]}.
+    # Deliberately separate from theme.tagline (short strapline shown site-
+    # wide) and business.description (one-line SEO/contact blurb): this is
+    # the merchant's actual longer-form story, editable from its own Site
+    # Settings section rather than overloading either of those.
+    about: Mapped[dict] = mapped_column(JSONB, default=dict)
     seo: Mapped[dict] = mapped_column(JSONB, default=dict)
     shipping: Mapped[dict] = mapped_column(JSONB, default=dict)
     faqs: Mapped[list] = mapped_column(JSONB, default=list)

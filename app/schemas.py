@@ -152,6 +152,7 @@ class SiteUpdate(BaseModel):
     custom_domain: str | None = None
     theme: dict[str, Any] | None = None
     business: dict[str, Any] | None = None
+    about: dict[str, Any] | None = None
     seo: dict[str, Any] | None = None
     shipping: dict[str, Any] | None = None
     faqs: list[dict[str, Any]] | None = None
@@ -169,6 +170,7 @@ class SiteOut(ORMModel):
     status: str
     theme: dict
     business: dict
+    about: dict
     seo: dict
     shipping: dict
     faqs: list
