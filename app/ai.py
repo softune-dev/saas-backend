@@ -21,6 +21,7 @@ import json
 import logging
 import re
 import uuid
+from datetime import date
 
 import httpx
 from fastapi import HTTPException, status
@@ -30,6 +31,30 @@ from app import ai_tools, cache
 from app.config import settings
 
 log = logging.getLogger(__name__)
+
+# Daily AI request cap per tenant plan. NOT finalized pricing — deliberately
+# just a dict, not a database column or migration, so it's a one-line change
+# whenever the real plan lineup settles. 0 means no AI access at all (the
+# Starter tier, by design — see the pricing conversation this mirrors).
+# "free" is what every tenant actually has today (no plan-selection flow
+# exists yet); mapped to the same allowance as Growth rather than 0 so
+# today's real usage isn't cut off by a business decision that hasn't
+# shipped yet. Any plan value not listed falls back to DEFAULT_AI_DAILY_CAP.
+PLAN_AI_DAILY_CAP: dict[str, int] = {
+    "starter": 0,
+    "growth": 80,
+    "business": 250,
+    "free": 80,
+}
+DEFAULT_AI_DAILY_CAP = 80
+
+
+def _usage_key(tenant_id: str) -> str:
+    return f"ai:suggestions:{tenant_id}:{date.today().isoformat()}"
+
+
+def plan_cap(plan: str) -> int:
+    return PLAN_AI_DAILY_CAP.get(plan, DEFAULT_AI_DAILY_CAP)
 
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
@@ -125,27 +150,52 @@ def _ensure_configured() -> None:
         )
 
 
-async def _check_rate_limit(tenant_id: str) -> None:
-    """Simple per-tenant-per-day counter in Redis — the same cache client
-    every other Redis use in this app already shares. Degrades open (per
-    cache.py's own philosophy): if Redis is down, the AI feature still works
-    rather than failing on an unrelated outage.
+async def _check_ai_access(tenant_id: str, plan: str) -> None:
+    """Real per-tenant-per-day counter in Redis — the same cache client
+    every other Redis use in this app already shares. Degrades open on a
+    Redis outage (per cache.py's own philosophy) for the COUNTING part —
+    an AI feature failing because caching is briefly down would be a worse
+    experience than one extra request slipping through. The plan check
+    itself never degrades open: a 0-cap plan is a real "not included in
+    your plan" answer, not something a Redis blip should ever bypass.
     """
-    key = f"ai:suggestions:{tenant_id}:{__import__('datetime').date.today().isoformat()}"
+    cap = plan_cap(plan)
+    if cap <= 0:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "AI features aren't included in your current plan. Upgrade to use the AI assistant.",
+        )
+
+    key = _usage_key(tenant_id)
     try:
         client = cache.client()
         count = await client.incr(key)
         if count == 1:
             await client.expire(key, 60 * 60 * 25)  # a little over a day
-        if count > settings.ai_suggestions_per_tenant_per_day:
+        if count > cap:
             raise HTTPException(
                 status.HTTP_429_TOO_MANY_REQUESTS,
-                "Daily AI suggestion limit reached for this site. Try again tomorrow.",
+                f"Daily AI limit reached ({cap}/day). Try again tomorrow.",
             )
     except HTTPException:
         raise
-    except Exception as exc:  # noqa: BLE001 - rate limiting must never block real use
-        log.warning("AI rate limit check failed, allowing request: %s", exc)
+    except Exception as exc:  # noqa: BLE001 - counting must never block real use
+        log.warning("AI usage counter failed, allowing request: %s", exc)
+
+
+async def get_usage(tenant_id: str, plan: str) -> dict:
+    """Read-only peek at today's count — does NOT increment. Powers the
+    dashboard header's credits display; must never itself consume a
+    request just by being looked at.
+    """
+    cap = plan_cap(plan)
+    used = 0
+    try:
+        raw = await cache.client().get(_usage_key(tenant_id))
+        used = int(raw) if raw else 0
+    except Exception as exc:  # noqa: BLE001 - a display glitch, not a hard failure
+        log.warning("AI usage lookup failed: %s", exc)
+    return {"used": used, "limit": cap, "remaining": max(0, cap - used)}
 
 
 def _validate_patch(raw: dict) -> dict:
@@ -163,7 +213,7 @@ def _validate_patch(raw: dict) -> dict:
 
 
 async def suggest_theme_patch(
-    prompt: str, current_settings: dict, tenant_id: str
+    prompt: str, current_settings: dict, tenant_id: str, plan: str
 ) -> dict:
     """Returns a validated patch — a subset of ALLOWED_FIELDS, ready to hand
     straight to the dashboard's existing onChange(patch). Never raises for a
@@ -171,7 +221,7 @@ async def suggest_theme_patch(
     as "the AI had nothing useful to suggest".
     """
     _ensure_configured()
-    await _check_rate_limit(tenant_id)
+    await _check_ai_access(tenant_id, plan)
 
     # Only forward the fields the AI is allowed to touch, even as *context* —
     # keeps the prompt small (cheaper) and means nothing else in the site's
@@ -242,6 +292,77 @@ guess or invent a figure, an address, a phone number, or anything else you
 could instead look up. If a tool returns an error (e.g. an order number that
 doesn't exist, or no site set up yet), say so plainly instead of making
 something up.
+
+PLATFORM KNOWLEDGE — what Softune actually has today, so you can answer "how
+do I..." and "what is..." questions accurately instead of generically. Every
+claim below is something real and live; anything marked "not live yet" is
+honest about not being built — never imply it works if it's marked that way.
+
+- **Domains.** Every site gets a free `{subdomain}.softune.xyz` address the
+  moment it's published — no setup needed. A merchant can also connect their
+  own domain from Site Settings → Domains: enter it, save, then add ONE DNS
+  record at whichever registrar they bought it from (a CNAME to
+  `cname.vercel-dns.com` for a subdomain like shop.theirdomain.com, or an A
+  record to `216.198.79.1` for a root domain like theirdomain.com — shown in
+  the dashboard's own "How to connect a domain" guide, don't just recite it
+  from memory if they can see it there). SSL is issued automatically once
+  DNS points correctly, usually within minutes, sometimes up to 24 hours.
+  Both the free subdomain and a connected custom domain work at the same
+  time — connecting a custom domain never removes the free one. If a domain
+  was ever used with Vercel before (an old site, an agency's build), it may
+  need an extra one-time ownership-verification step — if a merchant's
+  domain shows as not connecting after DNS looks right and a day has
+  passed, tell them to contact support rather than guessing at a fix.
+
+- **SEO**, all set from Site Settings → SEO: title suffix (appended to every
+  page's title), meta description, keywords, OG title/description/image
+  (what a shared link's preview card shows), favicon, an indexing
+  allow/hide toggle (hide = noindex, keeps a still-being-built site out of
+  Google), sitemap on/off, and fields for Google Analytics, Google Search
+  Console, and Facebook Pixel. Real, useful advice you can give: fill in a
+  meta description with what the store actually sells (not a generic
+  sentence), set a real OG image so shared links look good on
+  WhatsApp/Facebook, keep indexing hidden until the store has real products
+  and is ready to be found, and connect Search Console once live so Google
+  actually indexes it. Page-level SEO (set per-page) always overrides the
+  site-wide defaults above, so a merchant only needs to set something once
+  at the site level and override it per page where it actually differs.
+
+- **Fraud protection**, from Settings → Fraud Protection: a merchant-
+  maintained blocklist (phone numbers that can never place an order again)
+  plus three checkout-time rules — hold a first-time high-value order for
+  manual review, flag a burst of orders from the same phone number in a
+  short window, and block blocklisted numbers outright at checkout (a
+  rejected checkout, not just a dashboard warning). These evaluate only the
+  CURRENT order, no order history needed — meaningful for a brand-new store
+  with no history yet. There's no AI-driven "risk score" — be honest that
+  it doesn't exist if asked, rather than implying otherwise.
+
+- **Payments.** Cash on Delivery and Manual (customer sends money to the
+  merchant's own bKash/Nagad number, types the transaction ID at checkout,
+  merchant verifies it themselves against the order) are live today. Real
+  automatic payment gateway checkout (bKash/Nagad/SSLCommerz merchant
+  accounts with automatic confirmation) is NOT live yet — say so plainly if
+  asked, don't imply it works.
+
+- **Couriers**, from the Courier page: Steadfast has a real, live connection
+  (the merchant's API key is verified against Steadfast's own API when they
+  connect it). Pathao and RedX are not live yet.
+
+- **Media library.** Every image a merchant has ever uploaded (product
+  photos, category banners, theme images) can be reused anywhere an image
+  field appears — clicking any "Add image" now offers "Upload from device"
+  or "Choose from Media" instead of only ever uploading a new file.
+
+- **Notifications.** A bell icon shows new-order and blocked-checkout
+  alerts in real time, with an optional browser push notification (works
+  even with the dashboard tab closed) a merchant can turn on themselves.
+
+- **AI usage itself.** Each plan has a daily cap on AI requests (this chat
+  and the theme editor's "Ask AI" box share the same daily count), shown as
+  a credits count in the dashboard header. If a merchant asks how many they
+  have left or why they got an "AI limit reached" message, that's a real
+  daily counter tied to their plan, not a bug — it resets the next day.
 
 Most requests to change something, you cannot do directly — no tool here
 writes data. For those, point the merchant to the right dashboard page (or,
@@ -349,7 +470,7 @@ def _extract_action(text: str) -> tuple[str, dict | None]:
 
 
 async def chat_reply(
-    message: str, history: list[dict], tenant_id: str, db: AsyncSession
+    message: str, history: list[dict], tenant_id: str, db: AsyncSession, plan: str
 ) -> tuple[str, list[str], dict | None]:
     """Conversational reply for the general AI chat sidebar. Tenant-scoped
     business data comes in only through app/ai_tools.py's read-only,
@@ -363,7 +484,7 @@ async def chat_reply(
     caller never executes it, only shows it as a confirm card.
     """
     _ensure_configured()
-    await _check_rate_limit(tenant_id)
+    await _check_ai_access(tenant_id, plan)
 
     tenant_uuid = uuid.UUID(tenant_id)
     tools_used: list[str] = []

@@ -12,11 +12,12 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import ai, ai_actions, crud
 from app.db import get_db
-from app.models import Site
+from app.models import Site, Tenant
 from app.security import CurrentUser
 
 router = APIRouter(prefix="/sites/{site_id}/ai", tags=["ai"])
@@ -28,7 +29,23 @@ chat_router = APIRouter(prefix="/ai/chat", tags=["ai"])
 # app/ai_actions.py's module docstring for why these are separate requests
 # from the chat call itself, gated on the merchant's own click.
 actions_router = APIRouter(prefix="/ai/actions", tags=["ai"])
+# Usage/credits display — its own router since, like chat, it's tenant-wide,
+# not scoped to one site.
+usage_router = APIRouter(prefix="/ai", tags=["ai"])
 DB = Annotated[AsyncSession, Depends(get_db)]
+
+
+async def _tenant_plan(db: AsyncSession, tenant_id: uuid.UUID) -> str:
+    """Every AI call needs this to know the daily cap — see
+    app/ai.py's PLAN_AI_DAILY_CAP. Not scoped through crud.get_scoped since
+    a tenant looking up its OWN plan isn't an ownership check the way
+    looking up a site/product/order is; there's nothing to leak by a
+    tenant reading its own plan field.
+    """
+    tenant = (
+        await db.execute(select(Tenant).where(Tenant.id == tenant_id))
+    ).scalar_one()
+    return tenant.plan
 
 
 class AISuggestIn(BaseModel):
@@ -47,8 +64,9 @@ async def suggest(
     # "current settings" blob) is what keeps this tenant-isolated: the
     # context handed to Gemini is this tenant's row, full stop.
     site = await crud.get_scoped(db, Site, user.tenant_id, site_id)
+    plan = await _tenant_plan(db, user.tenant_id)
     patch = await ai.suggest_theme_patch(
-        payload.prompt, site.theme or {}, str(user.tenant_id)
+        payload.prompt, site.theme or {}, str(user.tenant_id), plan
     )
     return AISuggestOut(patch=patch)
 
@@ -71,13 +89,31 @@ class ChatOut(BaseModel):
 
 @chat_router.post("", response_model=ChatOut)
 async def chat(payload: ChatIn, user: CurrentUser, db: DB) -> ChatOut:
+    plan = await _tenant_plan(db, user.tenant_id)
     reply, tools_used, pending_action = await ai.chat_reply(
         payload.message,
         [t.model_dump() for t in payload.history],
         str(user.tenant_id),
         db,
+        plan,
     )
     return ChatOut(reply=reply, tools_used=tools_used, pending_action=pending_action)
+
+
+class AIUsageOut(BaseModel):
+    used: int
+    limit: int
+    remaining: int
+
+
+@usage_router.get("/usage", response_model=AIUsageOut)
+async def get_ai_usage(user: CurrentUser, db: DB) -> AIUsageOut:
+    """Powers the dashboard header's credits display — a read-only peek at
+    today's count, never increments it. See app/ai.py's get_usage.
+    """
+    plan = await _tenant_plan(db, user.tenant_id)
+    usage = await ai.get_usage(str(user.tenant_id), plan)
+    return AIUsageOut(**usage)
 
 
 class SetCategoriesIn(BaseModel):
