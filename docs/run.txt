@@ -1,0 +1,20 @@
+uvicorn app.main:app --reload
+python -m app.worker
+
+cd dashboard
+
+cd templates/aurora
+cd templates/bazaar
+npx next dev -p 3050
+npx next dev -p 3052
+
+docker compose up -d
+
+aurora-owner@softune.app
+OMj52NyU6oEvyb
+
+bazaar-owner@softune.app
+38tj64sikrbK5e
+
+netstat -ano | findstr :PORT
+taskkill /F /PID {PORT}

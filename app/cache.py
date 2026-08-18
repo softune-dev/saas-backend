@@ -1,0 +1,109 @@
+"""Redis cache — fronts the public site-config read path.
+
+WHY THIS EXISTS: every visitor to every customer site needs that site's config.
+That is the highest-volume query in the system by orders of magnitude, and the
+answer changes only when the owner saves an edit. Perfect cache shape:
+overwhelmingly read, rarely written, and we know exactly when it changes.
+
+Strategy is write-through invalidation, not timed expiry alone: a save deletes
+the key immediately, so edits appear instantly rather than "within 5 minutes".
+The TTL is only a safety net for keys we somehow fail to invalidate.
+
+DEGRADES GRACEFULLY: if Redis is down, every helper here logs and returns as if
+it were a cache miss. The site gets slower, not broken. Never let a cache outage
+become an outage.
+"""
+
+import json
+import logging
+
+import redis.asyncio as redis
+
+from app.config import settings
+
+log = logging.getLogger(__name__)
+
+_pool: redis.Redis | None = None
+
+
+def client() -> redis.Redis:
+    global _pool
+    if _pool is None:
+        _pool = redis.from_url(
+            settings.redis_url, decode_responses=True,
+            socket_connect_timeout=2, socket_timeout=2,
+        )
+    return _pool
+
+
+async def close() -> None:
+    global _pool
+    if _pool is not None:
+        await _pool.aclose()
+        _pool = None
+
+
+def site_key(host: str) -> str:
+    """Cache key for one site's rendered config, keyed by hostname."""
+    return f"site:{host.lower()}"
+
+
+async def get_json(key: str) -> dict | None:
+    if settings.cache_ttl_seconds <= 0:
+        return None
+    try:
+        raw = await client().get(key)
+        return json.loads(raw) if raw else None
+    except Exception as exc:  # noqa: BLE001 - cache must never break a request
+        log.warning("cache read failed for %s: %s", key, exc)
+        return None
+
+
+async def set_json(key: str, value: dict, ttl: int | None = None) -> None:
+    if settings.cache_ttl_seconds <= 0:
+        return
+    try:
+        await client().set(
+            key, json.dumps(value, default=str),
+            ex=ttl or settings.cache_ttl_seconds,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("cache write failed for %s: %s", key, exc)
+
+
+async def drop(*keys: str) -> None:
+    if not keys:
+        return
+    try:
+        await client().delete(*keys)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("cache delete failed: %s", exc)
+
+
+async def drop_prefix(prefix: str) -> None:
+    """Delete every key under a prefix.
+
+    Uses SCAN, not KEYS. `KEYS *` blocks the entire Redis server while it walks
+    the keyspace — fine with 10 keys, a production incident with 10 million.
+    SCAN walks in small batches and lets other commands interleave.
+    """
+    try:
+        c = client()
+        async for key in c.scan_iter(match=f"{prefix}*", count=100):
+            await c.delete(key)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("cache prefix delete failed for %s: %s", prefix, exc)
+
+
+async def invalidate_site(subdomain: str, custom_domain: str | None = None) -> None:
+    """Call after ANY write that changes what a visitor would see.
+
+    A site is reachable under more than one hostname (its subdomain and possibly
+    a custom domain), so all of them must be dropped together — otherwise the
+    edit appears on one address and not the other, which is a maddening bug to
+    chase.
+    """
+    keys = [site_key(f"{subdomain}.{settings.site_base_domain}"), site_key(subdomain)]
+    if custom_domain:
+        keys.append(site_key(custom_domain))
+    await drop(*keys)

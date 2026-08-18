@@ -1,0 +1,40 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dashboard",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["next", "dev"],
+      "cwd": "dashboard",
+      "port": 3000
+    },
+    {
+      "name": "aurora",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["next", "dev", "-p", "3050"],
+      "cwd": "templates/aurora",
+      "port": 3050
+    },
+    {
+      "name": "sweets",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["next", "dev", "-p", "3051"],
+      "cwd": "templates/sweets",
+      "port": 3051
+    },
+    {
+      "name": "bazaar",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["next", "dev", "-p", "3052"],
+      "cwd": "templates/bazaar",
+      "port": 3052
+    },
+    {
+      "name": "landing",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["next", "dev", "-p", "3060"],
+      "cwd": "landing",
+      "port": 3060
+    }
+  ]
+}

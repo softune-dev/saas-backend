@@ -1,0 +1,19 @@
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+# Broad on purpose: catches .env, .env.local, .env.production, and stray
+# backup copies like ".env copy" — a real secrets leak into git history is
+# not something a narrower pattern is worth risking.
+.env*
+server.log
+*.log
+.DS_Store
+
+# This repo's root is the backend. Everything below is its own project with
+# its own git history/repo — never tracked here, each has its own
+# .gitignore for when it's pushed on its own.
+/dashboard
+/templates
+/landing
+/superadmin

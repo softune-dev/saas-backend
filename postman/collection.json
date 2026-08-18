@@ -1,0 +1,603 @@
+{
+  "info": {
+    "name": "SaaS Site Builder API",
+    "description": "Import this, then run the requests in order from top to bottom. Scripts automatically capture the access token, site id, page id and product id into collection variables, so you never copy-paste an id by hand.\n\nSetup: none. `base_url` defaults to http://localhost:8000.\n\nStart the server first:\n    uvicorn app.main:app --reload",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8000" },
+    { "key": "access_token", "value": "" },
+    { "key": "refresh_token", "value": "" },
+    { "key": "template_id", "value": "" },
+    { "key": "site_id", "value": "" },
+    { "key": "subdomain", "value": "" },
+    { "key": "page_id", "value": "" },
+    { "key": "category_id", "value": "" },
+    { "key": "product_id", "value": "" },
+    { "key": "order_id", "value": "" }
+  ],
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{access_token}}", "type": "string" }]
+  },
+  "item": [
+    {
+      "name": "0. Health",
+      "item": [
+        {
+          "name": "GET /health",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "url": { "raw": "{{base_url}}/health", "host": ["{{base_url}}"], "path": ["health"] },
+            "description": "Run this FIRST. Tells you whether database, redis and rabbitmq are reachable."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('database is connected', () => pm.expect(b.database).to.eql('ok'));",
+                  "if (b.redis !== 'ok') console.log('Redis down - caching disabled, not fatal');",
+                  "if (b.rabbitmq !== 'ok') console.log('RabbitMQ down - jobs skipped, not fatal');"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "1. Auth",
+      "item": [
+        {
+          "name": "POST /auth/register",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"owner+{{$randomInt}}@example.com\",\n  \"password\": \"super-secret-123\",\n  \"full_name\": \"Site Owner\",\n  \"workspace_name\": \"My Agency\"\n}"
+            },
+            "url": { "raw": "{{base_url}}/auth/register", "host": ["{{base_url}}"], "path": ["auth", "register"] },
+            "description": "Creates a workspace (tenant) AND its first user, then logs you in. The email uses {{$randomInt}} so you can re-run this without a 409."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "const b = pm.response.json();",
+                  "pm.collectionVariables.set('access_token', b.access_token);",
+                  "pm.collectionVariables.set('refresh_token', b.refresh_token);",
+                  "console.log('Token saved. All later requests are now authorised.');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /auth/login",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"CHANGE-ME@example.com\",\n  \"password\": \"super-secret-123\"\n}"
+            },
+            "url": { "raw": "{{base_url}}/auth/login", "host": ["{{base_url}}"], "path": ["auth", "login"] },
+            "description": "Put a real email here (copy one from a register response). Wrong email and wrong password both return the SAME message on purpose - see app/api/auth.py."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  const b = pm.response.json();",
+                  "  pm.collectionVariables.set('access_token', b.access_token);",
+                  "  pm.collectionVariables.set('refresh_token', b.refresh_token);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /auth/refresh",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"refresh_token\": \"{{refresh_token}}\"\n}" },
+            "url": { "raw": "{{base_url}}/auth/refresh", "host": ["{{base_url}}"], "path": ["auth", "refresh"] },
+            "description": "Swap a refresh token for a fresh pair. Use when an access token expires (30 min default)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  const b = pm.response.json();",
+                  "  pm.collectionVariables.set('access_token', b.access_token);",
+                  "  pm.collectionVariables.set('refresh_token', b.refresh_token);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /auth/me",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{base_url}}/auth/me", "host": ["{{base_url}}"], "path": ["auth", "me"] },
+            "description": "Who am I? Useful when a 404 confuses you - it confirms which tenant your token belongs to."
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Templates & Blocks",
+      "item": [
+        {
+          "name": "GET /templates",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "url": { "raw": "{{base_url}}/templates", "host": ["{{base_url}}"], "path": ["templates"] },
+            "description": "The catalogue. Saves the first template's id so the next request works with no editing."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const list = pm.response.json();",
+                  "pm.test('seed data exists', () => pm.expect(list.length).to.be.above(0));",
+                  "if (list.length) {",
+                  "  pm.collectionVariables.set('template_id', list[0].id);",
+                  "  console.log('Using template: ' + list[0].key);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /blocks",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "url": { "raw": "{{base_url}}/blocks", "host": ["{{base_url}}"], "path": ["blocks"] },
+            "description": "THE BLOCK REGISTRY. The admin panel calls this once and generates every edit form from the response. Look at the `fields` array on Hero - that IS the form spec."
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Sites",
+      "item": [
+        {
+          "name": "POST /sites",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"template_id\": \"{{template_id}}\",\n  \"name\": \"My Cafe\",\n  \"subdomain\": \"mycafe{{$randomInt}}\"\n}"
+            },
+            "url": { "raw": "{{base_url}}/sites", "host": ["{{base_url}}"], "path": ["sites"] },
+            "description": "Provision a site. The template's default theme and pages are COPIED in, so the site arrives already populated. It starts as a draft with noindex set."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "const b = pm.response.json();",
+                  "pm.collectionVariables.set('site_id', b.id);",
+                  "pm.collectionVariables.set('subdomain', b.subdomain);",
+                  "pm.test('starts as draft', () => pm.expect(b.status).to.eql('draft'));",
+                  "pm.test('draft is noindex', () => pm.expect(b.seo.noindex).to.be.true);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /sites",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/sites?limit=50&offset=0",
+              "host": ["{{base_url}}"], "path": ["sites"],
+              "query": [{ "key": "limit", "value": "50" }, { "key": "offset", "value": "0" }]
+            },
+            "description": "Only YOUR tenant's sites. Every list endpoint returns the same {items, total, limit, offset} envelope."
+          }
+        },
+        {
+          "name": "GET /sites/{id}",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{base_url}}/sites/{{site_id}}", "host": ["{{base_url}}"], "path": ["sites", "{{site_id}}"] }
+          }
+        },
+        {
+          "name": "PATCH /sites/{id}  (theme + business details)",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"My Cafe (renamed)\",\n  \"theme\": {\n    \"colors\": { \"primary\": \"#8B4513\", \"accent\": \"#D2A24C\", \"bg\": \"#FFFDF8\", \"text\": \"#2B2118\" },\n    \"fonts\": { \"heading\": \"Playfair Display\", \"body\": \"Inter\" },\n    \"radius\": \"8px\"\n  },\n  \"business\": {\n    \"name\": \"My Cafe Ltd\",\n    \"type\": \"Restaurant\",\n    \"description\": \"Wood-fired plates in the heart of downtown.\",\n    \"phone\": \"+1 555 0100\",\n    \"email\": \"hello@mycafe.test\",\n    \"address\": {\n      \"street\": \"1 Main Street\",\n      \"city\": \"Springfield\",\n      \"region\": \"IL\",\n      \"postal_code\": \"62701\",\n      \"country\": \"US\"\n    },\n    \"opening_hours\": [\"Mo-Fr 08:00-18:00\", \"Sa 09:00-14:00\"],\n    \"socials\": { \"instagram\": \"https://instagram.com/mycafe\" }\n  },\n  \"seo\": {\n    \"title_suffix\": \"My Cafe\",\n    \"meta_description\": \"Wood-fired plates in the heart of downtown Springfield.\"\n  }\n}"
+            },
+            "url": { "raw": "{{base_url}}/sites/{{site_id}}", "host": ["{{base_url}}"], "path": ["sites", "{{site_id}}"] },
+            "description": "PATCH only changes the fields you send. `business` is the important one: it auto-generates JSON-LD structured data, so the customer never types their address twice."
+          }
+        },
+        {
+          "name": "POST /sites/{id}/publish",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{base_url}}/sites/{{site_id}}/publish", "host": ["{{base_url}}"], "path": ["sites", "{{site_id}}", "publish"] },
+            "description": "Publishes every page, clears noindex, drops the Redis cache and queues a revalidation job. Start the worker (python -m app.worker) to watch the job run."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('now published', () => pm.expect(b.status).to.eql('published'));",
+                  "pm.test('indexable', () => pm.expect(b.seo.noindex).to.be.false);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /sites/{id}/unpublish",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{base_url}}/sites/{{site_id}}/unpublish", "host": ["{{base_url}}"], "path": ["sites", "{{site_id}}", "unpublish"] }
+          }
+        },
+        {
+          "name": "DELETE /sites/{id}",
+          "request": {
+            "method": "DELETE",
+            "url": { "raw": "{{base_url}}/sites/{{site_id}}", "host": ["{{base_url}}"], "path": ["sites", "{{site_id}}"] },
+            "description": "Cascades: pages, products, categories and orders all go with it. Run this LAST."
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Pages (the editor)",
+      "item": [
+        {
+          "name": "GET /sites/{id}/pages",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{base_url}}/sites/{{site_id}}/pages", "host": ["{{base_url}}"], "path": ["sites", "{{site_id}}", "pages"] },
+            "description": "The pages copied from the template. Saves the first page id for the PATCH below."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const list = pm.response.json();",
+                  "if (list.length) pm.collectionVariables.set('page_id', list[0].id);",
+                  "pm.test('has default content', () => pm.expect(list.length).to.be.above(0));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /sites/{id}/pages",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"slug\": \"about\",\n  \"title\": \"About Us\",\n  \"sort_order\": 1,\n  \"blocks\": [\n    {\n      \"type\": \"Hero\",\n      \"data\": {\n        \"heading\": \"Our story\",\n        \"subheading\": \"Family-run since 1998.\",\n        \"align\": \"center\",\n        \"cta_text\": \"See the menu\",\n        \"cta_link\": \"/\"\n      }\n    },\n    {\n      \"type\": \"About\",\n      \"data\": {\n        \"heading\": \"How we started\",\n        \"body\": \"Everything made from scratch, every morning.\"\n      }\n    },\n    {\n      \"type\": \"FAQ\",\n      \"data\": {\n        \"heading\": \"Common questions\",\n        \"items\": [\n          { \"question\": \"Do you take bookings?\", \"answer\": \"Yes, by phone.\" },\n          { \"question\": \"Is there parking?\", \"answer\": \"Street parking out front.\" }\n        ]\n      }\n    }\n  ],\n  \"seo\": {\n    \"title\": \"About My Cafe\",\n    \"meta_description\": \"Family-run wood-fired kitchen in Springfield since 1998.\"\n  }\n}"
+            },
+            "url": { "raw": "{{base_url}}/sites/{{site_id}}/pages", "host": ["{{base_url}}"], "path": ["sites", "{{site_id}}", "pages"] },
+            "description": "Note `slug: \"\"` would be the homepage. Blocks are validated against the registry - try changing \"Hero\" to \"Heroo\" to see the 422."
+          }
+        },
+        {
+          "name": "PATCH /sites/{id}/pages/{pid}  <- the Save button",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"blocks\": [\n    {\n      \"type\": \"Hero\",\n      \"data\": {\n        \"heading\": \"Edited from Postman\",\n        \"subheading\": \"No redeploy needed.\",\n        \"align\": \"left\",\n        \"cta_text\": \"Book a table\",\n        \"cta_link\": \"#contact\"\n      }\n    }\n  ]\n}"
+            },
+            "url": { "raw": "{{base_url}}/sites/{{site_id}}/pages/{{page_id}}", "host": ["{{base_url}}"], "path": ["sites", "{{site_id}}", "pages", "{{page_id}}"] },
+            "description": "This is exactly what the admin panel's Save button calls. After this, re-run 'GET /public/site/{host}' and the new heading is there."
+          }
+        },
+        {
+          "name": "PATCH page - INVALID block (expect 422)",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"blocks\": [\n    { \"type\": \"Hero\", \"data\": { \"subheading\": \"no heading provided\" } }\n  ]\n}"
+            },
+            "url": { "raw": "{{base_url}}/sites/{{site_id}}/pages/{{page_id}}", "host": ["{{base_url}}"], "path": ["sites", "{{site_id}}", "pages", "{{page_id}}"] },
+            "description": "Deliberately broken: Hero.heading is required. Expect 422 with a readable message. This is the registry protecting the JSONB column."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('rejected with 422', () => pm.response.to.have.status(422));",
+                  "console.log('Message: ' + pm.response.json().detail);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "DELETE /sites/{id}/pages/{pid}",
+          "request": {
+            "method": "DELETE",
+            "url": { "raw": "{{base_url}}/sites/{{site_id}}/pages/{{page_id}}", "host": ["{{base_url}}"], "path": ["sites", "{{site_id}}", "pages", "{{page_id}}"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Categories & Products",
+      "item": [
+        {
+          "name": "POST /sites/{id}/categories",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Hot Drinks\",\n  \"sort_order\": 0\n}" },
+            "url": { "raw": "{{base_url}}/sites/{{site_id}}/categories", "host": ["{{base_url}}"], "path": ["sites", "{{site_id}}", "categories"] },
+            "description": "Slug is auto-derived from the name (hot-drinks) when omitted."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 201) pm.collectionVariables.set('category_id', pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /sites/{id}/categories",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{base_url}}/sites/{{site_id}}/categories", "host": ["{{base_url}}"], "path": ["sites", "{{site_id}}", "categories"] }
+          }
+        },
+        {
+          "name": "POST /sites/{id}/products",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Flat White\",\n  \"sku\": \"FW-01\",\n  \"description\": \"Double shot, silky microfoam.\",\n  \"price_cents\": 450,\n  \"compare_at_cents\": 500,\n  \"currency\": \"USD\",\n  \"stock\": 20,\n  \"category_id\": \"{{category_id}}\",\n  \"images\": [{ \"url\": \"https://placehold.co/600x400\", \"alt\": \"Flat white\" }],\n  \"attributes\": { \"size\": \"8oz\", \"caffeine_mg\": 130 }\n}"
+            },
+            "url": { "raw": "{{base_url}}/sites/{{site_id}}/products", "host": ["{{base_url}}"], "path": ["sites", "{{site_id}}", "products"] },
+            "description": "price_cents = 450 means $4.50. Always integer cents, never decimals - see migrations/003_commerce.sql for why."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "if (pm.response.code === 201) pm.collectionVariables.set('product_id', pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /sites/{id}/products  (search + filter)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/sites/{{site_id}}/products?q=flat&active_only=true&limit=20&offset=0",
+              "host": ["{{base_url}}"], "path": ["sites", "{{site_id}}", "products"],
+              "query": [
+                { "key": "q", "value": "flat", "description": "substring search - uses the trigram GIN index" },
+                { "key": "active_only", "value": "true" },
+                { "key": "limit", "value": "20" },
+                { "key": "offset", "value": "0" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "PATCH /sites/{id}/products/{pid}",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"price_cents\": 495\n}" },
+            "url": { "raw": "{{base_url}}/sites/{{site_id}}/products/{{product_id}}", "host": ["{{base_url}}"], "path": ["sites", "{{site_id}}", "products", "{{product_id}}"] },
+            "description": "Only price changes. `stock` and everything else you didn't send stay as they were."
+          }
+        },
+        {
+          "name": "POST product - NEGATIVE price (expect 422)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Free Money\",\n  \"price_cents\": -100\n}" },
+            "url": { "raw": "{{base_url}}/sites/{{site_id}}/products", "host": ["{{base_url}}"], "path": ["sites", "{{site_id}}", "products"] },
+            "description": "Guarded in two places: Pydantic ge=0 gives this friendly 422, and a database CHECK is the backstop."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('rejected', () => pm.response.to.have.status(422));"] }
+            }
+          ]
+        },
+        {
+          "name": "DELETE /sites/{id}/products/{pid}",
+          "request": {
+            "method": "DELETE",
+            "url": { "raw": "{{base_url}}/sites/{{site_id}}/products/{{product_id}}", "host": ["{{base_url}}"], "path": ["sites", "{{site_id}}", "products", "{{product_id}}"] },
+            "description": "Past orders survive: order_items keeps name/sku/price snapshots and its FK is SET NULL."
+          }
+        }
+      ]
+    },
+    {
+      "name": "6. Orders",
+      "item": [
+        {
+          "name": "POST /sites/{id}/orders",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customer\": {\n    \"name\": \"Jane Buyer\",\n    \"email\": \"jane@example.com\",\n    \"phone\": \"+1 555 0199\",\n    \"address\": { \"street\": \"9 Oak Ave\", \"city\": \"Springfield\", \"country\": \"US\" }\n  },\n  \"items\": [\n    { \"product_id\": \"{{product_id}}\", \"quantity\": 2 }\n  ],\n  \"shipping_cents\": 500,\n  \"tax_cents\": 90,\n  \"notes\": \"Leave at reception\",\n  \"meta\": { \"source\": \"postman\" }\n}"
+            },
+            "url": { "raw": "{{base_url}}/sites/{{site_id}}/orders", "host": ["{{base_url}}"], "path": ["sites", "{{site_id}}", "orders"] },
+            "description": "NOTE: you send product ids and quantities ONLY. Prices come from the database. If the client could send a price, anyone could buy anything for one cent - the most common e-commerce vulnerability there is."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "const b = pm.response.json();",
+                  "if (b.id) pm.collectionVariables.set('order_id', b.id);",
+                  "console.log('Order ' + b.order_number + ' total ' + b.total_cents + ' cents');",
+                  "pm.test('has line item snapshots', () => pm.expect(b.items[0].name_snapshot).to.be.a('string'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST order - OVERSELL (expect 409)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"customer\": { \"email\": \"greedy@example.com\" },\n  \"items\": [\n    { \"product_id\": \"{{product_id}}\", \"quantity\": 9999 }\n  ]\n}" },
+            "url": { "raw": "{{base_url}}/sites/{{site_id}}/orders", "host": ["{{base_url}}"], "path": ["sites", "{{site_id}}", "orders"] },
+            "description": "Expect 409 with the remaining stock in the message. Nothing is deducted - the whole transaction rolls back."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('blocked', () => pm.response.to.have.status(409));", "console.log(pm.response.json().detail);"] }
+            }
+          ]
+        },
+        {
+          "name": "GET /sites/{id}/orders",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/sites/{{site_id}}/orders?limit=50&offset=0",
+              "host": ["{{base_url}}"], "path": ["sites", "{{site_id}}", "orders"],
+              "query": [
+                { "key": "limit", "value": "50" },
+                { "key": "offset", "value": "0" },
+                { "key": "status", "value": "pending", "disabled": true }
+              ]
+            },
+            "description": "Enable the `status` param to filter. Backed by the (site_id, status, created_at DESC) index."
+          }
+        },
+        {
+          "name": "PATCH /sites/{id}/orders/{oid}",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"status\": \"paid\",\n  \"notes\": \"Paid by card in person\"\n}" },
+            "url": { "raw": "{{base_url}}/sites/{{site_id}}/orders/{{order_id}}", "host": ["{{base_url}}"], "path": ["sites", "{{site_id}}", "orders", "{{order_id}}"] },
+            "description": "Only status and notes are editable. Try adding \"total_cents\": 1 - it is silently ignored, because an order is immutable history."
+          }
+        }
+      ]
+    },
+    {
+      "name": "7. Public (what Vercel calls)",
+      "item": [
+        {
+          "name": "GET /public/site/{host}",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "url": { "raw": "{{base_url}}/public/site/{{subdomain}}", "host": ["{{base_url}}"], "path": ["public", "site", "{{subdomain}}"] },
+            "description": "THE MOST IMPORTANT ENDPOINT. Everything a template needs: theme, nav, pages with blocks, resolved SEO, and JSON-LD.\n\nPublish the site first or this is a 404.\n\nRun it TWICE and compare the X-Response-Time-ms header - the second is served from Redis."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 404) { console.log('Publish the site first: POST /sites/{id}/publish'); }",
+                  "if (pm.response.code === 200) {",
+                  "  const b = pm.response.json();",
+                  "  console.log('Response time: ' + pm.response.headers.get('X-Response-Time-ms') + 'ms');",
+                  "  pm.test('has theme', () => pm.expect(b.site.theme).to.be.an('object'));",
+                  "  pm.test('has pages', () => pm.expect(b.pages.length).to.be.above(0));",
+                  "  pm.test('SEO is resolved server-side', () => pm.expect(b.pages[0].seo.canonical).to.include('https://'));",
+                  "  if (b.json_ld) console.log('JSON-LD type: ' + b.json_ld['@type']);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /public/site/{host}/sitemap.xml",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "url": { "raw": "{{base_url}}/public/site/{{subdomain}}/sitemap.xml", "host": ["{{base_url}}"], "path": ["public", "site", "{{subdomain}}", "sitemap.xml"] },
+            "description": "Returned as JSON, not XML: each template renders its own /sitemap.xml from this, because the URLs must be on the CUSTOMER's domain, not ours. noindex pages are excluded."
+          }
+        }
+      ]
+    }
+  ]
+}

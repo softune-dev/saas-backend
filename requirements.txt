@@ -1,0 +1,38 @@
+# ---- Web framework ----
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+
+# ---- Config ----
+pydantic==2.10.4
+pydantic-settings==2.7.0
+email-validator==2.2.0
+
+# ---- Database (Supabase Postgres over asyncpg) ----
+sqlalchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+
+# ---- Auth ----
+pyjwt==2.10.1
+bcrypt==4.2.1
+
+# ---- Cache + Queue (both run in Docker, locally) ----
+redis==5.2.1
+aio-pika==9.5.4
+
+# ---- HTTP client (used by worker to call revalidate hooks) ----
+httpx==0.28.1
+
+# ---- Media storage (per-site image uploads) ----
+cloudinary==1.41.0
+python-multipart==0.0.20
+pillow==12.3.0
+
+# ---- Courier credential encryption (Steadfast/Pathao/RedX connections) ----
+cryptography==43.0.3
+
+# ---- Web push (new-order browser notifications) ----
+pywebpush==2.0.3
+
+# ---- Tests ----
+pytest==8.3.4
+pytest-asyncio==0.25.0

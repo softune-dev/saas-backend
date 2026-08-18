@@ -1,0 +1,65 @@
+# Local infrastructure only. The API itself runs on your host (uvicorn), so you
+# can edit code and see it reload instantly. Docker holds the stateful pieces.
+#
+#   docker compose up -d          -> starts redis + rabbitmq
+#   docker compose ps             -> health check
+#   docker compose down           -> stop (keeps data volumes)
+#   docker compose down -v        -> stop and DELETE all cached/queued data
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: saas_redis
+    ports:
+      - "6379:6379"
+    # appendonly = survive a restart. Fine locally; real deployments tune this.
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    container_name: saas_rabbitmq
+    ports:
+      - "5672:5672"    # AMQP  - the app connects here
+      - "15672:15672"  # Web UI - open http://localhost:15672 (guest / guest)
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # OPTIONAL: only if you later want to drop Supabase and run Postgres locally.
+  # Not started by default. Enable with:  docker compose --profile local-db up -d
+  postgres:
+    image: postgres:17-alpine
+    container_name: saas_postgres
+    profiles: ["local-db"]
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: saas_app
+      POSTGRES_PASSWORD: localdevpassword
+      POSTGRES_DB: saas_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U saas_app -d saas_db"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  redis_data:
+  rabbitmq_data:
+  postgres_data:

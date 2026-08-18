@@ -1,0 +1,12 @@
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://localhost:20128",
+    "ANTHROPIC_AUTH_TOKEN": "omniroute",
+    "ANTHROPIC_MODEL": "without-claude",
+    "ANTHROPIC_SMALL_FAST_MODEL": "without-claude",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "without-claude",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "without-claude",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "without-claude",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+  }
+}
