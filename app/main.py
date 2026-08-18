@@ -8,7 +8,7 @@ import logging
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
@@ -86,6 +86,42 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def public_cors(request: Request, call_next):
+    """CORS_ORIGINS is a fixed allowlist for the dashboard's own known
+    origin(s) — right for authenticated endpoints, but wrong for /public/*.
+    Every merchant's storefront lives on a DIFFERENT domain we can't know in
+    advance (that's the whole point of custom/subdomains), so a fixed
+    allowlist would mean manually adding every future customer's domain
+    here just to let their own checkout work. /public/* is unauthenticated
+    and returns only public data, so reflecting whatever Origin asked is
+    safe — there's nothing origin-restriction would protect here that
+    CORSMiddleware's allow_origins already protects for every other route.
+
+    Runs as its own middleware, not a CORSMiddleware allow_origins entry,
+    because that setting applies to the WHOLE app — there's no per-route
+    option on a single CORSMiddleware instance.
+    """
+    if not request.url.path.startswith("/public/"):
+        return await call_next(request)
+
+    origin = request.headers.get("origin", "*")
+    if request.method == "OPTIONS":
+        return Response(
+            status_code=200,
+            headers={
+                "Access-Control-Allow-Origin": origin,
+                "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+                "Access-Control-Allow-Headers": "*",
+                "Access-Control-Max-Age": "600",
+            },
+        )
+    response = await call_next(request)
+    response.headers["Access-Control-Allow-Origin"] = origin
+    response.headers["Vary"] = "Origin"
+    return response
 
 
 @app.middleware("http")
