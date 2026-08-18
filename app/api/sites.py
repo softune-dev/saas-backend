@@ -150,6 +150,13 @@ async def update_site(
 
     if site.status == "published":
         await queue.publish(queue.JOB_REVALIDATE_SITE, {"site_id": str(site.id)})
+        if old_domain != site.custom_domain:
+            # A custom domain (or removing one, falling back to the
+            # subdomain) needs the same Vercel attach as publish_site does —
+            # see queue.JOB_ATTACH_DOMAIN and app/vercel.py. Only meaningful
+            # once the site is actually live; an unpublished site has
+            # nothing for a domain to point at yet.
+            await queue.publish(queue.JOB_ATTACH_DOMAIN, {"site_id": str(site.id)})
     return site
 
 
