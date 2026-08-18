@@ -31,9 +31,19 @@ _API_BASE = "https://api.vercel.com"
 
 
 async def add_domain_to_project(domain: str, project_id: str) -> bool:
-    """Attach `domain` to the given Vercel project. Returns True on success
-    (including "already attached to this project", which is idempotent —
-    the worker may retry this job)."""
+    """Attach `domain` to the given Vercel project. Returns True on success.
+
+    Re-adding a domain already attached to THIS project is a genuine no-op
+    success (200/201) — Vercel doesn't error on that. A 409
+    "domain_already_in_use" means something else entirely: the domain is
+    attached to a DIFFERENT project right now, a real conflict, not a
+    success. (Confirmed the hard way: this used to be treated as success
+    here, which masked a real failure — a domain still claimed by an old
+    project silently "succeeded" attaching to the new one while actually
+    doing nothing, and the merchant's site 404'd.) Only a caller who has
+    since freed the domain from whatever else held it should expect a retry
+    to succeed.
+    """
     if not settings.vercel_api_token or not project_id:
         log.info(
             "vercel: skipping domain attach for %s (token or project id not configured)",
@@ -53,12 +63,7 @@ async def add_domain_to_project(domain: str, project_id: str) -> bool:
         if response.status_code in (200, 201):
             log.info("vercel: attached %s to project %s", domain, project_id)
             return True
-        # Vercel returns 409 with a specific error code when the domain is
-        # already attached to THIS project — not a failure, just a no-op.
         body = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
-        if response.status_code == 409 and body.get("error", {}).get("code") == "domain_already_in_use":
-            log.info("vercel: %s already attached to project %s", domain, project_id)
-            return True
         log.warning(
             "vercel: failed to attach %s to project %s: %s %s",
             domain, project_id, response.status_code, body,
@@ -104,35 +109,52 @@ async def remove_domain_from_project(domain: str, project_id: str) -> bool:
         return False
 
 
-async def check_domain_connected(domain: str) -> bool | None:
-    """Is `domain`'s DNS actually pointed at Vercel right now?
+async def check_domain_connected(domain: str, project_id: str) -> bool | None:
+    """Is `domain` actually serving THIS site right now?
 
-    Calls Vercel's domain CONFIG check (v6/domains/{domain}/config), not the
-    project-domains endpoint add_domain_to_project uses — this one reports
-    the real-world DNS state (misconfigured or not) regardless of which
-    project the domain is attached to, which is what a merchant setting up
-    their own DNS actually needs to know: "is it working yet," not "is it
-    registered with Vercel."
+    Two things both have to be true, and checking only the first one is
+    exactly the bug that shipped initially: DNS can point at Vercel
+    generically (misconfigured=false) while the domain isn't attached to
+    THIS project at all — Vercel then serves a 404 DEPLOYMENT_NOT_FOUND
+    page instead of the site, which a DNS-only check reports as "Connected"
+    anyway. Confirmed this exact failure mode for real: a domain still
+    claimed by a different project passed the DNS check while 404ing in
+    the browser.
+
+    So this checks project attachment first (v9/projects/{id}/domains/{d}
+    — 404 there means not attached to THIS project, a real "not
+    connected", not a caching artifact) and DNS config second — both must
+    be positive to report true.
 
     Returns None (not False) when the check itself couldn't be answered —
     token missing, network error, etc. — so the caller can show "unknown"
     rather than a false "not connected."
     """
-    if not settings.vercel_api_token:
+    if not settings.vercel_api_token or not project_id:
         return None
 
     params = {"teamId": settings.vercel_team_id} if settings.vercel_team_id else {}
+    headers = {"Authorization": f"Bearer {settings.vercel_api_token}"}
     try:
         async with httpx.AsyncClient(timeout=10) as http:
-            response = await http.get(
+            attachment = await http.get(
+                f"{_API_BASE}/v9/projects/{project_id}/domains/{domain}",
+                params=params,
+                headers=headers,
+            )
+            if attachment.status_code == 404:
+                return False
+            if attachment.status_code != 200:
+                return None
+
+            config = await http.get(
                 f"{_API_BASE}/v6/domains/{domain}/config",
                 params=params,
-                headers={"Authorization": f"Bearer {settings.vercel_api_token}"},
+                headers=headers,
             )
-        if response.status_code != 200:
+        if config.status_code != 200:
             return None
-        body = response.json()
-        return not bool(body.get("misconfigured", True))
+        return not bool(config.json().get("misconfigured", True))
     except httpx.HTTPError as exc:
-        log.warning("vercel: domain config check failed for %s: %s", domain, exc)
+        log.warning("vercel: domain connection check failed for %s: %s", domain, exc)
         return None

@@ -124,8 +124,9 @@ async def get_site(site_id: uuid.UUID, user: CurrentUser, db: DB) -> Site:
 
 @router.get("/sites/{site_id}/domain-status", response_model=DomainStatusOut)
 async def get_domain_status(site_id: uuid.UUID, user: CurrentUser, db: DB) -> DomainStatusOut:
-    """Real DNS check against Vercel — is site.custom_domain actually
-    pointed at Vercel right now? See vercel.check_domain_connected.
+    """Real check against Vercel — is site.custom_domain actually attached
+    to THIS site's project AND correctly pointed at Vercel? See
+    vercel.check_domain_connected for why both have to be checked.
 
     Separate endpoint, not folded into SiteOut, because it's a live network
     call to Vercel on every request — fine on-demand when the merchant is
@@ -134,7 +135,9 @@ async def get_domain_status(site_id: uuid.UUID, user: CurrentUser, db: DB) -> Do
     site = await crud.get_scoped(db, Site, user.tenant_id, site_id)
     if not site.custom_domain:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "No custom domain set on this site.")
-    connected = await vercel.check_domain_connected(site.custom_domain)
+    connected = await vercel.check_domain_connected(
+        site.custom_domain, site.template.vercel_project_id or ""
+    )
     return DomainStatusOut(domain=site.custom_domain, connected=connected)
 
 
