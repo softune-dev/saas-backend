@@ -17,6 +17,7 @@ crud.get_scoped(tenant_id, site_id) before this module ever runs — the
 anything this module trusts on its own.
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -59,6 +60,29 @@ def plan_cap(plan: str) -> int:
     return PLAN_AI_DAILY_CAP.get(plan, DEFAULT_AI_DAILY_CAP)
 
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+
+# Gemini returns a real, well-formed 503 ("This model is currently
+# experiencing high demand ... usually temporary") under normal free-tier
+# load — not a bug on our end, just the model being busy for a moment. A
+# short retry absorbs that instead of failing the merchant's request on the
+# first hiccup; 429 (rate limit) gets the same treatment for the same reason.
+_RETRY_STATUS_CODES = {429, 503}
+_RETRY_DELAYS_SECONDS = [1.0, 3.0]  # two retries: ~1s then ~3s after that
+
+
+async def _post_gemini(
+    http_client: httpx.AsyncClient, url: str, *, params: dict, json: dict
+) -> httpx.Response:
+    """POST to Gemini with a short retry on transient overload/rate-limit
+    responses. Returns whatever the last attempt got — callers still check
+    res.status_code themselves, this only saves them from a first-touch 503."""
+    res = await http_client.post(url, params=params, json=json)
+    for delay in _RETRY_DELAYS_SECONDS:
+        if res.status_code not in _RETRY_STATUS_CODES:
+            break
+        await asyncio.sleep(delay)
+        res = await http_client.post(url, params=params, json=json)
+    return res
 
 # Every field the AI is allowed to suggest, and how each value is validated.
 # Anything the model returns outside this dict — a field it invented, or a
@@ -253,8 +277,8 @@ async def suggest_theme_patch(
     url = GEMINI_URL.format(model=settings.gemini_model)
     try:
         async with httpx.AsyncClient(timeout=15.0) as http_client:
-            res = await http_client.post(
-                url, params={"key": settings.gemini_api_key}, json=body
+            res = await _post_gemini(
+                http_client, url, params={"key": settings.gemini_api_key}, json=body
             )
     except httpx.HTTPError as exc:
         raise HTTPException(
@@ -514,8 +538,8 @@ async def chat_reply(
         }
         try:
             async with httpx.AsyncClient(timeout=20.0) as http_client:
-                res = await http_client.post(
-                    url, params={"key": settings.gemini_api_key}, json=body
+                res = await _post_gemini(
+                    http_client, url, params={"key": settings.gemini_api_key}, json=body
                 )
         except httpx.HTTPError as exc:
             raise HTTPException(
