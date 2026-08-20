@@ -3,7 +3,15 @@
 # the worker actually launches Chromium (storefront screenshots after a
 # publish — see app/screenshot.py), but both services share this one image,
 # so the browser + its system libs end up in both.
-FROM python:3.11-slim
+#
+# Pinned to bookworm (Debian 12), NOT the floating `python:3.11-slim` tag —
+# that tag moved to trixie (Debian 13) and Playwright's `--with-deps`
+# installer doesn't officially support trixie yet (its fallback package
+# list references `ttf-ubuntu-font-family`/`ttf-unifont`, which trixie's
+# repos don't have under those names — build fails with
+# "Package 'ttf-unifont' has no installation candidate"). bookworm is on
+# Playwright's supported list, so `--with-deps` works without a fallback.
+FROM python:3.11-slim-bookworm
 
 # Postgres client headers aren't needed (asyncpg is a pure C-extension wheel,
 # no libpq required at build time), so no extra system packages beyond what
