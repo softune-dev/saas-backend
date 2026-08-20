@@ -85,7 +85,10 @@ class Account:
 async def _register(client: AsyncClient) -> Account:
     """Create a brand-new isolated tenant. Random email so parallel runs never clash."""
     suffix = uuid.uuid4().hex[:12]
-    email = f"test-{suffix}@example.test"
+    # .test is an RFC 2606 reserved TLD — email_validator (used by pydantic's
+    # EmailStr on RegisterIn) rejects it outright, so a fixture email can't
+    # use it even though it reads like the obvious choice for test data.
+    email = f"test-{suffix}@softune-test-fixtures.dev"
     response = await client.post(
         "/auth/register",
         json={

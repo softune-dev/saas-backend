@@ -420,27 +420,9 @@ async def submit_contact_form(host: str, payload: InquiryCreate, db: DB) -> Inqu
     return await crud.save(db, inquiry)
 
 
-def _normalize_phone(raw: str) -> str:
-    """Digits only, last 10 — collapses +8801XXXXXXXXX / 01XXXXXXXXX / spaced
-    or dashed variants to the same key, so a merchant blocking one format
-    catches all the ways a customer might type the same number."""
-    digits = re.sub(r"\D", "", raw or "")
-    return digits[-10:] if len(digits) >= 10 else digits
-
-
-def _extract_customer_phone(customer: dict) -> str:
-    # Free-form checkout payload (see PublicOrderCreate.customer) — different
-    # storefronts collect it under different keys. Aurora's checkout uses a
-    # single combined "contact" field (phone OR email); only treat it as a
-    # phone if it doesn't look like one of those.
-    for key in ("phone", "phone_number", "mobile", "tel"):
-        v = customer.get(key)
-        if isinstance(v, str) and v.strip():
-            return v.strip()
-    contact = customer.get("contact")
-    if isinstance(contact, str) and contact.strip() and "@" not in contact:
-        return contact.strip()
-    return ""
+# Phone normalize/extract helpers live in crud.py now — shared with
+# get_or_create_customer, which also needs to collapse phone formatting
+# variants to the same key. See crud.normalize_phone / crud.extract_customer_phone.
 
 
 # All seven BD mobile operator prefixes — 013 Grameenphone, 014 Banglalink,
@@ -488,7 +470,7 @@ async def create_public_order(host: str, payload: PublicOrderCreate, db: DB) -> 
     # no OTP/SMS verification anywhere in checkout, an unvalidated phone
     # field is a free-for-all for fake orders and garbage data reaching the
     # merchant's real order list.
-    phone_for_validation = _extract_customer_phone(payload.customer)
+    phone_for_validation = crud.extract_customer_phone(payload.customer)
     if not _validate_bd_phone(phone_for_validation):
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
@@ -501,7 +483,7 @@ async def create_public_order(host: str, payload: PublicOrderCreate, db: DB) -> 
     block_rule = (site.fraud_rules or {}).get("block_blocklist") or {}
     if block_rule.get("enabled", True):
         phone = phone_for_validation
-        normalized = _normalize_phone(phone)
+        normalized = crud.normalize_phone(phone)
         if normalized:
             blocklisted = (
                 await db.execute(
@@ -509,7 +491,7 @@ async def create_public_order(host: str, payload: PublicOrderCreate, db: DB) -> 
                 )
             ).scalars().all()
             match = next(
-                (e for e in blocklisted if _normalize_phone(e.phone) == normalized), None
+                (e for e in blocklisted if crud.normalize_phone(e.phone) == normalized), None
             )
             if match:
                 # Queued, not awaited inline — see queue.JOB_SEND_ORDER_NOTIFICATIONS'
@@ -603,11 +585,16 @@ async def create_public_order(host: str, payload: PublicOrderCreate, db: DB) -> 
         if product.track_stock:
             product.stock -= line.quantity
 
+    customer_record = await crud.get_or_create_customer(
+        db, tenant_id=site.tenant_id, site_id=site.id, customer=payload.customer
+    )
+
     order = Order(
         site_id=site.id,
         tenant_id=site.tenant_id,
         order_number=await crud.next_order_number(db, site.id),
         customer=payload.customer,
+        customer_id=customer_record.id if customer_record else None,
         subtotal_cents=subtotal,
         shipping_cents=shipping,
         tax_cents=0,

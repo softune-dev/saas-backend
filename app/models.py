@@ -286,6 +286,26 @@ class Product(Base, TimestampMixin):
     features: Mapped[list] = mapped_column(JSONB, default=list)
 
 
+class Customer(Base, TimestampMixin):
+    __tablename__ = "customers"
+    __table_args__ = (
+        UniqueConstraint("site_id", "phone", name="uq_customers_site_phone"),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    site_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("sites.id", ondelete="CASCADE")
+    )
+    # Dedup key, not email — these are COD-heavy stores where phone is
+    # collected on every order and email frequently isn't.
+    phone: Mapped[str] = mapped_column(Text)
+    name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    email: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class Order(Base, TimestampMixin):
     __tablename__ = "orders"
     __table_args__ = (
@@ -301,6 +321,13 @@ class Order(Base, TimestampMixin):
     )
     order_number: Mapped[str] = mapped_column(Text)
     customer: Mapped[dict] = mapped_column(JSONB, default=dict)
+    # Nullable and SET NULL on delete — order history is immutable (see
+    # CLAUDE.md rule 8), so deleting a customer record must never delete or
+    # orphan the orders it's linked to; the order's own `customer` JSONB
+    # snapshot above still has everything needed to render the past order.
+    customer_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("customers.id", ondelete="SET NULL"), nullable=True
+    )
     status: Mapped[str] = mapped_column(Text, default="pending")
     subtotal_cents: Mapped[int] = mapped_column(Integer, default=0)
     shipping_cents: Mapped[int] = mapped_column(Integer, default=0)

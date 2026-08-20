@@ -157,6 +157,32 @@ async def test_other_tenant_cannot_see_orders(two_accounts, template_id):
     assert (await b.get(f"/sites/{site['id']}/orders/{order['id']}")).status_code == 404
 
 
+async def test_other_tenant_cannot_see_customers(two_accounts, template_id):
+    a, b = two_accounts
+    site = await _make_site(a, template_id)
+
+    product = (
+        await a.post(
+            f"/sites/{site['id']}/products",
+            json={"name": "Thing", "price_cents": 500, "stock": 10},
+        )
+    ).json()
+    await a.post(
+        f"/sites/{site['id']}/orders",
+        json={
+            "customer": {"name": "Buyer", "phone": "01712345678"},
+            "items": [{"product_id": product["id"], "quantity": 1}],
+        },
+    )
+    customer_id = (await a.get(f"/sites/{site['id']}/customers")).json()["items"][0]["id"]
+
+    assert (await b.get(f"/sites/{site['id']}/customers/{customer_id}")).status_code == 404
+    assert (await b.get(f"/sites/{site['id']}/customers")).status_code == 404
+    assert (
+        await b.patch(f"/sites/{site['id']}/customers/{customer_id}", json={"name": "hijacked"})
+    ).status_code == 404
+
+
 async def test_other_tenant_cannot_see_inquiries(client, two_accounts, template_id):
     a, b = two_accounts
     site = await _make_site(a, template_id)
@@ -212,7 +238,7 @@ async def test_refresh_token_cannot_be_used_as_access_token(client):
     reg = await client.post(
         "/auth/register",
         json={
-            "email": f"typ-{suffix}@example.test",
+            "email": f"typ-{suffix}@softune-test-fixtures.dev",
             "password": "test-password-123",
             "workspace_name": f"Typ {suffix}",
         },

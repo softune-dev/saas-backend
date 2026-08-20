@@ -541,6 +541,7 @@ class OrderOut(ORMModel):
     site_id: uuid.UUID
     order_number: str
     customer: dict
+    customer_id: uuid.UUID | None
     status: str
     subtotal_cents: int
     shipping_cents: int
@@ -554,6 +555,41 @@ class OrderOut(ORMModel):
     meta: dict
     items: list[OrderItemOut]
     created_at: datetime
+
+
+# =============================================================================
+#  Customers
+# =============================================================================
+# No CustomerCreate — records are created implicitly the first time a phone
+# number places an order (see commerce.py's create_order), never through a
+# direct "add a customer" form. Merchants can only rename/annotate one that
+# already exists.
+
+
+class CustomerUpdate(BaseModel):
+    name: str | None = None
+    email: str | None = None
+
+
+class CustomerOut(ORMModel):
+    id: uuid.UUID
+    site_id: uuid.UUID
+    phone: str
+    name: str | None
+    email: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CustomerDetailOut(CustomerOut):
+    # Computed from this customer's linked orders, not stored — see
+    # get_customer in app/api/commerce.py. Only orders created after this
+    # feature shipped are linked, so totals reflect linked history, not
+    # necessarily every order this phone number has ever placed.
+    order_count: int
+    total_spent_cents: int
+    last_order_at: datetime | None
+    orders: list[OrderOut]
 
 
 # =============================================================================

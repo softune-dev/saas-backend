@@ -8,6 +8,7 @@ from app.api import (
     auth,
     commerce,
     courier,
+    customers,
     fraud,
     help_desk,
     media,
@@ -26,6 +27,7 @@ api_router.include_router(sites.router)
 api_router.include_router(media.router)
 api_router.include_router(pages.router)
 api_router.include_router(commerce.router)
+api_router.include_router(customers.router)
 api_router.include_router(courier.router)
 api_router.include_router(payments.router)
 api_router.include_router(fraud.router)

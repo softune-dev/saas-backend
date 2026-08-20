@@ -379,11 +379,16 @@ async def create_order(
         if product.track_stock:
             product.stock -= line.quantity
 
+    customer_record = await crud.get_or_create_customer(
+        db, tenant_id=site.tenant_id, site_id=site.id, customer=payload.customer
+    )
+
     order = Order(
         site_id=site.id,
         tenant_id=site.tenant_id,
         order_number=await crud.next_order_number(db, site.id),
         customer=payload.customer,
+        customer_id=customer_record.id if customer_record else None,
         subtotal_cents=subtotal,
         shipping_cents=payload.shipping_cents,
         tax_cents=payload.tax_cents,

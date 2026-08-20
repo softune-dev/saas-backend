@@ -160,6 +160,7 @@ def _explain(exc: IntegrityError) -> str:
         "uq_courier_connections_site_provider": "This site already has a connection for that courier. Disconnect it first.",
         "uq_payment_connections_site_provider": "This site already has a connection for that payment method. Disconnect it first.",
         "uq_fraud_blocklist_site_phone": "That phone number is already on the blocklist.",
+        "uq_customers_site_phone": "A customer with that phone number already exists on this site.",
         "uq_push_subscriptions_endpoint": "This browser is already subscribed.",
     }
     for name, message in known.items():
@@ -179,6 +180,68 @@ def slugify(text: str, fallback: str = "item") -> str:
     """URL-safe slug. Deliberately boring — no unicode transliteration library."""
     slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
     return slug[:60] or fallback
+
+
+def normalize_phone(raw: str) -> str:
+    """Digits only, last 10 — collapses +8801XXXXXXXXX / 01XXXXXXXXX / spaced
+    or dashed variants to the same key, so a merchant blocking one format (or
+    a customer record keyed on one format) catches all the ways a phone
+    number gets typed. Shared by fraud blocklist matching and customer
+    dedup — both need the same "same number, different spelling" collapse."""
+    digits = re.sub(r"\D", "", raw or "")
+    return digits[-10:] if len(digits) >= 10 else digits
+
+
+def extract_customer_phone(customer: dict) -> str:
+    # Free-form checkout payload — different storefronts collect it under
+    # different keys. Aurora's checkout uses a single combined "contact"
+    # field (phone OR email); only treat it as a phone if it doesn't look
+    # like one of those.
+    for key in ("phone", "phone_number", "mobile", "tel"):
+        v = customer.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    contact = customer.get("contact")
+    if isinstance(contact, str) and contact.strip() and "@" not in contact:
+        return contact.strip()
+    return ""
+
+
+async def get_or_create_customer(
+    db: AsyncSession, *, tenant_id: uuid.UUID, site_id: uuid.UUID, customer: dict
+) -> Any:
+    """Resolve the Customer record for an order's free-form customer JSON, by
+    phone, creating one if this is the first order from this number on this
+    site. Returns None if no usable phone is present — customer linking is
+    best-effort, it must never block an order from being placed.
+    """
+    from app.models import Customer  # local import: crud.py predates models importing it
+
+    phone = extract_customer_phone(customer)
+    if not phone:
+        return None
+    normalized = normalize_phone(phone)
+    if not normalized:
+        return None
+
+    existing = (
+        await db.execute(
+            select(Customer).where(Customer.site_id == site_id, Customer.phone == normalized)
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        return existing
+
+    record = Customer(
+        tenant_id=tenant_id,
+        site_id=site_id,
+        phone=normalized,
+        name=customer.get("name") if isinstance(customer.get("name"), str) else None,
+        email=customer.get("email") if isinstance(customer.get("email"), str) else None,
+    )
+    db.add(record)
+    await db.flush()  # need record.id before the order references it, before the outer commit
+    return record
 
 
 async def next_order_number(db: AsyncSession, site_id: uuid.UUID) -> str:
