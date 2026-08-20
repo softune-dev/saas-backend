@@ -47,6 +47,39 @@ IMAGE_MAX_BYTES = 10 * 1024 * 1024
 IMAGE_MAX_MEGAPIXELS = 25
 VIDEO_MAX_BYTES = 100 * 1024 * 1024
 
+# Real per-plan total storage ceiling — separate from IMAGE_MAX_BYTES above
+# (that's a per-FILE limit, same for everyone; this is a per-SITE running
+# total, different per plan). Mirrors app/ai.py's PLAN_AI_DAILY_CAP: a plain
+# dict, not a database column, so pricing can change with a one-line edit.
+# Scoped per SITE, not aggregated across a tenant's sites — every plan
+# except Business is one storefront anyway, and the dashboard's own media
+# views (ShopInfoPanel, Site Settings → Media) are already per-current-site,
+# so a per-site ceiling is what those screens can actually show truthfully.
+PLAN_STORAGE_LIMIT_BYTES: dict[str, int] = {
+    "demo": 800 * 1024 * 1024,        # 800 MB
+    "starter": 500 * 1024 * 1024,     # 500 MB
+    "growth": 2 * 1024 * 1024 * 1024,  # 2 GB
+    "business": 5 * 1024 * 1024 * 1024,  # 5 GB
+}
+DEFAULT_STORAGE_LIMIT_BYTES = PLAN_STORAGE_LIMIT_BYTES["starter"]
+
+
+def plan_storage_limit(plan: str) -> int:
+    return PLAN_STORAGE_LIMIT_BYTES.get(plan, DEFAULT_STORAGE_LIMIT_BYTES)
+
+
+def site_storage_used_bytes(subdomain: str) -> int:
+    """Live total across all four upload categories for one site's
+    Cloudinary folder — same per-category listing list_all_media already
+    does, exposed standalone so the upload path can check it BEFORE
+    accepting a file, not just report it after the fact."""
+    return sum(
+        (r.get("bytes") or 0)
+        for category in sorted(VALID_CATEGORIES)
+        for r in list_images(subdomain, category)
+    )
+
+
 _configured = False
 
 

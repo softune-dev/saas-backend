@@ -62,9 +62,14 @@ class RefreshIn(BaseModel):
 
 
 class MeUpdate(BaseModel):
-    # Only full_name — email changes need re-verification (not built yet) and
-    # role/tenant are controlled elsewhere, so neither belongs on this form.
+    # Email changes need re-verification (not built yet) and role/tenant are
+    # controlled elsewhere, so neither belongs on this form.
     full_name: str | None = Field(default=None, max_length=120)
+    phone: str | None = Field(default=None, max_length=32)
+    timezone: str | None = Field(default=None, max_length=64)
+    # No max_length — a preset avatar's generated SVG data: URI runs well
+    # past any reasonable "URL" length, and TEXT has no real ceiling anyway.
+    avatar_url: str | None = None
 
 
 class ChangePasswordIn(BaseModel):
@@ -84,6 +89,9 @@ class UserOut(ORMModel):
     tenant_id: uuid.UUID
     email: str
     full_name: str | None
+    phone: str | None
+    timezone: str | None
+    avatar_url: str | None
     role: str
     created_at: datetime
 

@@ -81,6 +81,21 @@ class User(Base, TimestampMixin):
     email: Mapped[str] = mapped_column(CITEXT, unique=True)
     password_hash: Mapped[str] = mapped_column(Text)
     full_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Personal contact number — distinct from Site Settings → Contact Info's
+    # business phone/whatsapp (Site.business), which is customer-facing.
+    # This one is for account-level contact (e.g. a future 2FA/security
+    # alert channel), so it lives on the user, not the site.
+    phone: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Either a real Cloudinary URL (uploaded or picked from the site's media
+    # library) or a generated data: URI for one of the picker's preset
+    # silhouette avatars — both are just plain URL strings from here on,
+    # so nothing downstream needs to special-case which kind it is.
+    avatar_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # IANA name (e.g. "Asia/Dhaka") — lets order timestamps and notification
+    # digests render in the merchant's own local time instead of UTC/browser
+    # guesswork. Free text for now, matching Site.business's other loosely
+    # typed fields; a picker can validate against a real IANA list later.
+    timezone: Mapped[str | None] = mapped_column(Text, nullable=True)
     role: Mapped[str] = mapped_column(Text, default="owner")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     last_login_at: Mapped[datetime | None] = mapped_column(

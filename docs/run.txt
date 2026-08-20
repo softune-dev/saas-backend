@@ -16,5 +16,10 @@ OMj52NyU6oEvyb
 bazaar-owner@softune.app
 38tj64sikrbK5e
 
+
+cd ~/saas-backend && git pull && docker compose -f docker-compose.prod.yml up -d --build api worker
+docker compose -f docker-compose.prod.yml ps
+
 netstat -ano | findstr :PORT
 taskkill /F /PID {PORT}
+

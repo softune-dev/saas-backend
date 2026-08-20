@@ -17,13 +17,44 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import crud, media
 from app.db import get_db
-from app.media import IMAGE_MAX_BYTES, IMAGE_MAX_MEGAPIXELS, VALID_CATEGORIES, VIDEO_MAX_BYTES
+from app.media import (
+    IMAGE_MAX_BYTES,
+    IMAGE_MAX_MEGAPIXELS,
+    VALID_CATEGORIES,
+    VIDEO_MAX_BYTES,
+    plan_storage_limit,
+    site_storage_used_bytes,
+)
 from app.models import Category as CategoryModel
-from app.models import Product, Site
+from app.models import Product, Site, Tenant
 from app.security import CurrentUser
 
 router = APIRouter(prefix="/sites/{site_id}/media", tags=["media"])
 DB = Annotated[AsyncSession, Depends(get_db)]
+
+
+async def _tenant_plan(db: AsyncSession, tenant_id: uuid.UUID) -> str:
+    """Same lookup as app/api/ai.py's _tenant_plan — duplicated locally
+    rather than shared since it's one query, and this module already
+    imports Tenant for nothing else."""
+    tenant = (await db.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one()
+    return tenant.plan
+
+
+async def _assert_storage_available(
+    db: AsyncSession, user: CurrentUser, site: Site, incoming_bytes: int
+) -> None:
+    plan = await _tenant_plan(db, user.tenant_id)
+    limit = plan_storage_limit(plan)
+    used = site_storage_used_bytes(site.subdomain)
+    if used + incoming_bytes > limit:
+        raise HTTPException(
+            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            f"This upload would put you over your {plan} plan's "
+            f"{limit // 1024 // 1024}MB storage limit "
+            f"({used // 1024 // 1024}MB used). Delete unused media or "
+            "upgrade your plan.",
+        )
 
 # Mirrors Cloudinary's own account-wide image limits (see app/media.py) —
 # checking here means a doomed upload fails in milliseconds, before ever
@@ -82,6 +113,7 @@ async def upload_media(
             "it down before uploading.",
         )
 
+    await _assert_storage_available(db, user, site, len(body))
     return media.upload_image(body, subdomain=site.subdomain, category=category)
 
 
@@ -110,6 +142,7 @@ async def upload_video(
             "use a shorter clip.",
         )
 
+    await _assert_storage_available(db, user, site, len(body))
     return media.upload_video(body, subdomain=site.subdomain, category=category)
 
 
@@ -208,11 +241,17 @@ async def list_all_media(site_id: uuid.UUID, user: CurrentUser, db: DB) -> dict:
             )
 
     images.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+    total_bytes = sum(r.get("bytes") or 0 for r in images)
+    plan = await _tenant_plan(db, user.tenant_id)
     return {
         "images": images,
         "total_count": len(images),
-        "total_bytes": sum(r.get("bytes") or 0 for r in images),
+        "total_bytes": total_bytes,
         "by_category": by_category,
+        # Real per-plan ceiling — see app/media.py's PLAN_STORAGE_LIMIT_BYTES.
+        # Replaces the dashboard's old hardcoded 1GB display value.
+        "limit_bytes": plan_storage_limit(plan),
+        "plan": plan,
     }
 
 

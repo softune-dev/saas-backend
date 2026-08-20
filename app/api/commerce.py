@@ -9,7 +9,7 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import cache, crud, media, products
@@ -272,6 +272,10 @@ async def list_orders(
     user: CurrentUser,
     db: DB,
     order_status: Annotated[str | None, Query(alias="status")] = None,
+    q: Annotated[
+        str | None,
+        Query(description="Search order number or customer JSON fields"),
+    ] = None,
     # 500, not the usual 100 — the dashboard's Sales Analysis widget buckets
     # raw orders into 6 calendar months client-side (see dashboard-view.tsx),
     # and 100 orders covers well under 6 months for any store with real
@@ -286,6 +290,17 @@ async def list_orders(
     filters = [Order.site_id == site_id]
     if order_status:
         filters.append(Order.status == order_status)
+    if q:
+        # order_number + free-form customer JSONB (name/email/phone/contact).
+        # Cast-to-text is fine at header-search limits; list_scoped still
+        # enforces tenant_id so this cannot leak across accounts.
+        needle = f"%{q.strip()}%"
+        filters.append(
+            or_(
+                Order.order_number.ilike(needle),
+                cast(Order.customer, String).ilike(needle),
+            )
+        )
 
     rows, total = await crud.list_scoped(
         db, Order, user.tenant_id, filters=filters,
