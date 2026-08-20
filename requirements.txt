@@ -33,6 +33,11 @@ cryptography==43.0.3
 # ---- Web push (new-order browser notifications) ----
 pywebpush==2.0.3
 
+# ---- Storefront screenshots (Themes page card) — worker-only, headless
+# Chromium. See Dockerfile's `playwright install` step for the browser
+# binary; this line only installs the Python driver. ----
+playwright==1.49.1
+
 # ---- Tests ----
 pytest==8.3.4
 pytest-asyncio==0.25.0

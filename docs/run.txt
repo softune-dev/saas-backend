@@ -1,5 +1,6 @@
 uvicorn app.main:app --reload
 python -m app.worker
+docker compose up -d
 
 cd dashboard
 
@@ -7,8 +8,6 @@ cd templates/aurora
 cd templates/bazaar
 npx next dev -p 3050
 npx next dev -p 3052
-
-docker compose up -d
 
 aurora-owner@softune.app
 OMj52NyU6oEvyb

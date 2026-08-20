@@ -18,6 +18,7 @@ from app.schemas import (
     MeUpdate,
     RefreshIn,
     RegisterIn,
+    TenantBusinessUpdate,
     TenantOut,
     TokenOut,
     UserOut,
@@ -165,6 +166,25 @@ async def update_me(payload: MeUpdate, user: CurrentUser, db: DB) -> MeOut:
     db_user = crud.apply_updates(db_user, payload.model_dump(exclude_unset=True))
     db_user = await crud.save(db, db_user)
     return MeOut(user=UserOut.model_validate(db_user), tenant=TenantOut.model_validate(tenant))
+
+
+@router.patch("/tenant", response_model=TenantOut)
+async def update_tenant_business(
+    payload: TenantBusinessUpdate, user: CurrentUser, db: DB
+) -> TenantOut:
+    """Legal/tax identity for the account (Account -> Business details).
+    Scoped by user.tenant_id from the token, same as /auth/me — no id in the
+    path, so there is nothing to leak by omission."""
+    tenant = (
+        await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))
+    ).scalar_one_or_none()
+    if tenant is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Account no longer exists")
+    # New dict object (not an in-place mutation) so SQLAlchemy's change
+    # tracking actually sees the JSONB column as dirty.
+    tenant.business = {**tenant.business, **payload.model_dump(exclude_unset=True)}
+    tenant = await crud.save(db, tenant)
+    return TenantOut.model_validate(tenant)
 
 
 @router.post("/change-password", status_code=status.HTTP_204_NO_CONTENT)

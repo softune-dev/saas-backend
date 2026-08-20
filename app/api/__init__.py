@@ -9,6 +9,7 @@ from app.api import (
     commerce,
     courier,
     fraud,
+    help_desk,
     media,
     notifications,
     pages,
@@ -28,6 +29,7 @@ api_router.include_router(commerce.router)
 api_router.include_router(courier.router)
 api_router.include_router(payments.router)
 api_router.include_router(fraud.router)
+api_router.include_router(help_desk.router)
 api_router.include_router(notifications.router)
 api_router.include_router(push.router)
 api_router.include_router(public.router)

@@ -67,6 +67,9 @@ class Tenant(Base, TimestampMixin):
     plan: Mapped[str] = mapped_column(Text, default="demo")
     status: Mapped[str] = mapped_column(Text, default="active")
     settings: Mapped[dict] = mapped_column(JSONB, default=dict)
+    # Legal/tax identity for billing & invoicing — distinct from any site's
+    # customer-facing Site.business (contact info shown on the storefront).
+    business: Mapped[dict] = mapped_column(JSONB, default=dict)
 
     users: Mapped[list["User"]] = relationship(back_populates="tenant")
 
@@ -164,6 +167,12 @@ class Site(Base, TimestampMixin):
     published_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Mobile-viewport screenshot of the live storefront, captured by the
+    # worker right after a publish (see queue.JOB_CAPTURE_SCREENSHOT) — shown
+    # on the Themes page card. System-generated, not a merchant upload, so it
+    # lives outside media.py's VALID_CATEGORIES and never counts against the
+    # plan's storage quota.
+    screenshot_url: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     template: Mapped["Template"] = relationship(lazy="joined")
     pages: Mapped[list["SitePage"]] = relationship(
@@ -494,6 +503,29 @@ class PushSubscription(Base):
     p256dh: Mapped[str] = mapped_column(Text)
     auth: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = _created()
+
+
+class HelpTicket(Base, TimestampMixin):
+    """Support ticket for the Help Desk page. Tenant-scoped, not site-scoped
+    — support is handled at the account level even if a tenant has multiple
+    sites. No admin/agent reply flow yet (soft launch): a human replies by
+    email out of band, same as the ticket form's own copy already says.
+    """
+
+    __tablename__ = "help_tickets"
+
+    id: Mapped[uuid.UUID] = _pk()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE")
+    )
+    subject: Mapped[str] = mapped_column(Text)
+    category: Mapped[str] = mapped_column(Text)
+    priority: Mapped[str] = mapped_column(Text, default="Medium")
+    status: Mapped[str] = mapped_column(Text, default="Open")
+    message: Mapped[str] = mapped_column(Text)
 
 
 class OrderCounter(Base):

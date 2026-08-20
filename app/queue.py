@@ -46,6 +46,9 @@ JOB_ATTACH_DOMAIN = "attach_domain"
 # Mirror of the above: detach a domain a site no longer uses (custom_domain
 # changed or was cleared) so it stops serving that site's storefront.
 JOB_DETACH_DOMAIN = "detach_domain"
+# Mobile-viewport screenshot of the live storefront, for the Themes page
+# card — see app/screenshot.py and worker.py's handler.
+JOB_CAPTURE_SCREENSHOT = "capture_screenshot"
 
 
 async def connect() -> aio_pika.abc.AbstractChannel:

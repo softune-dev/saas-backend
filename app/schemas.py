@@ -77,6 +77,24 @@ class ChangePasswordIn(BaseModel):
     new_password: str = Field(min_length=8, max_length=72)
 
 
+class TenantBusinessOut(BaseModel):
+    legal_name: str | None = None
+    trade_name: str | None = None
+    business_type: str | None = None
+    trade_license: str | None = None
+    tin: str | None = None
+    billing_email: str | None = None
+
+
+class TenantBusinessUpdate(BaseModel):
+    legal_name: str | None = Field(default=None, max_length=200)
+    trade_name: str | None = Field(default=None, max_length=200)
+    business_type: str | None = Field(default=None, max_length=40)
+    trade_license: str | None = Field(default=None, max_length=100)
+    tin: str | None = Field(default=None, max_length=100)
+    billing_email: str | None = Field(default=None, max_length=200)
+
+
 class TokenOut(BaseModel):
     access_token: str
     refresh_token: str
@@ -102,6 +120,7 @@ class TenantOut(ORMModel):
     name: str
     plan: str
     status: str
+    business: TenantBusinessOut
     created_at: datetime
 
 
@@ -184,6 +203,7 @@ class SiteOut(ORMModel):
     faqs: list
     legal: dict
     fraud_rules: dict
+    screenshot_url: str | None
     published_at: datetime | None
     created_at: datetime
     updated_at: datetime
@@ -663,3 +683,31 @@ class PushSubscribeIn(BaseModel):
 
 class PushUnsubscribeIn(BaseModel):
     endpoint: str = Field(min_length=1, max_length=2000)
+
+
+# =============================================================================
+#  Help Desk
+# =============================================================================
+
+TicketPriority = Literal["Low", "Medium", "High"]
+TicketStatus = Literal["Open", "In Progress", "Resolved", "Closed"]
+
+
+class HelpTicketCreate(BaseModel):
+    subject: str = Field(min_length=1, max_length=200)
+    category: str = Field(min_length=1, max_length=60)
+    priority: TicketPriority = "Medium"
+    message: str = Field(min_length=1, max_length=5000)
+
+
+class HelpTicketOut(ORMModel):
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    user_id: uuid.UUID
+    subject: str
+    category: str
+    priority: str
+    status: str
+    message: str
+    created_at: datetime
+    updated_at: datetime

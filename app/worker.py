@@ -26,6 +26,7 @@ from app.db import SessionLocal, engine
 from app.models import Notification, Site
 from app.queue import (
     JOB_ATTACH_DOMAIN,
+    JOB_CAPTURE_SCREENSHOT,
     JOB_DETACH_DOMAIN,
     JOB_GENERATE_SITEMAP,
     JOB_REVALIDATE_SITE,
@@ -206,6 +207,76 @@ async def handle_send_order_notifications(payload: dict) -> None:
             )
 
 
+async def handle_capture_screenshot(payload: dict) -> None:
+    """Mobile-viewport screenshot of the just-published storefront, shown on
+    the Themes page card (see app/screenshot.py, theme-card.tsx).
+
+    Best-effort: a screenshot failure (site not resolvable yet, Chromium
+    timeout, whatever) must not affect the publish that already succeeded —
+    log and drop, same as every other queue handler that talks to something
+    outside our own infra (handle_revalidate_site above is the same shape).
+    """
+    from app import media, screenshot
+
+    site_id = payload.get("site_id")
+    async with SessionLocal() as db:
+        site = (
+            await db.execute(select(Site).where(Site.id == site_id))
+        ).scalar_one_or_none()
+
+    if site is None:
+        log.warning("screenshot: site %s no longer exists, dropping job", site_id)
+        return
+
+    # TEMPORARY REVERT: prefer custom_domain again. The free-subdomain-first
+    # change (subdomain.{site_base_domain}) broke this in practice —
+    # SITE_BASE_DOMAIN in .env is currently "vercel.app", a placeholder that
+    # was never updated to the real value, so every subdomain capture hit a
+    # real Vercel account's DEPLOYMENT_NOT_FOUND 404 page instead of a real
+    # site. Switch back to subdomain-first once SITE_BASE_DOMAIN is confirmed
+    # and corrected — see this function's git history for the intended change.
+    host = site.custom_domain or f"{site.subdomain}.{settings.site_base_domain}"
+
+    # This job is queued in the same breath as JOB_REVALIDATE_SITE, right
+    # when publish_site commits — capturing immediately would very likely
+    # screenshot the PRE-publish page, since CDN/revalidation propagation
+    # isn't instant. Deliberately generous (not just matching the 1-2 min
+    # publish-toast copy) — give slower propagation real room before giving
+    # up and capturing stale content anyway.
+    #
+    # Cost: this handler holds one of the worker's 5 prefetched slots (see
+    # main()'s set_qos) for the whole wait. At soft-launch volume that's
+    # fine; if 5+ tenants ever publish within the same ~8-minute window,
+    # a 6th unrelated job (order email, revalidate, whatever) would have to
+    # wait for a slot to free up. Worth switching to a proper delayed-requeue
+    # instead of a blocking sleep if that ever becomes a real bottleneck.
+    await asyncio.sleep(8 * 60)
+
+    try:
+        png = await screenshot.capture_mobile_screenshot(f"https://{host}")
+        # "_system" is deliberately not one of media.VALID_CATEGORIES — this
+        # is infra-generated, not a merchant upload, so it must never count
+        # against the tenant's plan storage quota or show up in their Media
+        # Library listing (both only ever iterate VALID_CATEGORIES).
+        uploaded = media.upload_image(png, subdomain=site.subdomain, category="_system")
+    except Exception as exc:  # noqa: BLE001 — Playwright/Cloudinary both raise
+        # a wide variety of exception types here; any of them is equally
+        # "couldn't get a screenshot this time," never worth crashing the job
+        # loop over.
+        log.warning("screenshot: could not capture %s (%s)", host, exc)
+        return
+
+    async with SessionLocal() as db:
+        site = (
+            await db.execute(select(Site).where(Site.id == site_id))
+        ).scalar_one_or_none()
+        if site is None:
+            return
+        site.screenshot_url = uploaded["url"]
+        await db.commit()
+    log.info("screenshot: captured %s -> %s", host, uploaded["url"])
+
+
 HANDLERS = {
     JOB_REVALIDATE_SITE: handle_revalidate_site,
     JOB_GENERATE_SITEMAP: handle_generate_sitemap,
@@ -213,6 +284,7 @@ HANDLERS = {
     JOB_SEND_ORDER_NOTIFICATIONS: handle_send_order_notifications,
     JOB_ATTACH_DOMAIN: handle_attach_domain,
     JOB_DETACH_DOMAIN: handle_detach_domain,
+    JOB_CAPTURE_SCREENSHOT: handle_capture_screenshot,
 }
 
 
