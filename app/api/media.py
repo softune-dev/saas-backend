@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from PIL import Image
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -114,7 +115,11 @@ async def upload_media(
         )
 
     await _assert_storage_available(db, user, site, len(body))
-    return media.upload_image(body, subdomain=site.subdomain, category=category)
+    # media.upload_image is a synchronous Cloudinary SDK call — run off the
+    # event loop so one merchant's upload doesn't stall every other
+    # concurrent request on this process (single uvicorn worker, see
+    # docker-compose.prod.yml).
+    return await run_in_threadpool(media.upload_image, body, subdomain=site.subdomain, category=category)
 
 
 @router.post("/video", status_code=status.HTTP_201_CREATED)
@@ -143,7 +148,9 @@ async def upload_video(
         )
 
     await _assert_storage_available(db, user, site, len(body))
-    return media.upload_video(body, subdomain=site.subdomain, category=category)
+    # Same reasoning as upload_media above — videos are the slowest upload in
+    # the system, the worst case for blocking the event loop.
+    return await run_in_threadpool(media.upload_video, body, subdomain=site.subdomain, category=category)
 
 
 @router.get("")
@@ -275,17 +282,28 @@ async def cleanup_media(
     referenced = await _referenced_urls(db, site)
 
     cutoff = datetime.now(UTC) - CLEANUP_GRACE
-    checked = 0
-    deleted: list[str] = []
-    for category in sorted(VALID_CATEGORIES):
-        for resource in media.list_images(site.subdomain, category):
-            checked += 1
-            if resource["url"] in referenced:
-                continue
-            created_at = resource.get("created_at")
-            if created_at and datetime.fromisoformat(created_at) > cutoff:
-                continue
-            media.delete_by_url(resource["url"], site.subdomain)
-            deleted.append(resource["url"])
 
+    def run_sweep() -> tuple[int, list[str]]:
+        # media.list_images and media.delete_by_url are both synchronous
+        # Cloudinary SDK calls, potentially dozens of them for a real media
+        # library — worst case in the whole app for blocking the event loop
+        # (single uvicorn worker, see docker-compose.prod.yml), since this
+        # was previously a bare loop of blocking I/O inside an async def.
+        # The whole sweep runs in one thread so it doesn't fan out unbounded
+        # concurrent Cloudinary calls either.
+        checked = 0
+        deleted: list[str] = []
+        for category in sorted(VALID_CATEGORIES):
+            for resource in media.list_images(site.subdomain, category):
+                checked += 1
+                if resource["url"] in referenced:
+                    continue
+                created_at = resource.get("created_at")
+                if created_at and datetime.fromisoformat(created_at) > cutoff:
+                    continue
+                media.delete_by_url(resource["url"], site.subdomain)
+                deleted.append(resource["url"])
+        return checked, deleted
+
+    checked, deleted = await run_in_threadpool(run_sweep)
     return {"checked": checked, "deleted": len(deleted), "deleted_urls": deleted}

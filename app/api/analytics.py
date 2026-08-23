@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import crud
+from app import cache, crud
 from app.db import get_db
 from app.models import Category, Order, OrderItem, Product, Site
 from app.security import CurrentUser
@@ -105,6 +105,17 @@ async def get_analytics(
     weeks: Annotated[int, Query(ge=1, le=26)] = 8,
 ) -> AnalyticsOut:
     site = await crud.get_scoped(db, Site, user.tenant_id, site_id)
+
+    # This endpoint computes several aggregate queries over every order in
+    # the window (see below) on EVERY request — expensive, and the numbers
+    # don't meaningfully change second-to-second. Cache per (site, weeks),
+    # dropped on any commerce write via cache.invalidate_dashboard (see
+    # app/cache.py's module docstring for why invalidation is per-site, not
+    # per-endpoint).
+    cache_key = cache.dashboard_key(str(site_id), "analytics", str(weeks))
+    cached = await cache.get_json(cache_key)
+    if cached is not None:
+        return AnalyticsOut(**cached)
 
     now = datetime.now(UTC)
     period = timedelta(weeks=weeks)
@@ -260,7 +271,7 @@ async def get_analytics(
             )
         )
 
-    return AnalyticsOut(
+    result = AnalyticsOut(
         currency=currency,
         revenue=StatOut(
             cents=cur_revenue, change_percent=_pct_change(cur_revenue, prev_revenue)
@@ -278,3 +289,5 @@ async def get_analytics(
         best_sellers=best_sellers,
         sales_report=sales_report,
     )
+    await cache.set_json(cache_key, result.model_dump(mode="json"))
+    return result

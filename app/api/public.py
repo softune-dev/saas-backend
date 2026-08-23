@@ -609,6 +609,11 @@ async def create_public_order(host: str, payload: PublicOrderCreate, db: DB) -> 
         items=items,
     )
     order = await crud.save(db, order)
+    # A real storefront checkout — the merchant's dashboard (analytics,
+    # orders, products' stock counts, customers) must not show stale numbers
+    # after this. See app/cache.py's module docstring for why this drops the
+    # whole site's dashboard cache rather than picking specific keys.
+    await cache.invalidate_dashboard(str(site.id))
 
     customer_name = " ".join(
         str(payload.customer.get(k, "")).strip()

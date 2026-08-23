@@ -1,8 +1,10 @@
 uvicorn app.main:app --reload
 python -m app.worker
+
 docker compose up -d
 
 cd dashboard
+cd landing
 
 cd templates/aurora
 cd templates/bazaar

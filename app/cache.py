@@ -1,4 +1,5 @@
-"""Redis cache — fronts the public site-config read path.
+"""Redis cache — fronts the public site-config read path AND the merchant
+dashboard's hot reads (analytics, product/order/customer lists).
 
 WHY THIS EXISTS: every visitor to every customer site needs that site's config.
 That is the highest-volume query in the system by orders of magnitude, and the
@@ -8,6 +9,15 @@ overwhelmingly read, rarely written, and we know exactly when it changes.
 Strategy is write-through invalidation, not timed expiry alone: a save deletes
 the key immediately, so edits appear instantly rather than "within 5 minutes".
 The TTL is only a safety net for keys we somehow fail to invalidate.
+
+DASHBOARD CACHE: same strategy, coarser invalidation. site_key()/invalidate_site()
+above are per-hostname and precise (storefront config). dashboard_key()/
+invalidate_dashboard() below are per-site and deliberately blunt — any commerce
+write (product/category/order/customer) drops EVERY cached dashboard read for
+that site, not just the one it touched, because an order affects analytics,
+the orders list, AND the customer it's linked to all at once. Over-invalidating
+by a few unrelated keys costs one cheap re-query; under-invalidating shows a
+merchant stale numbers right after they made a change. Not a close call.
 
 DEGRADES GRACEFULLY: if Redis is down, every helper here logs and returns as if
 it were a cache miss. The site gets slower, not broken. Never let a cache outage
@@ -93,6 +103,23 @@ async def drop_prefix(prefix: str) -> None:
             await c.delete(key)
     except Exception as exc:  # noqa: BLE001
         log.warning("cache prefix delete failed for %s: %s", prefix, exc)
+
+
+def dashboard_key(site_id: str, kind: str, suffix: str = "") -> str:
+    """Cache key for one merchant-dashboard read, scoped to a site.
+
+    `kind` is the resource ("analytics", "products", "orders", "customers");
+    `suffix` folds in whatever query params change the result (weeks, limit,
+    offset, status filter, ...) so two different requests never collide.
+    """
+    return f"dash:{site_id}:{kind}:{suffix}" if suffix else f"dash:{site_id}:{kind}"
+
+
+async def invalidate_dashboard(site_id: str) -> None:
+    """Call after ANY write to a site's products, categories, orders, or
+    customers — see the module docstring for why this drops everything for
+    the site rather than just the one resource that changed."""
+    await drop_prefix(f"dash:{site_id}:")
 
 
 async def invalidate_site(subdomain: str, custom_domain: str | None = None) -> None:

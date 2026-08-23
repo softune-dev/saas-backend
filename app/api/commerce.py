@@ -52,12 +52,22 @@ async def list_categories(
     site_id: uuid.UUID, user: CurrentUser, db: DB
 ) -> list[Category]:
     await _owned_site(db, user.tenant_id, site_id)
+
+    cache_key = cache.dashboard_key(str(site_id), "categories")
+    cached = await cache.get_json(cache_key)
+    if cached is not None:
+        return [CategoryOut(**row) for row in cached["items"]]
+
     stmt = (
         select(Category)
         .where(Category.site_id == site_id)
         .order_by(Category.sort_order, Category.name)
     )
-    return list((await db.execute(stmt)).scalars().all())
+    rows = list((await db.execute(stmt)).scalars().all())
+    await cache.set_json(
+        cache_key, {"items": [CategoryOut.model_validate(r).model_dump(mode="json") for r in rows]}
+    )
+    return rows
 
 
 @router.post(
@@ -91,7 +101,9 @@ async def create_category(
         )
         data["sort_order"] = (current_max.scalar() or 0) + 1
     category = Category(site_id=site.id, tenant_id=site.tenant_id, **data)
-    return await crud.save(db, category)
+    category = await crud.save(db, category)
+    await cache.invalidate_dashboard(str(site.id))
+    return category
 
 
 @router.patch("/sites/{site_id}/categories/{category_id}", response_model=CategoryOut)
@@ -114,6 +126,7 @@ async def update_category(
     old_banner_url = category.banner_url
     crud.apply_updates(category, payload.model_dump(exclude_unset=True))
     category = await crud.save(db, category)
+    await cache.invalidate_dashboard(str(site.id))
 
     if old_image_url and old_image_url != category.image_url:
         media.delete_by_url(old_image_url, site.subdomain)
@@ -135,6 +148,7 @@ async def delete_category(
     # Products in it are NOT deleted — the FK is ON DELETE SET NULL. They become
     # uncategorised, which is recoverable. Deleting them would not be.
     await crud.delete(db, category)
+    await cache.invalidate_dashboard(str(site.id))
     if image_url:
         media.delete_by_url(image_url, site.subdomain)
     if banner_url:
@@ -169,9 +183,26 @@ async def list_products(
     if active_only:
         filters.append(Product.is_active)
 
+    # Cache keyed on every param that changes the result — a search/filter
+    # combo the merchant hasn't tried yet is still a cache miss, same as a
+    # brand new site would be.
+    cache_key = cache.dashboard_key(
+        str(site_id), "products", f"{q or ''}:{category_id or ''}:{active_only}:{limit}:{offset}"
+    )
+    cached = await cache.get_json(cache_key)
+    if cached is not None:
+        return {
+            "items": [ProductOut(**row) for row in cached["items"]],
+            "total": cached["total"], "limit": limit, "offset": offset,
+        }
+
     rows, total = await crud.list_scoped(
         db, Product, user.tenant_id, filters=filters,
         order_by=Product.created_at.desc(), limit=limit, offset=offset,
+    )
+    await cache.set_json(
+        cache_key,
+        {"items": [ProductOut.model_validate(r).model_dump(mode="json") for r in rows], "total": total},
     )
     return {"items": rows, "total": total, "limit": limit, "offset": offset}
 
@@ -201,6 +232,7 @@ async def create_product(
     product = Product(site_id=site.id, tenant_id=site.tenant_id, **data)
     product = await crud.save(db, product)
     await cache.invalidate_site(site.subdomain, site.custom_domain)
+    await cache.invalidate_dashboard(str(site.id))
     return product
 
 
@@ -234,6 +266,7 @@ async def update_product(
     crud.apply_updates(product, data)
     product = await crud.save(db, product)
     await cache.invalidate_site(site.subdomain, site.custom_domain)
+    await cache.invalidate_dashboard(str(site.id))
 
     # Same reasoning as sites.py's theme diff: the gallery editor uploads
     # each new image immediately, but only stops referencing a removed one
@@ -257,6 +290,7 @@ async def delete_product(
     # name/sku/price. See migrations/003_commerce.sql.
     await crud.delete(db, product)
     await cache.invalidate_site(site.subdomain, site.custom_domain)
+    await cache.invalidate_dashboard(str(site.id))
     for url in image_urls:
         media.delete_by_url(url, site.subdomain)
 
@@ -302,9 +336,23 @@ async def list_orders(
             )
         )
 
+    cache_key = cache.dashboard_key(
+        str(site_id), "orders", f"{order_status or ''}:{q or ''}:{limit}:{offset}"
+    )
+    cached = await cache.get_json(cache_key)
+    if cached is not None:
+        return {
+            "items": [OrderOut(**row) for row in cached["items"]],
+            "total": cached["total"], "limit": limit, "offset": offset,
+        }
+
     rows, total = await crud.list_scoped(
         db, Order, user.tenant_id, filters=filters,
         order_by=Order.created_at.desc(), limit=limit, offset=offset,
+    )
+    await cache.set_json(
+        cache_key,
+        {"items": [OrderOut.model_validate(r).model_dump(mode="json") for r in rows], "total": total},
     )
     return {"items": rows, "total": total, "limit": limit, "offset": offset}
 
@@ -401,7 +449,10 @@ async def create_order(
     # ONE commit for the order, its items, AND the stock decrements. If any part
     # fails, all of it rolls back — you never get an order with no lines, or
     # stock deducted for an order that was never created.
-    return await crud.save(db, order)
+    order = await crud.save(db, order)
+    # Also drops the products cache — this order just changed stock counts.
+    await cache.invalidate_dashboard(str(site.id))
+    return order
 
 
 @router.get("/sites/{site_id}/orders/{order_id}", response_model=OrderOut)
@@ -424,7 +475,9 @@ async def update_order(
     await _owned_site(db, user.tenant_id, site_id)
     order = await crud.get_scoped(db, Order, user.tenant_id, order_id)
     crud.apply_updates(order, payload.model_dump(exclude_unset=True))
-    return await crud.save(db, order)
+    order = await crud.save(db, order)
+    await cache.invalidate_dashboard(str(site_id))
+    return order
 
 
 # =============================================================================

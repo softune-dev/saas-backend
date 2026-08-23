@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -165,8 +166,14 @@ async def update_site(
     # best-effort, after the save itself has already succeeded.
     if "theme" in payload.model_fields_set:
         dropped = media.theme_image_urls(old_theme) - media.theme_image_urls(site.theme or {})
+        # media.delete_by_url is a synchronous Cloudinary SDK call — awaiting
+        # it directly blocks the event loop (and every other concurrent
+        # request on this process, since uvicorn runs a single worker) for
+        # the full round trip, times however many images the theme edit
+        # dropped. Threadpool moves that blocking off the loop; still
+        # best-effort (delete_by_url already swallows its own failures).
         for url in dropped:
-            media.delete_by_url(url, site.subdomain)
+            await run_in_threadpool(media.delete_by_url, url, site.subdomain)
 
     if site.status == "published":
         await queue.publish(queue.JOB_REVALIDATE_SITE, {"site_id": str(site.id)})

@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import crud
+from app import cache, crud
 from app.db import get_db
 from app.models import Customer, Order, Site
 from app.schemas import CustomerDetailOut, CustomerOut, CustomerUpdate, Page
@@ -36,10 +36,23 @@ async def list_customers(
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> dict:
     await _owned_site(db, user.tenant_id, site_id)
+
+    cache_key = cache.dashboard_key(str(site_id), "customers", f"{limit}:{offset}")
+    cached = await cache.get_json(cache_key)
+    if cached is not None:
+        return {
+            "items": [CustomerOut(**row) for row in cached["items"]],
+            "total": cached["total"], "limit": limit, "offset": offset,
+        }
+
     rows, total = await crud.list_scoped(
         db, Customer, user.tenant_id,
         filters=[Customer.site_id == site_id],
         order_by=Customer.created_at.desc(), limit=limit, offset=offset,
+    )
+    await cache.set_json(
+        cache_key,
+        {"items": [CustomerOut.model_validate(r).model_dump(mode="json") for r in rows], "total": total},
     )
     return {"items": rows, "total": total, "limit": limit, "offset": offset}
 
@@ -85,4 +98,6 @@ async def update_customer(
     await _owned_site(db, user.tenant_id, site_id)
     customer = await crud.get_scoped(db, Customer, user.tenant_id, customer_id)
     crud.apply_updates(customer, payload.model_dump(exclude_unset=True))
-    return await crud.save(db, customer)
+    customer = await crud.save(db, customer)
+    await cache.invalidate_dashboard(str(site_id))
+    return customer
