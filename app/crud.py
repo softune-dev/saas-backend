@@ -276,3 +276,135 @@ async def next_order_number(db: AsyncSession, site_id: uuid.UUID) -> str:
         row = 1001
 
     return f"ORD-{row}"
+
+
+async def create_tenant_owner_and_site(
+    db: AsyncSession,
+    *,
+    email: str,
+    password: str,
+    workspace_name: str,
+    plan: str,
+    template_key: str,
+    site_name: str,
+    subdomain: str,
+    full_name: str | None = None,
+) -> tuple["User", "Site"]:
+    """Provision a full paid account in one transaction: workspace, owner
+    login, plan, and the one site tied to it.
+
+    This system has no "which templates can this tenant use" permission to
+    manage separately (see dashboard/components/themes/themes-grid.tsx's own
+    comment) — a tenant gets exactly one site, tied to exactly one template,
+    decided right here at creation. The dashboard has no UI that ever calls
+    POST /sites; provisioning only ever happens externally, which is this
+    function's whole job. Before signup was closed to the public, an earlier
+    version of this (then just tenant+user) was also what POST /auth/register
+    called — kept as one function so "creating an account" can't drift
+    between callers.
+
+    Raises HTTPException(409) if the email is taken, 404 if template_key
+    doesn't match an active template.
+    """
+    from app.models import Tenant, Template, User
+    from app.security import hash_password
+
+    existing = await db.execute(select(User.id).where(User.email == email))
+    if existing.scalar_one_or_none():
+        raise HTTPException(status.HTTP_409_CONFLICT, "An account with that email exists.")
+
+    template = (
+        await db.execute(
+            select(Template).where(Template.key == template_key, Template.is_active)
+        )
+    ).scalar_one_or_none()
+    if template is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"No active template with key {template_key!r}")
+
+    # Ensure a unique workspace slug: "Acme Co" -> acme-co, acme-co-2, ...
+    base = slugify(workspace_name, "workspace")
+    slug = base
+    for n in range(2, 100):
+        taken = await db.execute(select(Tenant.id).where(Tenant.slug == slug))
+        if not taken.scalar_one_or_none():
+            break
+        slug = f"{base}-{n}"
+
+    tenant = Tenant(slug=slug, name=workspace_name, plan=plan)
+    db.add(tenant)
+    # flush (not commit) sends the INSERT so tenant.id is populated, while the
+    # transaction stays open and still rolls back as one unit.
+    await db.flush()
+
+    user = User(
+        tenant_id=tenant.id,
+        email=email,
+        password_hash=hash_password(password),
+        full_name=full_name,
+        role="owner",
+    )
+    db.add(user)
+
+    site = await provision_site(
+        db, tenant_id=tenant.id, template=template, name=site_name, subdomain=subdomain
+    )
+
+    await db.commit()
+    await db.refresh(user)
+    await db.refresh(site)
+    return user, site
+
+
+async def provision_site(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    template: "Template",
+    name: str,
+    subdomain: str,
+) -> "Site":
+    """Create a site from an already-resolved, active template.
+
+    Shared by POST /sites (dashboard callers, which resolve the template by
+    id) and scripts/create_account.py (which resolves it by key) — the
+    actual row-construction (theme/pages copied in, not referenced; draft +
+    noindex until publish; the order counter every checkout needs) must stay
+    identical between both, or a script-provisioned site would quietly
+    behave differently from a dashboard-provisioned one.
+    """
+    from app.models import OrderCounter, Site, SitePage
+
+    site = Site(
+        tenant_id=tenant_id,
+        template_id=template.id,
+        name=name,
+        subdomain=subdomain,
+        theme=dict(template.default_theme or {}),
+        business={},
+        # Draft sites must never be indexed by Google — a half-finished page
+        # ranking under the customer's name is worse than no page at all.
+        # /sites/{id}/publish flips this off.
+        seo={"noindex": True},
+        status="draft",
+    )
+    db.add(site)
+    await db.flush()
+    # See crud.next_order_number — every site needs a counter row so
+    # checkout's atomic UPDATE always finds one to increment.
+    db.add(OrderCounter(site_id=site.id, next_number=1000))
+
+    for i, page_def in enumerate(template.default_pages or []):
+        db.add(
+            SitePage(
+                site_id=site.id,
+                tenant_id=tenant_id,
+                slug=page_def.get("slug", ""),
+                title=page_def.get("title", "Home"),
+                blocks=page_def.get("blocks", []),
+                seo=page_def.get("seo", {}),
+                sort_order=i,
+                is_published=False,
+            )
+        )
+
+    return site

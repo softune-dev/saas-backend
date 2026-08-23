@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import cache, crud, media, notifications, queue, vercel
 from app.db import get_db
-from app.models import OrderCounter, Site, SitePage, Template
+from app.models import Site, SitePage, Template
 from app.schemas import (
     DomainStatusOut,
     Page,
@@ -80,39 +80,13 @@ async def create_site(payload: SiteCreate, user: CurrentUser, db: DB) -> Site:
     if template is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Template not found or inactive")
 
-    site = Site(
+    site = await crud.provision_site(
+        db,
         tenant_id=user.tenant_id,
-        template_id=template.id,
+        template=template,
         name=payload.name,
         subdomain=payload.subdomain,
-        theme=dict(template.default_theme or {}),
-        business={},
-        # Draft sites must never be indexed by Google — a half-finished page
-        # ranking under the customer's name is worse than no page at all.
-        # /sites/{id}/publish flips this off.
-        seo={"noindex": True},
-        status="draft",
     )
-    db.add(site)
-    await db.flush()
-    # See crud.next_order_number — every site needs a counter row so
-    # checkout's atomic UPDATE always finds one to increment.
-    db.add(OrderCounter(site_id=site.id, next_number=1000))
-
-    for i, page_def in enumerate(template.default_pages or []):
-        db.add(
-            SitePage(
-                site_id=site.id,
-                tenant_id=user.tenant_id,
-                slug=page_def.get("slug", ""),
-                title=page_def.get("title", "Home"),
-                blocks=page_def.get("blocks", []),
-                seo=page_def.get("seo", {}),
-                sort_order=i,
-                is_published=False,
-            )
-        )
-
     await db.commit()
     await db.refresh(site)
     return site

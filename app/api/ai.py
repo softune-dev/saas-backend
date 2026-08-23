@@ -169,3 +169,25 @@ async def confirm_update_product(
 ) -> UpdateProductActionOut:
     product = await ai_actions.update_product(db, user.tenant_id, payload.product)
     return UpdateProductActionOut(product=product)
+
+
+class CreateTicketActionIn(BaseModel):
+    subject: str = Field(min_length=1, max_length=200)
+    category: str = Field(min_length=1, max_length=60)
+    priority: str = "Medium"
+    message: str = Field(min_length=1, max_length=5000)
+
+
+class CreateTicketActionOut(BaseModel):
+    ticket: dict
+
+
+@actions_router.post("/create-ticket", response_model=CreateTicketActionOut)
+async def confirm_create_ticket(
+    payload: CreateTicketActionIn, user: CurrentUser, db: DB
+) -> CreateTicketActionOut:
+    ticket = await ai_actions.create_ticket(
+        db, user.tenant_id, user.user_id,
+        payload.subject, payload.category, payload.priority, payload.message,
+    )
+    return CreateTicketActionOut(ticket=ticket)

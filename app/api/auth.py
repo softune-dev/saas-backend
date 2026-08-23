@@ -17,7 +17,6 @@ from app.schemas import (
     MeOut,
     MeUpdate,
     RefreshIn,
-    RegisterIn,
     TenantBusinessUpdate,
     TenantOut,
     TokenOut,
@@ -44,48 +43,13 @@ def _tokens(user: User) -> TokenOut:
     )
 
 
-@router.post("/register", response_model=TokenOut, status_code=status.HTTP_201_CREATED)
-async def register(payload: RegisterIn, db: DB) -> TokenOut:
-    """Create a workspace (tenant) and its first user, then log them straight in.
-
-    Signing up creates BOTH rows in one transaction. If the user insert fails,
-    the tenant must not survive as an orphan — so there is exactly one commit at
-    the end, not one per row.
-    """
-    existing = await db.execute(select(User.id).where(User.email == payload.email))
-    if existing.scalar_one_or_none():
-        # Deliberately explicit here. Some argue this leaks which emails are
-        # registered, but a vague error on a SIGNUP form is a support nightmare
-        # ("it just says something went wrong"). The real protection against
-        # enumeration belongs on /login, which is vague below.
-        raise HTTPException(status.HTTP_409_CONFLICT, "An account with that email exists.")
-
-    # Ensure a unique workspace slug: "Acme Co" -> acme-co, acme-co-2, ...
-    base = crud.slugify(payload.workspace_name, "workspace")
-    slug = base
-    for n in range(2, 100):
-        taken = await db.execute(select(Tenant.id).where(Tenant.slug == slug))
-        if not taken.scalar_one_or_none():
-            break
-        slug = f"{base}-{n}"
-
-    tenant = Tenant(slug=slug, name=payload.workspace_name)
-    db.add(tenant)
-    # flush (not commit) sends the INSERT so tenant.id is populated, while the
-    # transaction stays open and still rolls back as one unit.
-    await db.flush()
-
-    user = User(
-        tenant_id=tenant.id,
-        email=payload.email,
-        password_hash=hash_password(payload.password),
-        full_name=payload.full_name,
-        role="owner",
-    )
-    db.add(user)
-    await db.commit()
-    await db.refresh(user)
-    return _tokens(user)
+# Public self-signup (POST /register) is intentionally removed: this is a
+# paid-only service, and an open registration endpoint on a public domain
+# meant anyone could create a free account with no payment step in between.
+# Until real billing exists, accounts are created directly by us after
+# payment is received — see scripts/create_account.py, which uses the exact
+# same crud.create_tenant_and_owner() this endpoint used to call, so nothing
+# about what "creating an account" means has changed, only who can trigger it.
 
 
 @router.post("/login", response_model=TokenOut)

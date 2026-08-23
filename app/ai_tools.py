@@ -15,13 +15,14 @@ silently.
 import json
 import logging
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import cache
-from app.models import Order, OrderItem, Product, Site
+from app import cache, media
+from app.models import Order, OrderItem, Product, Site, Tenant
 
 log = logging.getLogger(__name__)
 
@@ -85,11 +86,39 @@ TOOL_DECLARATIONS = [
     {
         "name": "get_site_info",
         "description": (
-            "The merchant's business/contact details, SEO settings, delivery "
-            "locations, FAQs, and whether a privacy policy or terms page is "
-            "published — everything set in Site Settings. Call this for any "
-            "question about the store's contact info, address, hours, socials, "
-            "SEO, shipping areas, FAQs, or legal pages."
+            "Everything set in Site Settings: domain (subdomain, connected "
+            "custom domain, published status), business/contact details, "
+            "full SEO configuration (meta description, keywords, OG title/"
+            "description/image, favicon, indexing/sitemap, Analytics/Search "
+            "Console/Pixel connection status), delivery locations, FAQs, "
+            "whether About Us has been written, and whether a privacy policy "
+            "or terms page is published. Call this for any question about "
+            "the store's domain, contact info, SEO, shipping areas, FAQs, "
+            "About Us, or legal pages — and to spot real gaps worth flagging "
+            "(an empty meta description, no OG image, no domain connected)."
+        ),
+        "parameters": {"type": "OBJECT", "properties": {}},
+    },
+    {
+        "name": "get_media_stats",
+        "description": (
+            "How many images/videos the merchant has uploaded (by category: "
+            "hero, products, categories, other), and total storage used "
+            "against their plan's limit. Call this for any question about "
+            "media/storage usage, or to check if they're close to their "
+            "plan's storage limit before suggesting more uploads."
+        ),
+        "parameters": {"type": "OBJECT", "properties": {}},
+    },
+    {
+        "name": "get_billing_status",
+        "description": (
+            "The merchant's current plan, today's AI assistant usage against "
+            "the plan's daily cap, and storage usage against the plan's "
+            "limit. Call this for any question about their plan, billing, or "
+            "usage limits. No pricing figures are available here — if asked "
+            "about upgrade cost, say you don't have real pricing to quote and "
+            "point them to the Billing page or support."
         ),
         "parameters": {"type": "OBJECT", "properties": {}},
     },
@@ -157,12 +186,16 @@ async def _get_business_overview(db: AsyncSession, tenant_id: uuid.UUID) -> dict
 
 
 async def _get_site_info(db: AsyncSession, tenant_id: uuid.UUID) -> dict:
-    """Everything set in Site Settings — business/contact info, SEO basics,
-    delivery locations, FAQs, and legal-page publish status. Legal page BODY
-    text is deliberately excluded (could be long; a merchant asking "what
-    does my privacy policy say" is rare enough not to pay for it on every
-    call) — only whether one is published, so the assistant can at least
-    say correctly whether the page exists.
+    """Everything set in Site Settings — domain, business/contact info, full
+    SEO configuration, delivery locations, FAQs, and legal-page publish
+    status. Every field is returned even when empty (None / False), on
+    purpose — an empty meta_description or a missing OG image is exactly
+    the kind of real, fixable gap the assistant should be able to notice
+    and point out, not silently omit. Legal page BODY text is deliberately
+    excluded (could be long; a merchant asking "what does my privacy policy
+    say" is rare enough not to pay for it on every call) — only whether one
+    is published, so the assistant can at least say correctly whether the
+    page exists.
     """
     site = (
         await db.execute(select(Site).where(Site.tenant_id == tenant_id).limit(1))
@@ -173,10 +206,15 @@ async def _get_site_info(db: AsyncSession, tenant_id: uuid.UUID) -> dict:
     business = site.business or {}
     seo = site.seo or {}
     legal = site.legal or {}
+    about = site.about or {}
     currency = await _tenant_currency(db, tenant_id)
 
     return {
         "site_name": site.name,
+        "site_status": site.status,
+        "subdomain": f"{site.subdomain}.softune.xyz",
+        "custom_domain": site.custom_domain,
+        "published": site.status == "published",
         "business_name": business.get("name") or None,
         "description": business.get("description") or None,
         "phone": business.get("phone") or None,
@@ -189,6 +227,19 @@ async def _get_site_info(db: AsyncSession, tenant_id: uuid.UUID) -> dict:
         "seo_title_suffix": seo.get("title_suffix") or None,
         "meta_description": seo.get("meta_description") or None,
         "keywords": seo.get("keywords") or None,
+        "og_title": seo.get("og_title") or None,
+        "og_description": seo.get("og_description") or None,
+        "og_image_set": bool(seo.get("og_image")),
+        "favicon_set": bool(seo.get("favicon")),
+        # indexing_hidden=True means noindex — deliberately named for what a
+        # merchant is trying to decide ("should Google find this yet"), not
+        # a raw DB flag name.
+        "indexing_hidden": bool(seo.get("noindex")),
+        "sitemap_enabled": seo.get("sitemap_enabled", True),
+        "google_analytics_connected": bool(seo.get("google_analytics")),
+        "search_console_connected": bool(seo.get("google_search_console")),
+        "facebook_pixel_connected": bool(seo.get("facebook_pixel")),
+        "about_us_written": bool(about.get("paragraphs")),
         "delivery_locations": [
             {"name": loc.get("name"), "charge": _money(loc.get("charge_cents", 0), currency)}
             for loc in (site.shipping or {}).get("locations", [])
@@ -199,6 +250,107 @@ async def _get_site_info(db: AsyncSession, tenant_id: uuid.UUID) -> dict:
         ],
         "privacy_policy_published": bool(legal.get("privacy", {}).get("published")),
         "terms_published": bool(legal.get("terms", {}).get("published")),
+    }
+
+
+async def _get_media_stats(db: AsyncSession, tenant_id: uuid.UUID) -> dict:
+    site = (
+        await db.execute(select(Site).where(Site.tenant_id == tenant_id).limit(1))
+    ).scalars().first()
+    if site is None:
+        return {"error": "No site found for this account"}
+
+    tenant = (
+        await db.execute(select(Tenant).where(Tenant.id == tenant_id))
+    ).scalar_one_or_none()
+    plan = tenant.plan if tenant else "starter"
+
+    def collect() -> dict:
+        # media.list_images is a synchronous Cloudinary SDK call — run off
+        # the event loop, same fix as app/api/media.py's upload/cleanup
+        # endpoints (see that file for why this matters on a single-worker
+        # process: a blocking call here would stall every other request).
+        by_category: dict[str, dict] = {}
+        total_bytes = 0
+        for category in sorted(media.VALID_CATEGORIES):
+            images = media.list_images(site.subdomain, category)
+            count = len(images)
+            bytes_used = sum((img.get("bytes") or 0) for img in images)
+            by_category[category] = {"count": count, "bytes": bytes_used}
+            total_bytes += bytes_used
+        return {"by_category": by_category, "total_bytes": total_bytes}
+
+    try:
+        stats = await run_in_threadpool(collect)
+    except Exception as exc:  # noqa: BLE001 — Cloudinary being unreachable shouldn't break the chat
+        log.warning("get_media_stats: media lookup failed: %s", exc)
+        return {"error": "Couldn't reach media storage right now."}
+
+    limit_bytes = media.plan_storage_limit(plan)
+    return {
+        "plan": plan,
+        "total_files": sum(c["count"] for c in stats["by_category"].values()),
+        "by_category": {
+            cat: {"files": c["count"], "megabytes": round(c["bytes"] / 1_048_576, 1)}
+            for cat, c in stats["by_category"].items()
+        },
+        "storage_used_mb": round(stats["total_bytes"] / 1_048_576, 1),
+        "storage_limit_mb": round(limit_bytes / 1_048_576, 1),
+        "storage_percent_used": round(stats["total_bytes"] / limit_bytes * 100, 1)
+        if limit_bytes
+        else 0,
+    }
+
+
+# Mirrors app/ai.py's PLAN_AI_DAILY_CAP — duplicated, not imported, since
+# app/ai.py imports THIS module (ai_tools), so importing back would be
+# circular. Same tradeoff this codebase already makes between app/media.py's
+# and app/ai.py's own separate per-plan dicts — keep in sync if it changes.
+_PLAN_AI_DAILY_CAP: dict[str, int] = {"demo": 50, "starter": 0, "growth": 80, "business": 250}
+_DEFAULT_AI_DAILY_CAP = 80
+
+
+async def _get_billing_status(db: AsyncSession, tenant_id: uuid.UUID) -> dict:
+    tenant = (
+        await db.execute(select(Tenant).where(Tenant.id == tenant_id))
+    ).scalar_one_or_none()
+    if tenant is None:
+        return {"error": "No account found."}
+    plan = tenant.plan
+    ai_cap = _PLAN_AI_DAILY_CAP.get(plan, _DEFAULT_AI_DAILY_CAP)
+
+    # Same cache key format + raw-integer-counter shape as app/ai.py's
+    # _usage_key/get_usage (client.incr writes a plain int, not JSON).
+    ai_usage_key = f"ai:suggestions:{tenant_id}:{date.today().isoformat()}"
+    ai_used = 0
+    try:
+        raw = await cache.client().get(ai_usage_key)
+        ai_used = int(raw) if raw else 0
+    except Exception as exc:  # noqa: BLE001 — a display glitch, not a hard failure
+        log.warning("get_billing_status: AI usage lookup failed: %s", exc)
+
+    site = (
+        await db.execute(select(Site).where(Site.tenant_id == tenant_id).limit(1))
+    ).scalars().first()
+    storage_used_mb = 0.0
+    storage_limit_mb = round(media.plan_storage_limit(plan) / 1_048_576, 1)
+    if site is not None:
+        try:
+            used_bytes = await run_in_threadpool(media.site_storage_used_bytes, site.subdomain)
+            storage_used_mb = round(used_bytes / 1_048_576, 1)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("get_billing_status: media lookup failed: %s", exc)
+
+    return {
+        "plan": plan,
+        "account_status": tenant.status,
+        "ai_requests_used_today": ai_used,
+        "ai_requests_daily_limit": ai_cap,
+        "storage_used_mb": storage_used_mb,
+        "storage_limit_mb": storage_limit_mb,
+        # No real pricing source exists in this backend (no PLAN_PRICE
+        # table) — never invented here. The system prompt is told to say so
+        # plainly rather than guess a number if asked about upgrade cost.
     }
 
 
@@ -326,6 +478,8 @@ _HANDLERS = {
     "get_order": _get_order,
     "get_sales_summary": _get_sales_summary,
     "get_site_info": _get_site_info,
+    "get_media_stats": _get_media_stats,
+    "get_billing_status": _get_billing_status,
 }
 
 

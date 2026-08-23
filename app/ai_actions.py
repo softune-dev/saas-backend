@@ -23,7 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import cache, crud, media, products
-from app.models import Category, Product, Site
+from app.models import Category, HelpTicket, Product, Site
 
 
 async def _resolve_site(db: AsyncSession, tenant_id: uuid.UUID) -> Site:
@@ -243,4 +243,56 @@ async def update_product(db: AsyncSession, tenant_id: uuid.UUID, product: dict) 
         "stock": row.stock,
         "is_active": row.is_active,
         "category_id": str(row.category_id) if row.category_id else None,
+    }
+
+
+# Must match dashboard/components/help-desk/help-data.ts's ticketCategories
+# exactly — this is the same dropdown a merchant filling out the form by
+# hand would see, so the assistant's auto-picked category should land in
+# one of the same real buckets support actually triages by, not an
+# invented one that never shows up anywhere else.
+_TICKET_CATEGORIES = {"Billing", "Technical", "Domain", "Shipping", "Account", "Other"}
+_TICKET_PRIORITIES = {"Low", "Medium", "High"}
+
+
+async def create_ticket(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    user_id: uuid.UUID,
+    subject: str,
+    category: str,
+    priority: str,
+    message: str,
+) -> dict:
+    """Files a real Help Desk ticket (same table/endpoint as the merchant
+    filling out the form themselves — see app/api/help_desk.py) on the
+    assistant's behalf, once the merchant has confirmed the exact
+    subject/category/priority/message shown in the chat's confirm card.
+    Never auto-submitted from inside chat_reply itself — this only runs from
+    the separate confirm endpoint, same two-step boundary as every other
+    action in this module.
+    """
+    subject = subject.strip()[:200]
+    message = message.strip()[:5000]
+    if not subject or not message:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Ticket needs a subject and message")
+
+    category = category if category in _TICKET_CATEGORIES else "Other"
+    priority = priority if priority in _TICKET_PRIORITIES else "Medium"
+
+    ticket = HelpTicket(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        subject=subject,
+        category=category,
+        priority=priority,
+        message=message,
+    )
+    ticket = await crud.save(db, ticket)
+    return {
+        "id": str(ticket.id),
+        "subject": ticket.subject,
+        "category": ticket.category,
+        "priority": ticket.priority,
+        "status": ticket.status,
     }
