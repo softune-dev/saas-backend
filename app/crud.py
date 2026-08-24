@@ -232,11 +232,21 @@ async def get_or_create_customer(
     if existing is not None:
         return existing
 
+    # Checkout sends first_name/last_name separately (see app/api/public.py's
+    # order-notification body, which builds the same join) — there is no
+    # single "name" key in the real payload, so reading one always returned
+    # None and left every real customer showing "Unnamed" in the dashboard.
+    name = " ".join(
+        str(customer.get(k, "")).strip()
+        for k in ("first_name", "last_name")
+        if isinstance(customer.get(k), str)
+    ).strip() or None
+
     record = Customer(
         tenant_id=tenant_id,
         site_id=site_id,
         phone=normalized,
-        name=customer.get("name") if isinstance(customer.get("name"), str) else None,
+        name=name,
         email=customer.get("email") if isinstance(customer.get("email"), str) else None,
     )
     db.add(record)
