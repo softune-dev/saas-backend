@@ -70,10 +70,13 @@ async def test_site_list_only_shows_own_sites(two_accounts, template_id):
     a, b = two_accounts
     site = await _make_site(a, template_id)
 
+    # Every account is provisioned with one site at creation time (see
+    # crud.create_tenant_owner_and_site) — b's list is never empty, the
+    # real assertion is that it never contains a's site.
     b_list = await b.get("/sites")
     ids = [s["id"] for s in b_list.json()["items"]]
     assert site["id"] not in ids
-    assert b_list.json()["total"] == 0
+    assert b_list.json()["total"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -231,31 +234,16 @@ async def test_garbage_token_is_rejected(client):
     assert response.status_code == 401
 
 
-async def test_refresh_token_cannot_be_used_as_access_token(client):
+async def test_refresh_token_cannot_be_used_as_access_token(client, account: Account):
     """A refresh token lives for weeks. If it were accepted on normal endpoints,
     a leaked one would grant long-term access instead of a single exchange."""
-    suffix = uuid.uuid4().hex[:12]
-    reg = await client.post(
-        "/auth/register",
-        json={
-            "email": f"typ-{suffix}@softune-test-fixtures.dev",
-            "password": "test-password-123",
-            "workspace_name": f"Typ {suffix}",
-        },
+    login = await client.post(
+        "/auth/login", json={"email": account.email, "password": "test-password-123"}
     )
-    refresh = reg.json()["refresh_token"]
+    refresh = login.json()["refresh_token"]
 
     response = await client.get("/sites", headers={"Authorization": f"Bearer {refresh}"})
     assert response.status_code == 401
-
-    # Clean up (no `account` fixture used here).
-    from tests.conftest import _cleanup
-
-    me = await client.get(
-        "/auth/me",
-        headers={"Authorization": f"Bearer {reg.json()['access_token']}"},
-    )
-    await _cleanup([me.json()["tenant"]["id"]])
 
 
 @pytest.mark.parametrize(

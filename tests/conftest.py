@@ -20,9 +20,11 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete, select
 
+from app.crud import create_tenant_owner_and_site
 from app.db import SessionLocal, engine
 from app.main import app
 from app.models import Tenant, Template
+from app.security import create_access_token
 
 
 @pytest.fixture(autouse=True)
@@ -83,27 +85,35 @@ class Account:
 
 
 async def _register(client: AsyncClient) -> Account:
-    """Create a brand-new isolated tenant. Random email so parallel runs never clash."""
+    """Create a brand-new isolated tenant. Random email so parallel runs never clash.
+
+    POST /auth/register no longer exists (public self-signup was closed —
+    this is a paid-only service; accounts are created directly via
+    crud.create_tenant_owner_and_site, same as scripts/create_account.py
+    does after payment is received). Calling that function directly here is
+    the fixture's equivalent of "signing up" — it's the same account-
+    creation path production uses now, just invoked in-process instead of
+    over HTTP, since there's no public endpoint left to hit.
+    """
     suffix = uuid.uuid4().hex[:12]
     # .test is an RFC 2606 reserved TLD — email_validator (used by pydantic's
     # EmailStr on RegisterIn) rejects it outright, so a fixture email can't
     # use it even though it reads like the obvious choice for test data.
     email = f"test-{suffix}@softune-test-fixtures.dev"
-    response = await client.post(
-        "/auth/register",
-        json={
-            "email": email,
-            "password": "test-password-123",
-            "full_name": "Test User",
-            "workspace_name": f"Test WS {suffix}",
-        },
-    )
-    assert response.status_code == 201, f"register failed: {response.text}"
-    token = response.json()["access_token"]
-
-    me = await client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
-    tenant_id = me.json()["tenant"]["id"]
-    return Account(client, email, tenant_id, token)
+    async with SessionLocal() as db:
+        user, _site = await create_tenant_owner_and_site(
+            db,
+            email=email,
+            password="test-password-123",
+            workspace_name=f"Test WS {suffix}",
+            plan="demo",
+            template_key="aurora",
+            site_name=f"Test Site {suffix}",
+            subdomain=f"test-fixture-{suffix}",
+            full_name="Test User",
+        )
+    token = create_access_token(user.id, user.tenant_id, user.role)
+    return Account(client, email, str(user.tenant_id), token)
 
 
 async def _cleanup(tenant_ids: list[str]) -> None:

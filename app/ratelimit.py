@@ -56,3 +56,48 @@ def rate_limit(key: str, limit: int, window_seconds: int):
             )
 
     return _dependency
+
+
+async def login_rate_limit(request: Request) -> None:
+    """Two independent windows, both enforced: per-IP (catches a single
+    attacker spraying many emails) and per-email (catches a distributed
+    brute force against one account from many IPs — a plain per-IP limit
+    alone lets that straight through). The per-IP limit is deliberately
+    generous (20/5min) since it's shared by everyone behind the same NAT/
+    office connection; the per-email limit is tighter (8/5min) since a real
+    user mistyping their password a handful of times is normal, dozens
+    isn't.
+
+    Reads the email from the request body directly rather than declaring it
+    as a route parameter — Starlette caches the raw body after the first
+    read, so this doesn't interfere with FastAPI's own `payload: LoginIn`
+    parsing in the route handler afterward.
+    """
+    ip = _client_ip(request)
+    email = ""
+    try:
+        body = await request.json()
+        email = str(body.get("email", "")).strip().lower()
+    except Exception:  # noqa: BLE001 - malformed body; let the route's own validation reject it
+        pass
+
+    checks = [(f"ratelimit:login_ip:{ip}", 20, 300)]
+    if email:
+        checks.append((f"ratelimit:login_email:{email}", 8, 300))
+
+    try:
+        c = cache.client()
+        for redis_key, limit, window_seconds in checks:
+            count = await c.incr(redis_key)
+            if count == 1:
+                await c.expire(redis_key, window_seconds)
+            if count > limit:
+                raise HTTPException(
+                    status.HTTP_429_TOO_MANY_REQUESTS,
+                    "Too many login attempts. Please try again in a few minutes.",
+                )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - see module docstring
+        log.warning("login rate limit check failed for %s: %s (allowing request)", ip, exc)
+        return

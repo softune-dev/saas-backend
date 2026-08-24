@@ -1,9 +1,11 @@
 """Register, login, refresh, me."""
 
 import uuid
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,8 +30,17 @@ from app.security import (
     create_refresh_token,
     decode_token,
     hash_password,
+    revoke_all_user_tokens,
+    revoke_token,
     verify_password,
 )
+from app.ratelimit import login_rate_limit
+
+# Local instance (not security.py's private _bearer) so /auth/logout can read
+# the bearer header without an unauthenticated request 401ing before the
+# handler even runs — auto_error=False makes a missing/expired access token
+# a no-op here (there's still the refresh token in the body to revoke).
+_bearer = HTTPBearer(auto_error=False)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 DB = Annotated[AsyncSession, Depends(get_db)]
@@ -52,7 +63,11 @@ def _tokens(user: User) -> TokenOut:
 # about what "creating an account" means has changed, only who can trigger it.
 
 
-@router.post("/login", response_model=TokenOut)
+@router.post(
+    "/login",
+    response_model=TokenOut,
+    dependencies=[Depends(login_rate_limit)],
+)
 async def login(payload: LoginIn, db: DB) -> TokenOut:
     user = (
         await db.execute(select(User).where(User.email == payload.email))
@@ -82,7 +97,7 @@ async def refresh(payload: RefreshIn, db: DB) -> TokenOut:
     it is the natural checkpoint to confirm the account still exists and is
     active — the check we skip on every other request for speed.
     """
-    claims = decode_token(payload.refresh_token, expect="refresh")
+    claims = await decode_token(payload.refresh_token, expect="refresh")
     try:
         user_id = uuid.UUID(claims["sub"])
     except (KeyError, ValueError):
@@ -162,3 +177,39 @@ async def change_password(payload: ChangePasswordIn, user: CurrentUser, db: DB) 
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Current password is incorrect")
     db_user.password_hash = hash_password(payload.new_password)
     await crud.save(db, db_user)
+    # A password change is exactly the case access-token statelessness can't
+    # cover on its own (see get_principal's tradeoff note) — every other
+    # device/tab stays logged in on the old password otherwise, for up to
+    # ACCESS_TOKEN_EXPIRE_MINUTES on access tokens and the full 14 days on
+    # any refresh token. Kill all of them now; this request's own new tokens
+    # (issued after this point) are unaffected since they're issued after.
+    await revoke_all_user_tokens(db_user.id)
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+async def logout(
+    payload: RefreshIn,
+    creds: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+) -> None:
+    """Revoke this session's access token (from the bearer header) and
+    refresh token (from the body) so both stop working immediately instead
+    of quietly remaining valid — an access token for up to
+    ACCESS_TOKEN_EXPIRE_MINUTES, a refresh token for up to 14 days."""
+    if creds is not None:
+        try:
+            access_claims = await decode_token(creds.credentials, expect="access")
+            await revoke_token(
+                access_claims["jti"],
+                datetime.fromtimestamp(access_claims["exp"], tz=UTC),
+            )
+        except HTTPException:
+            pass  # already invalid/expired — nothing to revoke
+
+    try:
+        refresh_claims = await decode_token(payload.refresh_token, expect="refresh")
+        await revoke_token(
+            refresh_claims["jti"],
+            datetime.fromtimestamp(refresh_claims["exp"], tz=UTC),
+        )
+    except HTTPException:
+        pass  # already invalid/expired — nothing to revoke

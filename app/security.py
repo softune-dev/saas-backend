@@ -57,6 +57,9 @@ def _encode(
         "typ": kind,
         "iat": now,
         "exp": now + ttl,
+        # Individual-token id — lets a single token be revoked (logout)
+        # without touching every other token issued to this user.
+        "jti": str(uuid.uuid4()),
     }
     return jwt.encode(payload, settings.secret_key, algorithm=ALGORITHM)
 
@@ -75,7 +78,7 @@ def create_refresh_token(user_id: uuid.UUID, tenant_id: uuid.UUID, role: str) ->
     )
 
 
-def decode_token(token: str, expect: Literal["access", "refresh"]) -> dict:
+async def decode_token(token: str, expect: Literal["access", "refresh"]) -> dict:
     try:
         payload = jwt.decode(token, settings.secret_key, algorithms=[ALGORITHM])
     except jwt.ExpiredSignatureError:
@@ -88,7 +91,78 @@ def decode_token(token: str, expect: Literal["access", "refresh"]) -> dict:
     # exchanging at /auth/refresh.
     if payload.get("typ") != expect:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Wrong token type")
+
+    # Deny-list check — fails OPEN on a Redis error (see revoke_token's own
+    # comment): a JWT is still stateless in the normal case, this is only an
+    # extra veto layer for the two cases that actually need instant effect
+    # (logout, password change), not a per-request DB/Redis dependency.
+    # One MGET round-trip for both keys, not two sequential GETs — this runs
+    # on every authenticated request, so it halves both the normal-case
+    # latency and the worst-case delay before falling open if Redis is slow
+    # or unreachable (bounded by cache.py's 2s socket timeout, once, not
+    # twice in series).
+    from app import cache
+
+    try:
+        c = cache.client()
+        jti = payload.get("jti")
+        user_id = payload.get("sub")
+        jti_val, revoked_at_raw = await c.mget(
+            f"revoked:jti:{jti}" if jti else "revoked:jti:__none__",
+            f"revoked:user:{user_id}" if user_id else "revoked:user:__none__",
+        )
+        if jti and jti_val:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token has been revoked")
+
+        if revoked_at_raw:
+            revoked_at = datetime.fromisoformat(revoked_at_raw)
+            issued_at = datetime.fromtimestamp(payload["iat"], tz=UTC)
+            if issued_at < revoked_at:
+                raise HTTPException(
+                    status.HTTP_401_UNAUTHORIZED, "Session no longer valid — please log in again"
+                )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - same fail-open tradeoff as cache.py
+        import logging
+
+        logging.getLogger(__name__).warning("token revocation check failed: %s (allowing)", exc)
+
     return payload
+
+
+async def revoke_token(jti: str, expires_at: datetime) -> None:
+    """Deny-list a single token (logout) until it would have expired anyway
+    — no reason to keep the entry around after that."""
+    from app import cache
+
+    ttl = max(1, int((expires_at - datetime.now(UTC)).total_seconds()))
+    try:
+        await cache.client().set(f"revoked:jti:{jti}", "1", ex=ttl)
+    except Exception as exc:  # noqa: BLE001 - fail open, same as cache.py elsewhere
+        import logging
+
+        logging.getLogger(__name__).warning("failed to revoke token %s: %s", jti, exc)
+
+
+async def revoke_all_user_tokens(user_id: uuid.UUID) -> None:
+    """Bulk-revoke every token issued to this user before right now,
+    regardless of each token's own expiry — used for password change and
+    account deactivation, the two cases from this module's own tradeoff
+    note that actually need to take effect immediately rather than waiting
+    out ACCESS_TOKEN_EXPIRE_MINUTES. TTL matches the refresh token's
+    lifetime, the longest a stale token could otherwise still be valid."""
+    from app import cache
+
+    ttl = settings.refresh_token_expire_days * 86400
+    try:
+        await cache.client().set(
+            f"revoked:user:{user_id}", datetime.now(UTC).isoformat(), ex=ttl
+        )
+    except Exception as exc:  # noqa: BLE001 - fail open, same as cache.py elsewhere
+        import logging
+
+        logging.getLogger(__name__).warning("failed to revoke tokens for user %s: %s", user_id, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +205,7 @@ async def get_principal(
             "Missing bearer token",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    payload = decode_token(creds.credentials, expect="access")
+    payload = await decode_token(creds.credentials, expect="access")
     try:
         return Principal(
             user_id=uuid.UUID(payload["sub"]),
