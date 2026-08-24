@@ -38,14 +38,15 @@ log = logging.getLogger(__name__)
 # whenever the real plan lineup settles. Four real plans, no "free" tier:
 #   - demo: internal/trial tenants (today's only two real tenants) — enough
 #     allowance to actually try the assistant, not a token amount.
-#   - starter: 0 means no AI access at all, by design, not just a low cap.
+#   - starter: every paying customer gets real AI access, just a lower cap
+#     than the higher tiers — not 0.
 #   - growth / business: real paid-tier allowances.
 # Any plan value not listed falls back to DEFAULT_AI_DAILY_CAP (same as
 # growth) rather than silently 0 — an unrecognized plan should never look
-# like "AI isn't included," that's what 0 explicitly means.
+# like "AI isn't included."
 PLAN_AI_DAILY_CAP: dict[str, int] = {
     "demo": 50,
-    "starter": 0,
+    "starter": 15,
     "growth": 80,
     "business": 250,
 }
