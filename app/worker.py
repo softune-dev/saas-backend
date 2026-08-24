@@ -228,29 +228,28 @@ async def handle_capture_screenshot(payload: dict) -> None:
         log.warning("screenshot: site %s no longer exists, dropping job", site_id)
         return
 
-    # TEMPORARY REVERT: prefer custom_domain again. The free-subdomain-first
-    # change (subdomain.{site_base_domain}) broke this in practice —
-    # SITE_BASE_DOMAIN in .env is currently "vercel.app", a placeholder that
-    # was never updated to the real value, so every subdomain capture hit a
-    # real Vercel account's DEPLOYMENT_NOT_FOUND 404 page instead of a real
-    # site. Switch back to subdomain-first once SITE_BASE_DOMAIN is confirmed
-    # and corrected — see this function's git history for the intended change.
-    host = site.custom_domain or f"{site.subdomain}.{settings.site_base_domain}"
+    # Prefer the subdomain over a custom_domain: the worker's own revalidate
+    # call (handle_revalidate_site, queued alongside this job) targets the
+    # subdomain, and a merchant's custom domain typically has its own DNS/CDN
+    # layer with slower, less predictable propagation on top of that. Using
+    # whichever host actually gets revalidated means the screenshot reliably
+    # reflects the just-published content instead of racing a slower path.
+    host = f"{site.subdomain}.{settings.site_base_domain}"
 
     # This job is queued in the same breath as JOB_REVALIDATE_SITE, right
     # when publish_site commits — capturing immediately would very likely
     # screenshot the PRE-publish page, since CDN/revalidation propagation
-    # isn't instant. Deliberately generous (not just matching the 1-2 min
-    # publish-toast copy) — give slower propagation real room before giving
-    # up and capturing stale content anyway.
+    # isn't instant. 90s is real room above the typical build+propagate
+    # time without holding the job queue for as long as the previous 8
+    # minutes did.
     #
     # Cost: this handler holds one of the worker's 5 prefetched slots (see
     # main()'s set_qos) for the whole wait. At soft-launch volume that's
-    # fine; if 5+ tenants ever publish within the same ~8-minute window,
-    # a 6th unrelated job (order email, revalidate, whatever) would have to
-    # wait for a slot to free up. Worth switching to a proper delayed-requeue
+    # fine; if 5+ tenants ever publish within the same ~90s window, a 6th
+    # unrelated job (order email, revalidate, whatever) would have to wait
+    # for a slot to free up. Worth switching to a proper delayed-requeue
     # instead of a blocking sleep if that ever becomes a real bottleneck.
-    await asyncio.sleep(8 * 60)
+    await asyncio.sleep(90)
 
     try:
         png = await screenshot.capture_mobile_screenshot(f"https://{host}")

@@ -171,10 +171,27 @@ async def update_site(
     return site
 
 
+# Minimum gap between two publishes of the same site. Publishing kicks off a
+# real Vercel build (1-3 min), CDN propagation, and a screenshot job that
+# waits on both — publishing again mid-flight risks racing those against
+# each other (e.g. the screenshot job capturing whichever build happened to
+# finish last, not the one the merchant thinks they just published).
+_PUBLISH_COOLDOWN_SECONDS = 60
+
+
 @router.post("/sites/{site_id}/publish", response_model=SiteOut)
 async def publish_site(site_id: uuid.UUID, user: CurrentUser, db: DB) -> Site:
     """Take a site live: publish every page, clear noindex, refresh caches."""
     site = await crud.get_scoped(db, Site, user.tenant_id, site_id)
+
+    if site.published_at:
+        elapsed = (datetime.now(UTC) - site.published_at).total_seconds()
+        remaining = _PUBLISH_COOLDOWN_SECONDS - elapsed
+        if remaining > 0:
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                f"Please wait {int(remaining) + 1}s before publishing again.",
+            )
 
     pages = (
         await db.execute(select(SitePage).where(SitePage.site_id == site.id))
