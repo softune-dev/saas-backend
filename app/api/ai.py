@@ -116,6 +116,38 @@ async def get_ai_usage(user: CurrentUser, db: DB) -> AIUsageOut:
     return AIUsageOut(**usage)
 
 
+class GenerateTextIn(BaseModel):
+    # kind selects which prompt/required-context rule applies — see
+    # app/ai.py's _TEXT_PROMPTS / _TEXT_REQUIRED_CONTEXT.
+    kind: str = Field(min_length=1, max_length=60)
+    # Free-form facts the merchant already entered elsewhere in the form
+    # (product name/category/price, site name, etc.) — never trusted as
+    # anything other than copywriting context, never written to the database.
+    context: dict[str, Any] = Field(default_factory=dict)
+    # Non-empty on a "Regenerate" click — switches the prompt from "write
+    # new" to "improve this existing draft" instead of discarding it.
+    current_text: str | None = Field(default=None, max_length=5000)
+
+
+class GenerateTextOut(BaseModel):
+    text: str
+
+
+@usage_router.post("/generate-text", response_model=GenerateTextOut)
+async def generate_ai_text(payload: GenerateTextIn, user: CurrentUser, db: DB) -> GenerateTextOut:
+    """Powers every "Generate"/"Regenerate" button next to a description-style
+    field (product/category descriptions, SEO meta/OG description, About page
+    paragraphs). No site_id/tenant row is touched here — the merchant reviews
+    and saves the result through the normal field + Save button, same as
+    typing it themselves.
+    """
+    plan = await _tenant_plan(db, user.tenant_id)
+    text = await ai.generate_text(
+        payload.kind, payload.context, payload.current_text, str(user.tenant_id), plan
+    )
+    return GenerateTextOut(text=text)
+
+
 class SetCategoriesIn(BaseModel):
     categories: list[str] = Field(min_length=1, max_length=30)
 

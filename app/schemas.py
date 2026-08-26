@@ -315,6 +315,11 @@ class ProductFeature(BaseModel):
 
     title: str = Field(min_length=1, max_length=60)
     description: str = Field(default="", max_length=200)
+    # lucide-react icon name (kebab-case, e.g. "truck", "shield-check") — the
+    # SAME icon library/picker as category icons, so a merchant already knows
+    # this control. None means "not chosen yet"; the storefront falls back to
+    # a neutral default icon, never a guess from the title text.
+    icon: str | None = Field(default=None, max_length=40)
 
 
 class ProductDeliveryCharge(BaseModel):

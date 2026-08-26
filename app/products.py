@@ -18,7 +18,16 @@ Shape:
         {
           "type": "Size",
           "affectsPrice": false,
-          "values": [{"value": "S"}, {"value": "M"}]
+          "values": [{"value": "S"}, {"value": "M", "image": "https://..."}]
+        },
+        {
+          "type": "Color",
+          "isColor": true,
+          "affectsPrice": false,
+          "values": [
+            {"value": "Navy", "hex": "#1F2A44", "image": "https://..."},
+            {"value": "Rust", "hex": "#B7410E"}
+          ]
         },
         {
           "type": "Weight",
@@ -28,8 +37,18 @@ Shape:
         }
       ]
     }
+
+`hex` is only meaningful (and only ever set by the dashboard) when the
+parent type has `isColor: true` — a real merchant-picked color, not a
+guess from the label text; the storefront used to derive a swatch color by
+matching the label against a hardcoded color-name dictionary
+(lib/color-names.ts), which silently rendered the wrong color for any name
+not in that list. `image` works on ANY type's values (Color or otherwise —
+e.g. a "Pattern" swatch benefits from its own photo too), and is what lets
+the storefront swap the main product photo when that value is selected.
 """
 
+import re
 from typing import Any
 
 from fastapi import HTTPException, status
@@ -37,6 +56,8 @@ from fastapi import HTTPException, status
 MAX_VARIANT_TYPES = 10
 MAX_VALUES_PER_TYPE = 30
 MAX_LABEL_LEN = 40
+MAX_IMAGE_URL_LEN = 500
+_HEX_COLOR = re.compile(r"^#[0-9A-Fa-f]{6}$")
 
 # Per-tenant product cap by plan. Deliberately a plain dict, not a database
 # column — same reasoning as app/ai.py's PLAN_AI_DAILY_CAP: pricing isn't
@@ -80,6 +101,7 @@ def _validate_variant_type(raw: Any, index: int) -> dict:
         raise ValueError(f"{where}: name is too long (max {MAX_LABEL_LEN} characters)")
 
     affects_price = bool(raw.get("affectsPrice"))
+    is_color = bool(raw.get("isColor"))
 
     raw_values = raw.get("values")
     if not isinstance(raw_values, list):
@@ -100,6 +122,27 @@ def _validate_variant_type(raw: Any, index: int) -> dict:
             raise ValueError(f"{vwhere}: value is too long (max {MAX_LABEL_LEN} characters)")
 
         clean_value: dict[str, Any] = {"value": label}
+
+        # Only meaningful (and only stored) when the parent type is marked
+        # Color — dropping it otherwise means flipping isColor off doesn't
+        # leave a stale hex silently attached to a now-plain-text value.
+        if is_color:
+            hex_value = str(v.get("hex", "")).strip()
+            if hex_value:
+                if not _HEX_COLOR.match(hex_value):
+                    raise ValueError(f"{vwhere}: color must be a 6-digit hex like #1F2A44")
+                clean_value["hex"] = hex_value
+
+        # Image works on any value regardless of isColor (a "Pattern" swatch
+        # benefits from its own photo too) — real Cloudinary URLs only, same
+        # upload pipeline as the product gallery, never a client-picked
+        # arbitrary string beyond a sane length.
+        image_url = str(v.get("image", "")).strip()
+        if image_url:
+            if len(image_url) > MAX_IMAGE_URL_LEN:
+                raise ValueError(f"{vwhere}: image URL is too long")
+            clean_value["image"] = image_url
+
         # Only meaningful (and only stored) when this type affects price —
         # dropping it otherwise keeps stale price data from lingering if a
         # merchant flips the toggle off after entering prices.
@@ -114,7 +157,10 @@ def _validate_variant_type(raw: Any, index: int) -> dict:
     if not values:
         raise ValueError(f"{where} ({name}): at least one value is required")
 
-    return {"type": name, "affectsPrice": affects_price, "values": values}
+    result: dict[str, Any] = {"type": name, "affectsPrice": affects_price, "values": values}
+    if is_color:
+        result["isColor"] = True
+    return result
 
 
 def validate_variants(raw: Any) -> list[dict]:

@@ -305,6 +305,162 @@ async def suggest_theme_patch(
     return _validate_patch(raw_patch)
 
 
+_COPYWRITER_STYLE = """You are an expert ecommerce copywriter with retail merchandising
+experience at strong DTC brands. Write copy that:
+- Sounds like a real brand wrote it, not generic AI marketing filler ("elevate your
+  lifestyle", "indulge in luxury", "look no further", "unmatched quality")
+- Leads with concrete, specific facts over vague adjectives — material, fit, use case,
+  what actually makes this different — using only what CONTEXT below actually gives you
+- Uses natural, confident, editorial language a real merchandiser would write, not a
+  press release
+- Is scannable: short sentences, no purple prose, no exclamation-point energy
+- NEVER invents facts not present in CONTEXT (material, origin, care instructions,
+  measurements) — write around what's actually given, don't pad with made-up specifics
+"""
+
+# Per-kind prompt + which single context key is the minimum needed before
+# generating makes sense at all (see _TEXT_REQUIRED_CONTEXT below) — e.g. you
+# can't write a product description with no product name, so the dashboard
+# button stays disabled until that's filled in rather than asking Gemini to
+# invent a product out of nothing.
+_TEXT_PROMPTS: dict[str, str] = {
+    "product_short_description": _COPYWRITER_STYLE + """
+Write a SHORT product description: ONE to TWO sentences, plain text (no markdown, no
+HTML), under 200 characters. Used for SEO meta and search result snippets — it must
+read as a hook, not a summary.
+""",
+    "product_description": _COPYWRITER_STYLE + """
+Write a full product description as clean HTML: a few short <p> paragraphs, and an
+optional <ul> of 3-5 key details only if CONTEXT actually supports specific bullet
+points. 150-300 words total. No <h1>/<h2> headings, no inline styles, no markdown code
+fences — return raw HTML only.
+""",
+    "category_description": _COPYWRITER_STYLE + """
+Write a short category description: 1-2 sentences, plain text, no markdown. Sets the
+tone for what's inside this category and why a shopper would want to browse it.
+""",
+    "site_meta_description": _COPYWRITER_STYLE + """
+Write an SEO meta description: ONE sentence, plain text, 120-155 characters. Must read
+naturally as a Google search result snippet, reflect what the store actually sells, and
+never end mid-sentence.
+""",
+    "site_og_description": _COPYWRITER_STYLE + """
+Write an Open Graph description shown when this store's link is shared on social apps
+or WhatsApp: ONE to TWO sentences, plain text, under 200 characters, inviting a click.
+""",
+    "site_about_paragraph": _COPYWRITER_STYLE + """
+Write ONE paragraph for a store's "About" / brand story page: 2-4 sentences, plain
+text, no markdown. An authentic founder-brand voice, not corporate filler.
+""",
+}
+
+_TEXT_REQUIRED_CONTEXT: dict[str, str] = {
+    "product_short_description": "name",
+    "product_description": "name",
+    "category_description": "name",
+    "site_meta_description": "site_name",
+    "site_og_description": "site_name",
+    "site_about_paragraph": "site_name",
+}
+
+
+async def generate_text(
+    kind: str, context: dict, current_text: str | None, tenant_id: str, plan: str
+) -> str:
+    """Generic copywriting generator behind every "Generate"/"Regenerate" button
+    in the dashboard (product/category descriptions, SEO meta/OG description,
+    About page paragraphs). Unlike suggest_theme_patch, this returns free text,
+    not a validated field patch — the caller (app/api/ai.py) hands it straight
+    back to the merchant to review before saving, same as any other text field.
+
+    `context` carries the real facts (product name, category, price, existing
+    site name, etc.) the merchant already entered elsewhere in the form — this
+    is what keeps the output from being generic: the model is told explicitly
+    not to invent beyond what's given here. `current_text`, when non-empty,
+    switches the prompt from "write new" to "improve this", so hitting
+    Regenerate on a field that already has a merchant-edited draft revises it
+    rather than throwing it away.
+    """
+    _ensure_configured()
+    if kind not in _TEXT_PROMPTS:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Unknown text kind")
+
+    required_key = _TEXT_REQUIRED_CONTEXT[kind]
+    if not str(context.get(required_key) or "").strip():
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"Need at least a {required_key.replace('_', ' ')} before generating text.",
+        )
+
+    await _check_ai_access(tenant_id, plan)
+
+    # Only plain scalars/lists reach the prompt — keeps the payload small and
+    # means nothing unexpected (an id, a nested object) leaks into a
+    # third-party API call.
+    clean_context = {
+        k: v
+        for k, v in context.items()
+        if v not in (None, "", []) and isinstance(v, (str, int, float, bool, list))
+    }
+
+    has_existing = bool((current_text or "").strip())
+    action = "Rewrite and improve the EXISTING TEXT below" if has_existing else "Write new text"
+    prompt = (
+        f"{_TEXT_PROMPTS[kind]}\n\n"
+        f"CONTEXT (facts you may use — do not invent beyond this): {json.dumps(clean_context)}\n\n"
+    )
+    if has_existing:
+        prompt += (
+            f"EXISTING TEXT to improve (keep any true facts, fix generic filler, "
+            f"make it sound less like AI wrote it): {current_text}\n\n"
+        )
+    prompt += (
+        f"{action}. Return ONLY the text itself — no preamble, no quotes around it, "
+        "no markdown code fences."
+    )
+
+    body = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 500},
+    }
+    url = GEMINI_URL.format(model=settings.gemini_model)
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as http_client:
+            res = await _post_gemini(
+                http_client, url, params={"key": settings.gemini_api_key}, json=body
+            )
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, f"Couldn't reach the AI service: {exc}"
+        ) from exc
+
+    if res.status_code != 200:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            f"AI service returned an error ({res.status_code}).",
+        )
+
+    try:
+        data = res.json()
+        text = "".join(
+            p.get("text", "") for p in data["candidates"][0]["content"]["parts"]
+        ).strip()
+    except (KeyError, IndexError) as exc:
+        log.warning("Unexpected Gemini generate-text response shape: %s", exc)
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY, "The AI didn't return usable text."
+        ) from exc
+
+    if not text:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "The AI didn't return usable text.")
+
+    # The model occasionally wraps output in a code fence despite being told
+    # not to — strip it rather than showing "```html" literally in a field.
+    text = re.sub(r"^```(?:html)?\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
+    return text.strip()
+
+
 _CHAT_SYSTEM_PROMPT = """You are the assistant embedded in Softune, a small
 business site-builder dashboard. Merchants ask you about running their store —
 theme/design ideas, product copy, section layout, general advice, and
