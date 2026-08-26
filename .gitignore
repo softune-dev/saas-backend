@@ -17,3 +17,6 @@ server.log
 /templates
 /landing
 /superadmin
+
+# Local Claude Code config/skills — machine-specific, not project source.
+.claude/
