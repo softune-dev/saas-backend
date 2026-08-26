@@ -93,6 +93,19 @@ class Settings(BaseSettings):
     # message, until this is set. Server-side only — never sent to the
     # browser, unlike Cloudinary's keys which the SDK needs client-adjacent.
     gemini_api_key: str = ""
+
+    # --- reCAPTCHA (login, checkout, contact form) ---
+    # Same blank-able convention: unset locally, verification just skips
+    # (see app/recaptcha.py) instead of failing every request until it's set.
+    # Server-side only — the SITE key (public, safe in the browser) lives in
+    # NEXT_PUBLIC_RECAPTCHA_SITE_KEY (dashboard and both storefront templates).
+    recaptcha_secret_key: str = ""
+    # A SEPARATE key, registered as "v2 Checkbox" in the reCAPTCHA admin
+    # console (v3 and v2 are different site/secret key pairs, even for the
+    # same domain) — used only as a fallback when v3 scores a request too
+    # low to auto-approve. Blank means no fallback exists: a low v3 score is
+    # then a straight rejection, same as before this existed.
+    recaptcha_v2_secret_key: str = ""
     # Flash-Lite, not Pro — this only ever suggests a handful of theme fields
     # or answers store questions via read-only tools, not deep reasoning, so
     # the cheapest tier is the right default. Uses the "-latest" alias, not a

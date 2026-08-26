@@ -1,6 +1,6 @@
 """Router aggregation — one import for main.py."""
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from app.api import (
     ai,
@@ -19,23 +19,37 @@ from app.api import (
     push,
     sites,
 )
+from app.security import block_demo_writes
 
 api_router = APIRouter()
 api_router.include_router(auth.router)
-api_router.include_router(analytics.router)
-api_router.include_router(sites.router)
-api_router.include_router(media.router)
-api_router.include_router(pages.router)
-api_router.include_router(commerce.router)
-api_router.include_router(customers.router)
-api_router.include_router(courier.router)
-api_router.include_router(payments.router)
-api_router.include_router(fraud.router)
-api_router.include_router(help_desk.router)
-api_router.include_router(notifications.router)
-api_router.include_router(push.router)
+# auth.router is NOT gated here at the whole-router level — /login and
+# /refresh run before any bearer token exists, so block_demo_writes (which
+# resolves CurrentUser) would 401 every login attempt, demo or not. Its own
+# authenticated writes (PATCH /me, PATCH /tenant, POST /change-password) are
+# gated per-route instead — see auth.py. /logout is deliberately left open:
+# ending your own session isn't a data write worth blocking for anyone.
+#
+# public (the unauthenticated storefront API) has no bearer token at all —
+# the dependency would 401 every storefront visitor, so it's excluded
+# entirely. Every other router below can mutate tenant data somewhere, so
+# every one of them gets the demo read-only gate; it only ever acts on
+# non-GET requests (see security.py).
+_demo_guard = [Depends(block_demo_writes)]
+api_router.include_router(analytics.router, dependencies=_demo_guard)
+api_router.include_router(sites.router, dependencies=_demo_guard)
+api_router.include_router(media.router, dependencies=_demo_guard)
+api_router.include_router(pages.router, dependencies=_demo_guard)
+api_router.include_router(commerce.router, dependencies=_demo_guard)
+api_router.include_router(customers.router, dependencies=_demo_guard)
+api_router.include_router(courier.router, dependencies=_demo_guard)
+api_router.include_router(payments.router, dependencies=_demo_guard)
+api_router.include_router(fraud.router, dependencies=_demo_guard)
+api_router.include_router(help_desk.router, dependencies=_demo_guard)
+api_router.include_router(notifications.router, dependencies=_demo_guard)
+api_router.include_router(push.router, dependencies=_demo_guard)
 api_router.include_router(public.router)
-api_router.include_router(ai.router)
-api_router.include_router(ai.chat_router)
-api_router.include_router(ai.actions_router)
-api_router.include_router(ai.usage_router)
+api_router.include_router(ai.router, dependencies=_demo_guard)
+api_router.include_router(ai.chat_router, dependencies=_demo_guard)
+api_router.include_router(ai.actions_router, dependencies=_demo_guard)
+api_router.include_router(ai.usage_router, dependencies=_demo_guard)

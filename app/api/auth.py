@@ -4,12 +4,12 @@ import uuid
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import crud
+from app import crud, recaptcha
 from app.config import settings
 from app.db import get_db
 from app.models import Tenant, User
@@ -26,6 +26,7 @@ from app.schemas import (
 )
 from app.security import (
     CurrentUser,
+    block_demo_writes,
     create_access_token,
     create_refresh_token,
     decode_token,
@@ -34,7 +35,7 @@ from app.security import (
     revoke_token,
     verify_password,
 )
-from app.ratelimit import login_rate_limit
+from app.ratelimit import _client_ip, login_rate_limit
 
 # Local instance (not security.py's private _bearer) so /auth/logout can read
 # the bearer header without an unauthenticated request 401ing before the
@@ -68,7 +69,13 @@ def _tokens(user: User) -> TokenOut:
     response_model=TokenOut,
     dependencies=[Depends(login_rate_limit)],
 )
-async def login(payload: LoginIn, db: DB) -> TokenOut:
+async def login(payload: LoginIn, request: Request, db: DB) -> TokenOut:
+    recaptcha.enforce(
+        await recaptcha.verify(
+            payload.recaptcha_token, "login", _client_ip(request), payload.recaptcha_v2_token
+        )
+    )
+
     user = (
         await db.execute(select(User).where(User.email == payload.email))
     ).scalar_one_or_none()
@@ -128,7 +135,7 @@ async def me(user: CurrentUser, db: DB) -> MeOut:
     )
 
 
-@router.patch("/me", response_model=MeOut)
+@router.patch("/me", response_model=MeOut, dependencies=[Depends(block_demo_writes)])
 async def update_me(payload: MeUpdate, user: CurrentUser, db: DB) -> MeOut:
     """Edits the caller's own profile only — there is no id in the path, so
     there is nothing to scope-check. `exclude_unset=True` means omitting
@@ -147,7 +154,7 @@ async def update_me(payload: MeUpdate, user: CurrentUser, db: DB) -> MeOut:
     return MeOut(user=UserOut.model_validate(db_user), tenant=TenantOut.model_validate(tenant))
 
 
-@router.patch("/tenant", response_model=TenantOut)
+@router.patch("/tenant", response_model=TenantOut, dependencies=[Depends(block_demo_writes)])
 async def update_tenant_business(
     payload: TenantBusinessUpdate, user: CurrentUser, db: DB
 ) -> TenantOut:
@@ -166,7 +173,11 @@ async def update_tenant_business(
     return TenantOut.model_validate(tenant)
 
 
-@router.post("/change-password", status_code=status.HTTP_204_NO_CONTENT)
+@router.post(
+    "/change-password",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(block_demo_writes)],
+)
 async def change_password(payload: ChangePasswordIn, user: CurrentUser, db: DB) -> None:
     db_user = (
         await db.execute(select(User).where(User.id == user.user_id))

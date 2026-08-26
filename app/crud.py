@@ -97,6 +97,22 @@ async def list_scoped(
     return rows, total
 
 
+async def count_scoped(
+    db: AsyncSession,
+    model: type[T],
+    tenant_id: uuid.UUID,
+    *,
+    filters: list | None = None,
+) -> int:
+    """Tenant-scoped row count, no rows fetched. Same WHERE shape as
+    list_scoped — used for plan-limit checks (e.g. the per-plan product cap)
+    that only need the number, not the page."""
+    where = [model.tenant_id == tenant_id, *(filters or [])]  # type: ignore[attr-defined]
+    return (
+        await db.execute(select(func.count()).select_from(model).where(*where))
+    ).scalar_one()
+
+
 # ---------------------------------------------------------------------------
 #  Writes
 # ---------------------------------------------------------------------------

@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import cache, crud, media, products
 from app.db import get_db
-from app.models import Category, Inquiry, Order, OrderItem, Product, Site
+from app.models import Category, Inquiry, Order, OrderItem, Product, Site, Tenant
 from app.schemas import (
     CategoryCreate,
     CategoryOut,
@@ -216,6 +216,15 @@ async def create_product(
     site_id: uuid.UUID, payload: ProductCreate, user: CurrentUser, db: DB
 ) -> Product:
     site = await _owned_site(db, user.tenant_id, site_id)
+
+    # Not crud.get_scoped: a tenant reading its OWN plan isn't an ownership
+    # check the way looking up a site/product is — same reasoning as
+    # app/api/ai.py's _tenant_plan. Tenant.id IS the tenant_id here.
+    tenant = (
+        await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))
+    ).scalar_one()
+    existing_count = await crud.count_scoped(db, Product, user.tenant_id)
+    products.ensure_within_product_limit(existing_count, tenant.plan)
 
     if payload.category_id:
         category = await crud.get_scoped(db, Category, user.tenant_id, payload.category_id)

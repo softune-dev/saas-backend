@@ -7,10 +7,14 @@ from typing import Annotated, Literal
 
 import bcrypt
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.db import get_db
+from app.models import Tenant
 
 ALGORITHM = "HS256"
 _bearer = HTTPBearer(auto_error=False)
@@ -227,3 +231,41 @@ def require_admin(user: CurrentUser) -> Principal:
 
 
 AdminUser = Annotated[Principal, Depends(require_admin)]
+
+
+# ---------------------------------------------------------------------------
+#  Demo accounts — browse only, never write
+# ---------------------------------------------------------------------------
+# Handed to prospects so they can click around a real, populated dashboard
+# before buying. They must never be able to touch the data (upload media,
+# add/edit a category or product, publish theme edits) or run up AI costs
+# on someone else's tenant — see app/api/__init__.py, where this is wired
+# onto every router that can mutate data.
+
+_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+DEMO_WRITE_BLOCKED_MESSAGE = (
+    "This is a demo account for preview only — changes here aren't saved. "
+    "Contact us to get your own site."
+)
+
+
+async def block_demo_writes(
+    request: Request,
+    user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> Principal:
+    """Turns every mutating request (anything but GET/HEAD/OPTIONS) from a
+    "demo" plan tenant into a 403. Safe methods return immediately — no
+    extra query — since browsing freely is the entire point of a demo
+    account; only the plan lookup below costs a request that a write was
+    going to pay for anyway.
+    """
+    if request.method in _SAFE_METHODS:
+        return user
+    tenant = (
+        await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))
+    ).scalar_one()
+    if tenant.plan == "demo":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, DEMO_WRITE_BLOCKED_MESSAGE)
+    return user

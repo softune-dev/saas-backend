@@ -23,7 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import cache, crud, media, products
-from app.models import Category, HelpTicket, Product, Site
+from app.models import Category, HelpTicket, Product, Site, Tenant
 
 
 async def _resolve_site(db: AsyncSession, tenant_id: uuid.UUID) -> Site:
@@ -131,6 +131,7 @@ async def set_categories(
         created.append(await crud.save(db, category))
 
     await cache.invalidate_site(site.subdomain, site.custom_domain)
+    await cache.invalidate_dashboard(str(site.id))
     return [{"id": str(c.id), "name": c.name, "slug": c.slug} for c in created]
 
 
@@ -143,6 +144,15 @@ async def create_product(db: AsyncSession, tenant_id: uuid.UUID, product: dict) 
     other tenant-scoped write in this app.
     """
     site = await _resolve_site(db, tenant_id)
+
+    # Same plan cap the manual "Add product" endpoint enforces — this path
+    # writes a Product row directly (crud.save), not through
+    # POST /sites/{site_id}/products, so it needs its own check or the AI
+    # assistant would be a silent bypass of the limit.
+    tenant = (await db.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one()
+    existing_count = await crud.count_scoped(db, Product, tenant_id)
+    products.ensure_within_product_limit(existing_count, tenant.plan)
+
     category_id = await _resolve_category_id(db, site, product.get("category_name"))
 
     attributes: dict = {}
@@ -181,6 +191,7 @@ async def create_product(db: AsyncSession, tenant_id: uuid.UUID, product: dict) 
     )
     row = await crud.save(db, row)
     await cache.invalidate_site(site.subdomain, site.custom_domain)
+    await cache.invalidate_dashboard(str(site.id))
     return {
         "id": str(row.id),
         "name": row.name,
@@ -235,6 +246,7 @@ async def update_product(db: AsyncSession, tenant_id: uuid.UUID, product: dict) 
 
     row = await crud.save(db, row)
     await cache.invalidate_site(site.subdomain, site.custom_domain)
+    await cache.invalidate_dashboard(str(site.id))
     return {
         "id": str(row.id),
         "name": row.name,

@@ -12,10 +12,8 @@ npx next dev -p 3050
 npx next dev -p 3052
 
 aurora-owner@softune.app
-OMj52NyU6oEvyb
+12345678
 
-bazaar-owner@softune.app
-38tj64sikrbK5e
 
 
 cd ~/saas-backend && git pull && docker compose -f docker-compose.prod.yml up -d --build api worker

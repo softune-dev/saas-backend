@@ -55,6 +55,13 @@ class RegisterIn(BaseModel):
 class LoginIn(BaseModel):
     email: EmailStr
     password: str = Field(max_length=72)
+    # Blank when RECAPTCHA_SECRET_KEY isn't configured (local dev) — see
+    # app/recaptcha.py, which then skips verification entirely rather than
+    # locking everyone out for a feature that isn't set up yet.
+    recaptcha_token: str = ""
+    # Present only on a retry after a "please verify" challenge (v3 scored
+    # too low) — see app/recaptcha.py's fallback flow.
+    recaptcha_v2_token: str = ""
 
 
 class RefreshIn(BaseModel):
@@ -455,6 +462,11 @@ class PublicOrderCreate(BaseModel):
     # merchant has no other way to match a submitted payment to this order.
     transaction_id: str | None = Field(default=None, max_length=100)
     notes: str | None = Field(default=None, max_length=2000)
+    # Blank when RECAPTCHA_SECRET_KEY isn't configured — see app/recaptcha.py.
+    recaptcha_token: str = ""
+    # Present only on a retry after a "please verify" challenge (v3 scored
+    # too low) — see app/recaptcha.py's fallback flow.
+    recaptcha_v2_token: str = ""
 
     @model_validator(mode="after")
     def manual_needs_transaction_id(self) -> "PublicOrderCreate":
@@ -518,6 +530,11 @@ class InquiryCreate(BaseModel):
     JSONB row."""
 
     data: dict[str, Any] = Field(default_factory=dict, max_length=20)
+    # Blank when RECAPTCHA_SECRET_KEY isn't configured — see app/recaptcha.py.
+    recaptcha_token: str = ""
+    # Present only on a retry after a "please verify" challenge (v3 scored
+    # too low) — see app/recaptcha.py's fallback flow.
+    recaptcha_v2_token: str = ""
 
     @field_validator("data")
     @classmethod

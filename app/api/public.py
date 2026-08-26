@@ -16,12 +16,12 @@ correct metadata without reimplementing the fallback rules.
 import re
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import cache, crud, queue
-from app.ratelimit import rate_limit
+from app import cache, crud, queue, recaptcha
+from app.ratelimit import _client_ip, rate_limit
 from app.config import settings
 from app.db import get_db
 from app.models import (
@@ -408,13 +408,21 @@ async def get_public_product(host: str, slug: str, db: DB) -> dict:
     status_code=status.HTTP_201_CREATED,
     dependencies=[Depends(rate_limit("contact", limit=5, window_seconds=600))],
 )
-async def submit_contact_form(host: str, payload: InquiryCreate, db: DB) -> Inquiry:
+async def submit_contact_form(
+    host: str, payload: InquiryCreate, request: Request, db: DB
+) -> Inquiry:
     """What a site's ContactForm block submits to. No auth — anonymous visitors
     use this. The published-site check is the only gate: a draft or deleted
     site's form must not silently accept and store submissions nobody will read.
 
     Rate-limited to 5 submissions per IP per 10 minutes — see app/ratelimit.py.
+    Also reCAPTCHA-gated — see app/recaptcha.py.
     """
+    recaptcha.enforce(
+        await recaptcha.verify(
+            payload.recaptcha_token, "contact", _client_ip(request), payload.recaptcha_v2_token
+        )
+    )
     site = await _find_published_site(host, db)
     inquiry = Inquiry(tenant_id=site.tenant_id, site_id=site.id, data=payload.data)
     return await crud.save(db, inquiry)
@@ -448,7 +456,9 @@ def _validate_bd_phone(raw: str) -> bool:
     status_code=status.HTTP_201_CREATED,
     dependencies=[Depends(rate_limit("checkout", limit=8, window_seconds=300))],
 )
-async def create_public_order(host: str, payload: PublicOrderCreate, db: DB) -> PublicOrderOut:
+async def create_public_order(
+    host: str, payload: PublicOrderCreate, request: Request, db: DB
+) -> PublicOrderOut:
     """What a real storefront checkout submits. No auth — anonymous
     customers use this.
 
@@ -463,7 +473,13 @@ async def create_public_order(host: str, payload: PublicOrderCreate, db: DB) -> 
     Rate-limited to 8 orders per IP per 5 minutes — see app/ratelimit.py.
     Loose enough for a real shopper retrying a failed payment, tight enough
     to stop a script placing hundreds of fake orders with no OTP gate.
+    Also reCAPTCHA-gated — see app/recaptcha.py.
     """
+    recaptcha.enforce(
+        await recaptcha.verify(
+            payload.recaptcha_token, "checkout", _client_ip(request), payload.recaptcha_v2_token
+        )
+    )
     site = await _find_published_site(host, db)
 
     # Phone validation — see _validate_bd_phone. Required, not optional: with
