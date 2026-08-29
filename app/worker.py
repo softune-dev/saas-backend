@@ -23,7 +23,7 @@ from sqlalchemy import delete, select
 
 from app.config import settings
 from app.db import SessionLocal, engine
-from app.models import Notification, Site
+from app.models import MarketingConnection, Notification, Site
 from app.queue import (
     JOB_ATTACH_DOMAIN,
     JOB_CAPTURE_SCREENSHOT,
@@ -31,6 +31,7 @@ from app.queue import (
     JOB_GENERATE_SITEMAP,
     JOB_REVALIDATE_SITE,
     JOB_SEND_EMAIL,
+    JOB_SEND_META_CAPI_EVENT,
     JOB_SEND_ORDER_NOTIFICATIONS,
 )
 
@@ -207,6 +208,67 @@ async def handle_send_order_notifications(payload: dict) -> None:
             )
 
 
+async def handle_send_meta_capi_event(payload: dict) -> None:
+    """Server-side Meta Purchase event for one just-placed order.
+
+    Best-effort, same instinct as every other queue handler that talks to a
+    third party (handle_capture_screenshot below, handle_revalidate_site
+    above): a Meta outage or a bad/expired access token must never affect an
+    order that already succeeded — log and drop.
+    """
+    from app import courier_crypto, marketing
+
+    site_id = payload.get("site_id")
+    async with SessionLocal() as db:
+        site = (
+            await db.execute(select(Site).where(Site.id == site_id))
+        ).scalar_one_or_none()
+        if site is None:
+            log.warning("meta capi: site %s no longer exists, dropping job", site_id)
+            return
+
+        pixel_id = (site.seo or {}).get("facebook_pixel")
+        if not pixel_id:
+            # Pixel was disconnected after the order was placed but before
+            # this job drained — nothing to send to.
+            return
+
+        connection = (
+            await db.execute(
+                select(MarketingConnection).where(
+                    MarketingConnection.site_id == site.id,
+                    MarketingConnection.provider == "meta_capi",
+                    MarketingConnection.status == "connected",
+                )
+            )
+        ).scalar_one_or_none()
+        if connection is None:
+            return
+
+        try:
+            access_token = courier_crypto.decrypt(connection.access_token_encrypted)
+        except Exception:
+            log.warning("meta capi: could not decrypt token for site %s, dropping job", site_id)
+            return
+
+    ok, error = await marketing.send_purchase_event(
+        pixel_id=pixel_id,
+        access_token=access_token,
+        event_id=payload["event_id"],
+        event_time=payload["event_time"],
+        value=payload["value"],
+        currency=payload["currency"],
+        order_number=payload["order_number"],
+        customer_phone=payload.get("customer_phone"),
+        customer_email=payload.get("customer_email"),
+        client_ip=payload.get("client_ip"),
+        user_agent=payload.get("user_agent"),
+        event_source_url=payload.get("event_source_url"),
+    )
+    if not ok:
+        log.warning("meta capi: send failed for site %s order %s: %s", site_id, payload.get("order_number"), error)
+
+
 async def handle_capture_screenshot(payload: dict) -> None:
     """Mobile-viewport screenshot of the just-published storefront, shown on
     the Themes page card (see app/screenshot.py, theme-card.tsx).
@@ -284,6 +346,7 @@ HANDLERS = {
     JOB_ATTACH_DOMAIN: handle_attach_domain,
     JOB_DETACH_DOMAIN: handle_detach_domain,
     JOB_CAPTURE_SCREENSHOT: handle_capture_screenshot,
+    JOB_SEND_META_CAPI_EVENT: handle_send_meta_capi_event,
 }
 
 

@@ -259,6 +259,9 @@ class Product(Base, TimestampMixin):
     short_description: Mapped[str | None] = mapped_column(Text, nullable=True)
     price_cents: Mapped[int] = mapped_column(Integer, default=0)
     compare_at_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Merchant's own cost basis — optional, never exposed on any public/
+    # storefront endpoint (see migrations/036_product_cost_price.sql).
+    cost_price_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
     currency: Mapped[str] = mapped_column(String(3), default="USD")
     stock: Mapped[int] = mapped_column(Integer, default=0)
     track_stock: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -376,6 +379,10 @@ class OrderItem(Base):
     name_snapshot: Mapped[str] = mapped_column(Text)
     sku_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
     unit_price_cents: Mapped[int] = mapped_column(Integer)
+    # Cost at the time this was sold, not today's cost — order history is
+    # immutable (CLAUDE.md rule 8), same reasoning as the snapshots above.
+    # Null when the product had no cost set at sale time.
+    cost_price_cents_snapshot: Mapped[int | None] = mapped_column(Integer, nullable=True)
     quantity: Mapped[int] = mapped_column(Integer)
     total_cents: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime] = _created()
@@ -452,6 +459,37 @@ class PaymentConnection(Base, TimestampMixin):
     api_key_hint: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class MarketingConnection(Base, TimestampMixin):
+    """A site's own marketing/tracking integration credential — currently
+    just Meta Conversions API (server-side Purchase events). See
+    migrations/035_marketing_connections.sql.
+
+    The client-side pixel IDs (Meta Pixel, TikTok Pixel, GTM container) live
+    in Site.seo instead — they're not secrets, they're visible in every
+    page's HTML source. Only the CAPI access token needs encryption, reusing
+    app/courier_crypto.py's Fernet key (same trust boundary as courier/
+    payment credentials). access_token_hint is the sole credential fragment
+    ever safe to serialize.
+    """
+
+    __tablename__ = "marketing_connections"
+    __table_args__ = (
+        UniqueConstraint("site_id", "provider", name="uq_marketing_connections_site_provider"),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    site_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("sites.id", ondelete="CASCADE")
+    )
+    provider: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, default="connected")
+    access_token_encrypted: Mapped[str] = mapped_column(Text)
+    access_token_hint: Mapped[str] = mapped_column(Text)
+
+
 class FraudBlocklistEntry(Base):
     """A merchant-maintained phone number blocklist — not a computed risk
     score. There is no order-history data to score a customer against yet
@@ -477,6 +515,33 @@ class FraudBlocklistEntry(Base):
     )
     phone: Mapped[str] = mapped_column(Text)
     note: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = _created()
+
+
+class PageView(Base):
+    """One storefront page load — real visitor/traffic data, see
+    migrations/037_page_views.sql. Fired best-effort from the client (see
+    app/api/public.py's log_page_view); never blocks a page render.
+
+    Base only, not TimestampMixin: rows are insert-only, never updated.
+
+    session_id is a random id the storefront generates once into
+    localStorage — not a real identity, just enough to count unique
+    visitors, never PII or a cookie-consent-grade tracking mechanism.
+    """
+
+    __tablename__ = "page_views"
+
+    id: Mapped[uuid.UUID] = _pk()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    site_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("sites.id", ondelete="CASCADE")
+    )
+    path: Mapped[str] = mapped_column(Text)
+    referrer: Mapped[str | None] = mapped_column(Text, nullable=True)
+    session_id: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = _created()
 
 

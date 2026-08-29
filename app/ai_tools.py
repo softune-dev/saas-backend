@@ -471,6 +471,95 @@ async def _get_sales_summary(db: AsyncSession, tenant_id: uuid.UUID, days: int =
     }
 
 
+_ICON = {
+    "stock": "/sidebar/products.svg",
+    "sales": "/sidebar/analytics.svg",
+    "content": "/sidebar/note.svg",
+    "org": "/sidebar/categories.svg",
+    "theme": "/sidebar/themes.svg",
+}
+
+
+async def get_suggested_prompts(
+    db: AsyncSession, tenant_id: uuid.UUID, context: str = "default"
+) -> list[dict]:
+    """Suggestion chips shown before the merchant has typed anything — real,
+    per-merchant prompts instead of a fixed "honey store" placeholder list.
+    Built from the SAME read-only signals get_business_overview/get_site_info
+    already expose (no separate query path to keep in sync), picked by
+    priority so the most actionable gap surfaces first. Deliberately no
+    Gemini call here: these are cheap DB reads, shown every time the sidebar
+    opens, and must not cost the merchant AI credits or add latency just to
+    render a chip they might not even click.
+    """
+    overview = await _get_business_overview(db, tenant_id)
+    info = await _get_site_info(db, tenant_id)
+    if info.get("error"):
+        info = {}
+
+    name = info.get("business_name") or overview.get("site_name") or "my store"
+    description = (info.get("description") or "").strip()
+    niche = description[:70] if description else name
+
+    candidates: list[dict] = []
+
+    if context == "theme_editor":
+        if not info.get("about_us_written"):
+            candidates.append({"text": f"Write an About Us story for {name}", "icon": _ICON["content"]})
+        candidates.append(
+            {"text": f"Suggest a modern color palette that fits {niche}", "icon": _ICON["theme"]}
+        )
+        candidates.append(
+            {"text": f"Write a high-converting Hero headline for {name}", "icon": _ICON["content"]}
+        )
+        if not info.get("faqs"):
+            candidates.append({"text": "Draft FAQs based on what I sell", "icon": _ICON["content"]})
+        candidates.append(
+            {"text": "Recommend the best section order for my storefront", "icon": _ICON["org"]}
+        )
+        candidates.append({"text": "Generate an announcement banner for a sale", "icon": _ICON["sales"]})
+        return candidates[:4]
+
+    # Default (general chat sidebar) — ranked by "what's actually worth this
+    # merchant's attention right now", not a generic tour of features.
+    low_stock = overview.get("low_stock_products") or 0
+    if low_stock > 0:
+        candidates.append(
+            {"text": f"Which of my {low_stock} low-stock products need restocking?", "icon": _ICON["stock"]}
+        )
+    if not info.get("about_us_written"):
+        candidates.append({"text": f"Write an About Us story for {name}", "icon": _ICON["content"]})
+    if not info.get("faqs"):
+        candidates.append({"text": "Draft FAQs based on what I sell", "icon": _ICON["content"]})
+    if not info.get("meta_description"):
+        candidates.append({"text": "Write an SEO meta description for my store", "icon": _ICON["content"]})
+    if (overview.get("orders_last_30_days") or 0) == 0 and (overview.get("total_products") or 0) > 0:
+        candidates.append({"text": "Suggest ways to get my first sales this month", "icon": _ICON["sales"]})
+    if not info.get("custom_domain"):
+        candidates.append({"text": "How do I connect my own domain to my store?", "icon": _ICON["org"]})
+    if 0 < (overview.get("total_products") or 0) < 5:
+        candidates.append({"text": "Help me write descriptions for a few products", "icon": _ICON["stock"]})
+
+    # Always-available fallbacks, personalized, appended only to fill out to
+    # 4 — skipped if a gap-based suggestion above already covers that same
+    # topic (same icon category), so a healthy store doesn't see "check low
+    # inventory" twice just phrased two different ways.
+    used_icons = {c["icon"] for c in candidates}
+    for fallback in (
+        {"text": "Analyze my store's sales & conversion trends", "icon": _ICON["sales"]},
+        {"text": f"Suggest modern theme styles for {niche}", "icon": _ICON["theme"]},
+        {"text": "Check which products are low on inventory", "icon": _ICON["stock"]},
+    ):
+        if len(candidates) >= 4:
+            break
+        if fallback["icon"] in used_icons:
+            continue
+        candidates.append(fallback)
+        used_icons.add(fallback["icon"])
+
+    return candidates[:4]
+
+
 _HANDLERS = {
     "get_business_overview": _get_business_overview,
     "list_products": _list_products,

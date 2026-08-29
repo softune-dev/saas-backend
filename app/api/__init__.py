@@ -11,6 +11,7 @@ from app.api import (
     customers,
     fraud,
     help_desk,
+    marketing,
     media,
     notifications,
     pages,
@@ -44,6 +45,7 @@ api_router.include_router(commerce.router, dependencies=_demo_guard)
 api_router.include_router(customers.router, dependencies=_demo_guard)
 api_router.include_router(courier.router, dependencies=_demo_guard)
 api_router.include_router(payments.router, dependencies=_demo_guard)
+api_router.include_router(marketing.router, dependencies=_demo_guard)
 api_router.include_router(fraud.router, dependencies=_demo_guard)
 api_router.include_router(help_desk.router, dependencies=_demo_guard)
 api_router.include_router(notifications.router, dependencies=_demo_guard)

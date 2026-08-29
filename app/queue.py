@@ -49,6 +49,12 @@ JOB_DETACH_DOMAIN = "detach_domain"
 # Mobile-viewport screenshot of the live storefront, for the Themes page
 # card — see app/screenshot.py and worker.py's handler.
 JOB_CAPTURE_SCREENSHOT = "capture_screenshot"
+# Server-side Meta Conversions API Purchase event — see app/marketing.py and
+# worker.py's handler. Queued instead of awaited inline in create_public_order
+# for the same reason as JOB_SEND_ORDER_NOTIFICATIONS: it's a real network
+# call to a third party, and it must never slow down or fail the customer's
+# actual checkout.
+JOB_SEND_META_CAPI_EVENT = "send_meta_capi_event"
 
 
 async def connect() -> aio_pika.abc.AbstractChannel:

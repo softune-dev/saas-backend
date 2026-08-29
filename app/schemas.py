@@ -346,6 +346,7 @@ class ProductCreate(BaseModel):
     # layers guard it: the API gives a friendly 422, the database is the backstop.
     price_cents: int = Field(default=0, ge=0)
     compare_at_cents: int | None = Field(default=None, ge=0)
+    cost_price_cents: int | None = Field(default=None, ge=0)
     currency: str = Field(default="USD", min_length=3, max_length=3)
     stock: int = 0
     track_stock: bool = True
@@ -370,6 +371,7 @@ class ProductUpdate(BaseModel):
     short_description: str | None = Field(default=None, max_length=300)
     price_cents: int | None = Field(default=None, ge=0)
     compare_at_cents: int | None = Field(default=None, ge=0)
+    cost_price_cents: int | None = Field(default=None, ge=0)
     stock: int | None = None
     track_stock: bool | None = None
     category_id: uuid.UUID | None = None
@@ -397,6 +399,10 @@ class ProductOut(ORMModel):
     short_description: str | None
     price_cents: int
     compare_at_cents: int | None
+    # Merchant's own cost basis — dashboard-only, this ProductOut is never
+    # used to render a public/storefront response (see _public_product in
+    # app/api/public.py, which builds its own dict by hand instead).
+    cost_price_cents: int | None
     currency: str
     stock: int
     track_stock: bool
@@ -450,6 +456,17 @@ class OrderCreate(BaseModel):
 class PublicOrderItemIn(BaseModel):
     product_id: uuid.UUID
     quantity: int = Field(ge=1, le=100)
+
+
+class PageViewIn(BaseModel):
+    """One storefront page load — see app/models.py's PageView. No
+    recaptcha here (unlike checkout/contact): a page view isn't a
+    meaningful action worth interrupting with a challenge, and the
+    generous rate limit on this endpoint is the actual abuse guard."""
+
+    path: str = Field(min_length=1, max_length=500)
+    referrer: str | None = Field(default=None, max_length=500)
+    session_id: str = Field(min_length=1, max_length=100)
 
 
 class PublicOrderCreate(BaseModel):
@@ -678,6 +695,30 @@ class PaymentConnectionOut(ORMModel):
     # Deliberately NOT api_key_encrypted/secret_key_encrypted — same rule as
     # CourierConnectionOut above.
     api_key_hint: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+# =============================================================================
+#  Marketing connections (Meta Conversions API)
+# =============================================================================
+# Client-side pixel IDs (Meta Pixel, TikTok Pixel, GTM container) are NOT
+# here — they're non-secret and live in sites.seo, read/written through the
+# existing SiteUpdate/SiteOut above, same as google_analytics/facebook_pixel.
+
+
+class MetaCapiConnectIn(BaseModel):
+    access_token: str = Field(min_length=1, max_length=500)
+
+
+class MarketingConnectionOut(ORMModel):
+    id: uuid.UUID
+    site_id: uuid.UUID
+    provider: str
+    status: str
+    # Deliberately NOT access_token_encrypted — same rule as
+    # CourierConnectionOut above.
+    access_token_hint: str
     created_at: datetime
     updated_at: datetime
 

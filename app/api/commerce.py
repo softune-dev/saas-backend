@@ -429,6 +429,7 @@ async def create_order(
                 name_snapshot=product.name,
                 sku_snapshot=product.sku,
                 unit_price_cents=product.price_cents,
+                cost_price_cents_snapshot=product.cost_price_cents,
                 quantity=line.quantity,
                 total_cents=line_total,
             )

@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import ai, ai_actions, crud
+from app import ai, ai_actions, ai_tools, crud
 from app.db import get_db
 from app.models import Site, Tenant
 from app.security import CurrentUser
@@ -114,6 +114,27 @@ async def get_ai_usage(user: CurrentUser, db: DB) -> AIUsageOut:
     plan = await _tenant_plan(db, user.tenant_id)
     usage = await ai.get_usage(str(user.tenant_id), plan)
     return AIUsageOut(**usage)
+
+
+class SuggestedPromptOut(BaseModel):
+    text: str
+    icon: str
+
+
+class SuggestedPromptsOut(BaseModel):
+    suggestions: list[SuggestedPromptOut]
+
+
+@usage_router.get("/suggested-prompts", response_model=SuggestedPromptsOut)
+async def get_suggested_prompts(user: CurrentUser, db: DB, context: str = "default") -> SuggestedPromptsOut:
+    """Powers the chat sidebar's empty-state suggestion chips — real,
+    per-merchant prompts built from the same read-only signals the
+    assistant's own tools expose (low stock, missing About/FAQs/SEO, no
+    sales yet), not a fixed "honey store" placeholder list. Plain DB reads,
+    no Gemini call — never counts against the AI daily cap.
+    """
+    suggestions = await ai_tools.get_suggested_prompts(db, user.tenant_id, context)
+    return SuggestedPromptsOut(suggestions=suggestions)
 
 
 class GenerateTextIn(BaseModel):

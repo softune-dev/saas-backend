@@ -13,6 +13,7 @@ means every template — Next.js or Vite, now or in two years — gets identical
 correct metadata without reimplementing the fallback rules.
 """
 
+import logging
 import re
 from typing import Annotated, Any
 
@@ -30,6 +31,7 @@ from app.models import (
     Inquiry,
     Order,
     OrderItem,
+    PageView,
     PaymentConnection,
     Product,
     Site,
@@ -38,10 +40,13 @@ from app.models import (
 from app.schemas import (
     InquiryCreate,
     InquiryOut,
+    PageViewIn,
     PublicOrderCreate,
     PublicOrderItemOut,
     PublicOrderOut,
 )
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/public", tags=["public"])
 DB = Annotated[AsyncSession, Depends(get_db)]
@@ -222,6 +227,8 @@ async def get_site_config(host: str, db: DB) -> dict:
                 "google_analytics": site.seo.get("google_analytics", ""),
                 "google_search_console": site.seo.get("google_search_console", ""),
                 "facebook_pixel": site.seo.get("facebook_pixel", ""),
+                "tiktok_pixel": site.seo.get("tiktok_pixel", ""),
+                "gtm_container_id": site.seo.get("gtm_container_id", ""),
                 "favicon": site.seo.get("favicon", ""),
             },
             "faqs": site.faqs,
@@ -428,6 +435,52 @@ async def submit_contact_form(
     return await crud.save(db, inquiry)
 
 
+@router.post(
+    "/site/{host}/pageview",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(rate_limit("pageview", limit=120, window_seconds=300))],
+)
+async def log_page_view(host: str, request: Request, db: DB) -> None:
+    """Fired by the storefront's own PageViewBeacon on every route change —
+    real visitor/traffic data for app/api/analytics.py (see PageView's
+    docstring for why session_id isn't a real identity).
+
+    No reCAPTCHA (see PageViewIn's docstring) — the generous rate limit
+    (120/5min/IP, well above genuine browsing) is the abuse guard. Best-
+    effort: any failure here is swallowed, never surfaced to the visitor —
+    a broken analytics beacon must never be the reason a page looks broken.
+
+    Body is parsed manually rather than declared as a `PageViewIn` param:
+    FastAPI's automatic body parsing only auto-decodes JSON when the
+    Content-Type header is exactly "application/json" — but the client
+    sends this via navigator.sendBeacon, which MUST use "text/plain" (a
+    CORS-safelisted content type) for a cross-origin call, since sendBeacon
+    can't complete the CORS preflight "application/json" would force (see
+    lib/pageview.ts in each template). Parsing the raw body ourselves works
+    regardless of whatever Content-Type the browser actually sent.
+    """
+    try:
+        raw = await request.body()
+        payload = PageViewIn.model_validate_json(raw)
+        site = await _find_published_site(host, db)
+        db.add(
+            PageView(
+                tenant_id=site.tenant_id,
+                site_id=site.id,
+                path=payload.path,
+                referrer=payload.referrer,
+                session_id=payload.session_id,
+            )
+        )
+        await db.commit()
+    except HTTPException:
+        # Draft/deleted site — a real 404 from _find_published_site, not
+        # worth logging as a warning, just as silent as any other failure.
+        pass
+    except Exception:
+        log.warning("pageview: failed to record view for host %s", host, exc_info=True)
+
+
 # Phone normalize/extract helpers live in crud.py now — shared with
 # get_or_create_customer, which also needs to collapse phone formatting
 # variants to the same key. See crud.normalize_phone / crud.extract_customer_phone.
@@ -586,6 +639,7 @@ async def create_public_order(
                 name_snapshot=product.name,
                 sku_snapshot=product.sku,
                 unit_price_cents=product.price_cents,
+                cost_price_cents_snapshot=product.cost_price_cents,
                 quantity=line.quantity,
                 total_cents=line_total,
             )
@@ -653,6 +707,33 @@ async def create_public_order(
             "body": order_body,
             "link": f"/orders?highlight={order.id}",
             "send_push": True,
+        },
+    )
+
+    # Server-side Meta Purchase event — see app/marketing.py and
+    # worker.py's handle_send_meta_capi_event. `event_id` is the order_number
+    # (not the internal uuid — PublicOrderOut never exposes that) so the
+    # storefront's own client-side pixel can fire the same Purchase event
+    # with the same eventID and have Meta deduplicate the two into a single
+    # conversion instead of double-counting it. Queued unconditionally: the
+    # handler itself checks whether the site actually has a pixel ID +
+    # connected CAPI token before doing any network call.
+    await queue.publish(
+        queue.JOB_SEND_META_CAPI_EVENT,
+        {
+            "site_id": str(site.id),
+            "event_id": order.order_number,
+            "event_time": int(order.created_at.timestamp()),
+            "value": (subtotal + shipping) / 100,
+            "currency": order.currency,
+            "order_number": order.order_number,
+            "customer_phone": crud.extract_customer_phone(payload.customer) or None,
+            "customer_email": payload.customer.get("email")
+            if isinstance(payload.customer.get("email"), str)
+            else None,
+            "client_ip": _client_ip(request),
+            "user_agent": request.headers.get("user-agent"),
+            "event_source_url": f"https://{host}/checkout",
         },
     )
 

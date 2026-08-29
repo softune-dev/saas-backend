@@ -1,28 +1,41 @@
 """Read-only store analytics — real numbers, honestly scoped.
 
-No traffic/session tracking exists in this app (no visits table), so there
-is no real "conversion rate" to report — that stat is deliberately not part
-of this response rather than faked. Refund rate replaces it: it's the one
-comparable, fully real metric the order data actually supports.
+Real visitor/traffic data now exists too (see migrations/037_page_views.sql
+and PageView) — visits/unique_visitors/conversion_rate are computed from
+actual page-load beacons the storefront fires (app/api/public.py's
+log_page_view), not estimated. A site with the beacon not yet reaching it
+(an old cached storefront build, JS disabled) just reports 0 visits rather
+than a fabricated number.
 
-Everything here is computed from Order/OrderItem/Product/Category, scoped to
-one site via crud.get_scoped, same as every other tenant-owned resource.
+Profit is real too, but partial by construction: it's computed only from
+order items with a cost snapshot (see migrations/036_product_cost_price.sql),
+so a merchant who's never set a product's Cost Price gets an honestly
+incomplete number, never a wrong one from assuming zero cost —
+cost_data_coverage_percent tells the frontend (and the merchant) how much of
+current-period revenue that profit figure actually covers.
+
+Everything here is computed from Order/OrderItem/Product/Category/PageView,
+scoped to one site via crud.get_scoped, same as every other tenant-owned
+resource.
 """
 
+import logging
 import uuid
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel
-from sqlalchemy import select
+from pydantic import BaseModel, ValidationError
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import cache, crud
 from app.db import get_db
-from app.models import Category, Order, OrderItem, Product, Site
+from app.models import Category, Order, OrderItem, PageView, Product, Site
 from app.security import CurrentUser
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/sites/{site_id}/analytics", tags=["analytics"])
 DB = Annotated[AsyncSession, Depends(get_db)]
@@ -78,6 +91,14 @@ class AnalyticsOut(BaseModel):
     orders: StatOut
     aov: StatOut
     refund_rate: StatOut
+    visits: StatOut
+    conversion_rate: StatOut
+    profit: StatOut
+    # What share of current-period revenue actually had cost data behind it
+    # — profit is computed only from items with a cost snapshot, so a
+    # merchant who's never set Cost Price on any product sees 0% here and
+    # knows the profit number above is meaningless, not silently wrong.
+    cost_data_coverage_percent: float
     revenue_curve: list[CurvePointOut]
     category_shares: list[CategoryShareOut]
     best_sellers: list[BestSellerOut]
@@ -95,6 +116,22 @@ def _pct_change(current: int, previous: int) -> float | None:
 def _customer_key(order: Order) -> str:
     c = order.customer or {}
     return str(c.get("email") or c.get("phone") or c.get("name") or order.id)
+
+
+async def _unique_visitors(
+    db: AsyncSession, site_id: uuid.UUID, start: datetime, end: datetime
+) -> int:
+    """Distinct session_id count for [start, end) — one aggregate query,
+    not a row pull, since only the count is needed here."""
+    return (
+        await db.execute(
+            select(func.count(func.distinct(PageView.session_id))).where(
+                PageView.site_id == site_id,
+                PageView.created_at >= start,
+                PageView.created_at < end,
+            )
+        )
+    ).scalar_one()
 
 
 @router.get("", response_model=AnalyticsOut)
@@ -115,7 +152,15 @@ async def get_analytics(
     cache_key = cache.dashboard_key(str(site_id), "analytics", str(weeks))
     cached = await cache.get_json(cache_key)
     if cached is not None:
-        return AnalyticsOut(**cached)
+        try:
+            return AnalyticsOut(**cached)
+        except ValidationError:
+            # A cached response from before a field was added/renamed here
+            # (e.g. this endpoint gaining visits/profit) — same "cache must
+            # never break a request" rule as the rest of this file's cache
+            # usage, just applied to a schema mismatch instead of a Redis
+            # outage. Falls through and recomputes fresh below.
+            log.warning("analytics cache: stale schema for %s, recomputing", cache_key)
 
     now = datetime.now(UTC)
     period = timedelta(weeks=weeks)
@@ -145,6 +190,25 @@ async def get_analytics(
     def kept_count(rows: list[Order]) -> int:
         return sum(1 for o in rows if o.status not in _LOST_STATUSES)
 
+    def profit_of(rows: list[Order]) -> tuple[int, int, int]:
+        """Returns (profit_cents, cost_known_revenue_cents, total_revenue_cents).
+
+        Profit is computed only over line items that have a cost snapshot —
+        an item with none is excluded from both profit and "known" revenue,
+        never assumed to have zero cost (that would overstate profit)."""
+        profit = 0
+        known_revenue = 0
+        total_revenue = 0
+        for o in rows:
+            if o.status in _LOST_STATUSES:
+                continue
+            for item in o.items:
+                total_revenue += item.total_cents
+                if item.cost_price_cents_snapshot is not None:
+                    known_revenue += item.total_cents
+                    profit += item.total_cents - item.cost_price_cents_snapshot * item.quantity
+        return profit, known_revenue, total_revenue
+
     cur_revenue, prev_revenue = revenue_of(current), revenue_of(previous)
     cur_kept, prev_kept = kept_count(current), kept_count(previous)
     cur_orders, prev_orders = len(current), len(previous)
@@ -157,6 +221,17 @@ async def get_analytics(
     prev_refund_rate = round(prev_refunded / prev_orders * 100, 1) if prev_orders else 0.0
 
     currency = current[0].currency if current else (previous[0].currency if previous else "USD")
+
+    cur_profit, cur_known_rev, cur_total_rev = profit_of(current)
+    prev_profit, _prev_known_rev, _prev_total_rev = profit_of(previous)
+    cost_data_coverage_percent = (
+        round(cur_known_rev / cur_total_rev * 100, 1) if cur_total_rev else 0.0
+    )
+
+    cur_unique = await _unique_visitors(db, site_id, current_start, now)
+    prev_unique = await _unique_visitors(db, site_id, previous_start, current_start)
+    cur_conversion = round(cur_kept / cur_unique * 100, 1) if cur_unique else 0.0
+    prev_conversion = round(prev_kept / prev_unique * 100, 1) if prev_unique else 0.0
 
     # --- weekly revenue curve, oldest to newest, `weeks` buckets ---
     curve: list[CurvePointOut] = []
@@ -284,6 +359,13 @@ async def get_analytics(
             percent=cur_refund_rate,
             change_percent=_pct_change(int(cur_refund_rate * 10), int(prev_refund_rate * 10)),
         ),
+        visits=StatOut(count=cur_unique, change_percent=_pct_change(cur_unique, prev_unique)),
+        conversion_rate=StatOut(
+            percent=cur_conversion,
+            change_percent=_pct_change(int(cur_conversion * 10), int(prev_conversion * 10)),
+        ),
+        profit=StatOut(cents=cur_profit, change_percent=_pct_change(cur_profit, prev_profit)),
+        cost_data_coverage_percent=cost_data_coverage_percent,
         revenue_curve=curve,
         category_shares=category_shares,
         best_sellers=best_sellers,
