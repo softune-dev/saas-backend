@@ -175,9 +175,14 @@ async def list_products(
 
     filters = [Product.site_id == site_id]
     if q:
-        # ilike hits the GIN trigram index from migrations/003 — see the comment
-        # there for why that index is what makes this fast instead of a scan.
-        filters.append(Product.name.ilike(f"%{q}%"))
+        # name ilike hits the GIN trigram index from migrations/003. sku has no
+        # trigram index (its unique btree index doesn't help a leading-wildcard
+        # ilike), but per-site product counts are small enough that the seq
+        # scan on the sku side of the OR is fine — this is what lets a barcode
+        # scanner (which types the SKU) work in the POS search box.
+        filters.append(
+            or_(Product.name.ilike(f"%{q}%"), Product.sku.ilike(f"%{q}%"))
+        )
     if category_id:
         filters.append(Product.category_id == category_id)
     if active_only:
@@ -454,6 +459,11 @@ async def create_order(
         currency=next(iter(products.values())).currency,
         notes=payload.notes,
         meta=payload.meta,
+        channel=payload.channel,
+        # A POS sale is paid and handed over at the counter in one motion —
+        # there's no separate "awaiting payment" gap like a storefront order
+        # has, so it starts "fulfilled" instead of the default "pending".
+        status="fulfilled" if payload.channel == "pos" else "pending",
         items=items,
     )
     # ONE commit for the order, its items, AND the stock decrements. If any part

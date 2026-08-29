@@ -339,6 +339,10 @@ class Order(Base, TimestampMixin):
     currency: Mapped[str] = mapped_column(String(3), default="USD")
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     meta: Mapped[dict] = mapped_column(JSONB, default=dict)
+    # "storefront" (real customer checkout, app/api/public.py) or "pos" (a
+    # merchant-entered walk-in sale, app/api/commerce.py) — see
+    # migrations/038_order_channel.sql.
+    channel: Mapped[str] = mapped_column(Text, default="storefront")
 
     # lazy="selectin": loads all items for all orders in ONE extra query rather
     # than one query per order (the classic N+1 problem). For a list of 50

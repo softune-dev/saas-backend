@@ -438,6 +438,10 @@ class OrderCreate(BaseModel):
     tax_cents: int = Field(default=0, ge=0)
     notes: str | None = None
     meta: dict[str, Any] = Field(default_factory=dict)
+    # "storefront" (the default — a dashboard-entered order not otherwise
+    # distinguished) or "pos" (the New Sale / walk-in screen). See
+    # migrations/038_order_channel.sql.
+    channel: Literal["storefront", "pos"] = "storefront"
 
 
 # =============================================================================
@@ -593,6 +597,7 @@ class OrderOut(ORMModel):
     # here. Merchant-facing only; never exposed on PublicOrderOut.
     meta: dict
     items: list[OrderItemOut]
+    channel: str
     created_at: datetime
 
 
