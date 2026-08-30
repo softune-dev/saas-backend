@@ -1,3 +1,10 @@
-api.softune.xyz {
+api.softunebd.com {
 	reverse_proxy api:8000
+}
+
+# Kept temporarily so old links/integrations pointing at the old domain
+# still work during the migration — see docs on the softunebd.com cutover.
+# Safe to delete once nothing calls this anymore.
+api.softune.xyz {
+	redir https://api.softunebd.com{uri} permanent
 }

@@ -420,6 +420,10 @@ class CourierConnection(Base, TimestampMixin):
     label: Mapped[str | None] = mapped_column(Text, nullable=True)
     api_key_encrypted: Mapped[str] = mapped_column(Text)
     secret_key_encrypted: Mapped[str] = mapped_column(Text)
+    # Fernet ciphertext of a small JSON blob — only Pathao uses this (its
+    # username/password beyond the client_id/client_secret pair the two
+    # columns above already hold). See migrations/039.
+    extra_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     api_key_hint: Mapped[str] = mapped_column(Text)
     base_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_verified_at: Mapped[datetime | None] = mapped_column(

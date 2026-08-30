@@ -650,6 +650,30 @@ class SteadfastConnectIn(BaseModel):
     label: str | None = Field(default=None, max_length=80)
 
 
+class RedxConnectIn(BaseModel):
+    access_token: str = Field(min_length=1, max_length=1000)
+    base_url: str | None = None
+    label: str | None = Field(default=None, max_length=80)
+
+
+class PathaoConnectIn(BaseModel):
+    client_id: str = Field(min_length=1, max_length=200)
+    client_secret: str = Field(min_length=1, max_length=200)
+    username: str = Field(min_length=1, max_length=200)
+    password: str = Field(min_length=1, max_length=200)
+    base_url: str | None = None
+    label: str | None = Field(default=None, max_length=80)
+
+
+class EcourierConnectIn(BaseModel):
+    # eCourier's own docs confirm only username + password — no separate API
+    # key. See app/api/courier.py's connect_ecourier for why there's no live
+    # verification call here (no documented safe/read-only endpoint exists).
+    username: str = Field(min_length=1, max_length=200)
+    password: str = Field(min_length=1, max_length=200)
+    label: str | None = Field(default=None, max_length=80)
+
+
 class CourierConnectionOut(ORMModel):
     id: uuid.UUID
     site_id: uuid.UUID
