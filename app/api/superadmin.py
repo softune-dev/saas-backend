@@ -27,7 +27,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import crud, mailer, queue
 from app.db import get_db
-from app.models import HelpTicket, HelpTicketReply, Lead, Tenant, User
+from app.models import (
+    Category,
+    CourierConnection,
+    HelpTicket,
+    HelpTicketReply,
+    Lead,
+    Order,
+    PaymentConnection,
+    Product,
+    Site,
+    Tenant,
+    User,
+)
 from app.schemas import (
     HelpTicketReplyIn,
     HelpTicketReplyOut,
@@ -101,6 +113,55 @@ async def get_stats(admin: SuperAdminUser, db: DB) -> dict:
 # =============================================================================
 
 
+async def _tenant_aggregates(db: AsyncSession, tenant_ids: list[uuid.UUID]) -> dict[uuid.UUID, dict]:
+    """One grouped COUNT per table, filtered to just this page's tenant ids,
+    instead of a query per tenant per table (N+1) — for 50 tenants x 7
+    metrics that's 7 queries total here, not 350."""
+    out = {tid: {
+        "site_count": 0, "category_count": 0, "product_count": 0,
+        "order_count": 0, "user_count": 0,
+        "payment_providers": [], "courier_providers": [],
+    } for tid in tenant_ids}
+    if not tenant_ids:
+        return out
+
+    count_specs = [
+        (Site, "site_count"), (Category, "category_count"), (Product, "product_count"),
+        (Order, "order_count"), (User, "user_count"),
+    ]
+    for model, key in count_specs:
+        rows = (
+            await db.execute(
+                select(model.tenant_id, func.count())
+                .where(model.tenant_id.in_(tenant_ids))
+                .group_by(model.tenant_id)
+            )
+        ).all()
+        for tid, n in rows:
+            out[tid][key] = n
+
+    for model, key in [(PaymentConnection, "payment_providers"), (CourierConnection, "courier_providers")]:
+        rows = (
+            await db.execute(
+                select(model.tenant_id, model.provider)
+                .where(model.tenant_id.in_(tenant_ids))
+                .distinct()
+            )
+        ).all()
+        for tid, provider in rows:
+            out[tid][key].append(provider)
+
+    return out
+
+
+def _tenant_out(tenant: Tenant, aggregates: dict) -> dict:
+    return {
+        "id": tenant.id, "slug": tenant.slug, "name": tenant.name, "plan": tenant.plan,
+        "status": tenant.status, "created_at": tenant.created_at, "business": tenant.business,
+        **aggregates,
+    }
+
+
 @router.get("/tenants", response_model=Page[SuperAdminTenantOut])
 async def list_tenants(
     admin: SuperAdminUser,
@@ -120,15 +181,18 @@ async def list_tenants(
             .limit(limit).offset(offset)
         )
     ).scalars().all()
-    return {"items": rows, "total": total, "limit": limit, "offset": offset}
+    aggregates = await _tenant_aggregates(db, [t.id for t in rows])
+    items = [_tenant_out(t, aggregates[t.id]) for t in rows]
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
 @router.get("/tenants/{tenant_id}", response_model=SuperAdminTenantOut)
-async def get_tenant(tenant_id: uuid.UUID, admin: SuperAdminUser, db: DB) -> Tenant:
+async def get_tenant(tenant_id: uuid.UUID, admin: SuperAdminUser, db: DB) -> dict:
     tenant = (await db.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one_or_none()
     if tenant is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Tenant not found")
-    return tenant
+    aggregates = (await _tenant_aggregates(db, [tenant.id]))[tenant.id]
+    return _tenant_out(tenant, aggregates)
 
 
 @router.post(
@@ -136,7 +200,7 @@ async def get_tenant(tenant_id: uuid.UUID, admin: SuperAdminUser, db: DB) -> Ten
 )
 async def create_account(
     payload: SuperAdminAccountCreateIn, admin: SuperAdminUser, db: DB
-) -> Tenant:
+) -> dict:
     """Provisions a full paid account — same crud helper
     scripts/create_account.py calls, so "creating an account" still means
     exactly one thing no matter which caller triggers it."""
@@ -152,18 +216,21 @@ async def create_account(
         full_name=payload.full_name,
     )
     tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
-    return tenant
+    aggregates = (await _tenant_aggregates(db, [tenant.id]))[tenant.id]
+    return _tenant_out(tenant, aggregates)
 
 
 @router.patch("/tenants/{tenant_id}", response_model=SuperAdminTenantOut)
 async def update_tenant(
     tenant_id: uuid.UUID, payload: SuperAdminTenantUpdate, admin: SuperAdminUser, db: DB
-) -> Tenant:
+) -> dict:
     tenant = (await db.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one_or_none()
     if tenant is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Tenant not found")
     tenant = crud.apply_updates(tenant, payload.model_dump(exclude_unset=True))
-    return await crud.save(db, tenant)
+    tenant = await crud.save(db, tenant)
+    aggregates = (await _tenant_aggregates(db, [tenant.id]))[tenant.id]
+    return _tenant_out(tenant, aggregates)
 
 
 # =============================================================================

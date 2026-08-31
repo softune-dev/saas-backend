@@ -837,6 +837,20 @@ class SuperAdminTenantOut(ORMModel):
     plan: str
     status: str
     created_at: datetime
+    # Legal/tax identity — same TenantBusinessOut shape the tenant's own
+    # dashboard reads/writes (app/api/auth.py's update_tenant_business), just
+    # surfaced read-only here so an operator can see it without DB access.
+    business: TenantBusinessOut
+    site_count: int
+    category_count: int
+    product_count: int
+    order_count: int
+    user_count: int
+    # Provider keys present in {payment,courier}_connections for this
+    # tenant, regardless of connection status — "added or not", not "still
+    # verified". A row existing means someone configured it at some point.
+    payment_providers: list[str]
+    courier_providers: list[str]
 
 
 class SuperAdminUserOut(ORMModel):
