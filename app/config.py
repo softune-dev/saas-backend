@@ -46,6 +46,14 @@ class Settings(BaseSettings):
     revalidate_secret: str = ""
     site_base_domain: str = "vercel.app"
 
+    # Where THIS backend is publicly reachable — gateway checkout callbacks
+    # (bKash/SSLCommerz/Nagad redirecting the customer's browser, or posting
+    # an IPN) need a real, internet-reachable URL to come back to, which is
+    # never the storefront's own domain (that's a static Next.js app, no
+    # server-side route to receive these). See app/api/public.py's payment
+    # init/callback endpoints.
+    api_base_url: str = "https://api.softunebd.com"
+
     # --- Vercel domain automation (app/vercel.py) ---
     # Blank-able like Cloudinary above: attaching a site's subdomain to the
     # right Vercel project on publish is a nice-to-have, not a hard
@@ -85,7 +93,7 @@ class Settings(BaseSettings):
     # integration keys: without them, notify()/push just skips sending.
     vapid_public_key: str = ""
     vapid_private_key: str = ""
-    vapid_subject: str = "mailto:support@softune.app"
+    vapid_subject: str = "mailto:support@softunebd.com"
 
     # --- AI theme assistant (Gemini) ---
     # Blank-able like the keys above: the rest of the API keeps working, and
@@ -116,6 +124,35 @@ class Settings(BaseSettings):
     # Simple per-tenant-per-day cap (see app/ai.py) so a single site can't
     # run up a surprise bill. Generous enough for real iterative use.
     ai_suggestions_per_tenant_per_day: int = 50
+
+    # --- lead capture / demo access (app/api/leads.py) ---
+    # Real SMTP send via Hostinger's mail server — the OTP email is the
+    # first thing this codebase actually sends (see app/mailer.py); nothing
+    # before this sent real email. Blank-able like every other integration
+    # key: the rest of the API keeps working, and only the signup endpoint
+    # fails, with a clear message, until this is set.
+    smtp_host: str = "smtp.hostinger.com"
+    smtp_port: int = 465
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from_email: str = "support@softunebd.com"
+    smtp_from_name: str = "Softune"
+    # Landing's own hosted logo — the icon mark (not the wordmark), for the
+    # email header badge.
+    email_logo_url: str = "https://www.softunebd.com/logo-icon.png"
+    lead_token_expire_days: int = 7
+    # Which real (plan="demo") tenant's login a lead is minted a token for
+    # when they click "See a live demo" — the same shared Aurora demo
+    # account merchants have always been handed manually. Not a secret:
+    # this identifies WHICH account, app/security.py mints the token itself,
+    # no password involved.
+    demo_user_email: str = "kallol.business.ds@gmail.com"
+    # wa.me deep link number, digits only with country code (e.g.
+    # "8801XXXXXXXXX"), no "+". Blank means the frontend just doesn't show
+    # a WhatsApp option — see POST /leads/purchase-request.
+    # 8801831624571 — real BD mobile, wa.me format (country code, no
+    # leading 0, no "+"). 01831624571 (local) -> 880 + 1831624571.
+    whatsapp_business_number: str = "8801831624571"
 
     @property
     def cors_list(self) -> list[str]:

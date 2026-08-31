@@ -1,7 +1,8 @@
 """Register, login, refresh, me."""
 
+import secrets
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -9,13 +10,15 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import crud, recaptcha
+from app import crud, mailer, queue, recaptcha
 from app.config import settings
 from app.db import get_db
-from app.models import Tenant, User
+from app.models import Tenant, TrustedDevice, User
+from app.ratelimit import _client_ip, login_rate_limit, rate_limit
 from app.schemas import (
     ChangePasswordIn,
     LoginIn,
+    LoginResultOut,
     MeOut,
     MeUpdate,
     RefreshIn,
@@ -23,19 +26,28 @@ from app.schemas import (
     TenantOut,
     TokenOut,
     UserOut,
+    VerifyLoginOtpIn,
 )
 from app.security import (
+    CurrentLoginOtp,
     CurrentUser,
     block_demo_writes,
     create_access_token,
+    create_login_otp_token,
     create_refresh_token,
     decode_token,
+    generate_otp,
+    hash_device_id,
+    hash_otp,
     hash_password,
     revoke_all_user_tokens,
     revoke_token,
     verify_password,
 )
-from app.ratelimit import _client_ip, login_rate_limit
+
+_LOGIN_OTP_TTL_MINUTES = 10
+_LOGIN_OTP_MAX_ATTEMPTS = 5
+_TRUSTED_DEVICE_DAYS = 30
 
 # Local instance (not security.py's private _bearer) so /auth/logout can read
 # the bearer header without an unauthenticated request 401ing before the
@@ -49,8 +61,12 @@ DB = Annotated[AsyncSession, Depends(get_db)]
 
 def _tokens(user: User) -> TokenOut:
     return TokenOut(
-        access_token=create_access_token(user.id, user.tenant_id, user.role),
-        refresh_token=create_refresh_token(user.id, user.tenant_id, user.role),
+        access_token=create_access_token(
+            user.id, user.tenant_id, user.role, user.is_superadmin
+        ),
+        refresh_token=create_refresh_token(
+            user.id, user.tenant_id, user.role, user.is_superadmin
+        ),
         expires_in=settings.access_token_expire_minutes * 60,
     )
 
@@ -64,12 +80,22 @@ def _tokens(user: User) -> TokenOut:
 # about what "creating an account" means has changed, only who can trigger it.
 
 
+async def _queue_login_otp_email(to_email: str, otp: str, full_name: str | None) -> None:
+    """Queued, not awaited inline — same reasoning as app/api/leads.py's
+    _queue_otp_email (a real SMTP send measured 6-7 seconds)."""
+    subject, html_body, text_body = mailer.otp_email(otp, full_name)
+    await queue.publish(
+        queue.JOB_SEND_EMAIL,
+        {"to": to_email, "subject": subject, "html_body": html_body, "text_body": text_body},
+    )
+
+
 @router.post(
     "/login",
-    response_model=TokenOut,
+    response_model=LoginResultOut,
     dependencies=[Depends(login_rate_limit)],
 )
-async def login(payload: LoginIn, request: Request, db: DB) -> TokenOut:
+async def login(payload: LoginIn, request: Request, db: DB) -> LoginResultOut:
     recaptcha.enforce(
         await recaptcha.verify(
             payload.recaptcha_token, "login", _client_ip(request), payload.recaptcha_v2_token
@@ -90,10 +116,91 @@ async def login(payload: LoginIn, request: Request, db: DB) -> TokenOut:
     if not user.is_active:
         raise invalid
 
+    # Device-remembered login 2FA — "not always, only when needed": a device
+    # this user has already OTP-verified skips straight to real tokens; an
+    # unrecognized (or no) device_id triggers the OTP challenge instead.
+    trusted = False
+    if payload.device_id:
+        device_hash = hash_device_id(payload.device_id)
+        row = (
+            await db.execute(
+                select(TrustedDevice).where(
+                    TrustedDevice.user_id == user.id,
+                    TrustedDevice.device_hash == device_hash,
+                    TrustedDevice.expires_at > func.now(),
+                )
+            )
+        ).scalar_one_or_none()
+        if row is not None:
+            trusted = True
+            row.last_used_at = func.now()
+
+    if not trusted:
+        otp = generate_otp()
+        user.login_otp_hash = hash_otp(otp)
+        user.login_otp_expires_at = datetime.now(UTC) + timedelta(minutes=_LOGIN_OTP_TTL_MINUTES)
+        user.login_otp_attempts = 0
+        await db.commit()
+        await _queue_login_otp_email(user.email, otp, user.full_name)
+        return LoginResultOut(otp_required=True, login_token=create_login_otp_token(user.id))
+
     user.last_login_at = func.now()
     await db.commit()
     await db.refresh(user)
-    return _tokens(user)
+    tokens = _tokens(user)
+    return LoginResultOut(otp_required=False, **tokens.model_dump())
+
+
+@router.post(
+    "/verify-login-otp",
+    response_model=LoginResultOut,
+    dependencies=[Depends(rate_limit("login-verify-otp", limit=10, window_seconds=600))],
+)
+async def verify_login_otp(payload: VerifyLoginOtpIn, user_id: CurrentLoginOtp, db: DB) -> LoginResultOut:
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if user is None or not user.is_active:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Account unavailable")
+
+    invalid = HTTPException(status.HTTP_400_BAD_REQUEST, "Incorrect or expired code.")
+
+    if user.login_otp_attempts >= _LOGIN_OTP_MAX_ATTEMPTS:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many attempts — log in again.")
+    user.login_otp_attempts += 1
+
+    if (
+        not user.login_otp_hash
+        or not user.login_otp_expires_at
+        or datetime.now(UTC) > user.login_otp_expires_at
+        or not secrets.compare_digest(user.login_otp_hash, hash_otp(payload.otp))
+    ):
+        await db.commit()
+        raise invalid
+
+    user.login_otp_hash = None
+    user.login_otp_expires_at = None
+    user.login_otp_attempts = 0
+    user.last_login_at = func.now()
+
+    if payload.remember_device and payload.device_id:
+        device_hash = hash_device_id(payload.device_id)
+        existing_device = (
+            await db.execute(
+                select(TrustedDevice).where(
+                    TrustedDevice.user_id == user.id, TrustedDevice.device_hash == device_hash
+                )
+            )
+        ).scalar_one_or_none()
+        expires_at = datetime.now(UTC) + timedelta(days=_TRUSTED_DEVICE_DAYS)
+        if existing_device:
+            existing_device.expires_at = expires_at
+            existing_device.last_used_at = func.now()
+        else:
+            db.add(TrustedDevice(user_id=user.id, device_hash=device_hash, expires_at=expires_at))
+
+    await db.commit()
+    await db.refresh(user)
+    tokens = _tokens(user)
+    return LoginResultOut(otp_required=False, **tokens.model_dump())
 
 
 @router.post("/refresh", response_model=TokenOut)

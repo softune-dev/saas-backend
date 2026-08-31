@@ -11,6 +11,7 @@ from app.api import (
     customers,
     fraud,
     help_desk,
+    leads,
     marketing,
     media,
     notifications,
@@ -19,6 +20,7 @@ from app.api import (
     public,
     push,
     sites,
+    superadmin,
 )
 from app.security import block_demo_writes
 
@@ -55,3 +57,12 @@ api_router.include_router(ai.router, dependencies=_demo_guard)
 api_router.include_router(ai.chat_router, dependencies=_demo_guard)
 api_router.include_router(ai.actions_router, dependencies=_demo_guard)
 api_router.include_router(ai.usage_router, dependencies=_demo_guard)
+# NOT gated by _demo_guard — a superadmin's own tenant is never "demo" plan
+# and this router's own SuperAdminUser dependency (app/security.py) is a
+# stricter gate than block_demo_writes anyway. See superadmin.py's docstring.
+api_router.include_router(superadmin.router)
+# NOT gated by _demo_guard — leads have no tenant/site at all, block_demo_writes
+# (which resolves CurrentUser) would 401 every call. Its own CurrentLead auth
+# (app/security.py) is a completely separate, narrower credential. See
+# app/api/leads.py's module docstring.
+api_router.include_router(leads.router)

@@ -24,6 +24,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import CITEXT, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -101,9 +102,20 @@ class User(Base, TimestampMixin):
     timezone: Mapped[str | None] = mapped_column(Text, nullable=True)
     role: Mapped[str] = mapped_column(Text, default="owner")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Platform-level flag, unrelated to `role` (which is per-tenant: owner/
+    # admin/member). Grants access to /superadmin/* only — see that router's
+    # module docstring. Never used by any tenant-scoped query.
+    is_superadmin: Mapped[bool] = mapped_column(Boolean, default=False)
     last_login_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Device-remembered login 2FA — see migrations/044. Hashed, short-lived,
+    # attempt-capped, same instinct as Lead.otp_hash.
+    login_otp_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    login_otp_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    login_otp_attempts: Mapped[int] = mapped_column(Integer, default=0)
 
     tenant: Mapped["Tenant"] = relationship(back_populates="users")
 
@@ -464,7 +476,15 @@ class PaymentConnection(Base, TimestampMixin):
     config: Mapped[dict] = mapped_column(JSONB, default=dict)
     api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     secret_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Fernet ciphertext of a small JSON blob — bKash's username/password and
+    # Nagad's PEM keypair don't fit the two columns above. See migrations/042.
+    extra_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     api_key_hint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Null for every provider except bkash — see app/bkash.py, the first
+    # payment provider with a real credential-verification call.
+    last_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class MarketingConnection(Base, TimestampMixin):
@@ -608,8 +628,8 @@ class PushSubscription(Base):
 class HelpTicket(Base, TimestampMixin):
     """Support ticket for the Help Desk page. Tenant-scoped, not site-scoped
     — support is handled at the account level even if a tenant has multiple
-    sites. No admin/agent reply flow yet (soft launch): a human replies by
-    email out of band, same as the ticket form's own copy already says.
+    sites. Reply flow is email-only, deliberately not a live chat thread —
+    see HelpTicketReply and app/api/superadmin.py's reply_to_ticket.
     """
 
     __tablename__ = "help_tickets"
@@ -621,11 +641,37 @@ class HelpTicket(Base, TimestampMixin):
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE")
     )
+    # Human-readable, sequential — see migrations/045. NOT the primary key;
+    # `id` is still what every FK/lookup uses, this is purely display.
+    # server_default (not a Python-side default) — without it SQLAlchemy
+    # sends an explicit NULL on insert instead of omitting the column and
+    # letting Postgres's own nextval() default apply (confirmed the hard
+    # way: a NOT NULL violation on every ticket creation without this).
+    ticket_number: Mapped[int] = mapped_column(
+        Integer, unique=True, server_default=text("nextval('help_ticket_number_seq')")
+    )
     subject: Mapped[str] = mapped_column(Text)
     category: Mapped[str] = mapped_column(Text)
     priority: Mapped[str] = mapped_column(Text, default="Medium")
     status: Mapped[str] = mapped_column(Text, default="Open")
     message: Mapped[str] = mapped_column(Text)
+
+
+class HelpTicketReply(Base):
+    """A superadmin's reply — always emailed to the ticket's owner
+    (app/mailer.py's ticket_reply_email) the moment it's created. Stored
+    here only as the superadmin panel's own paper trail, not a chat
+    thread the customer sees in-app. No TimestampMixin: nothing here is
+    ever updated after creation."""
+
+    __tablename__ = "help_ticket_replies"
+
+    id: Mapped[uuid.UUID] = _pk()
+    ticket_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("help_tickets.id", ondelete="CASCADE")
+    )
+    message: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class OrderCounter(Base):
@@ -642,3 +688,52 @@ class OrderCounter(Base):
         UUID(as_uuid=True), ForeignKey("sites.id", ondelete="CASCADE"), primary_key=True
     )
     next_number: Mapped[int] = mapped_column(Integer, default=1000)
+
+
+class Lead(Base, TimestampMixin):
+    """A prospect who signed up but hasn't bought yet — deliberately NOT a
+    tenant/user row. See migrations/043_leads.sql for the full funnel this
+    walks through and why converting one into a real paying customer is
+    still a separate, human, superadmin-triggered step.
+    """
+
+    __tablename__ = "leads"
+
+    id: Mapped[uuid.UUID] = _pk()
+    email: Mapped[str] = mapped_column(CITEXT, unique=True)
+    password_hash: Mapped[str] = mapped_column(Text)
+
+    full_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    phone: Mapped[str | None] = mapped_column(Text, nullable=True)
+    shop_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    shop_category: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    status: Mapped[str] = mapped_column(Text, default="signed_up")
+
+    otp_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    otp_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    otp_attempts: Mapped[int] = mapped_column(Integer, default=0)
+
+    demo_accessed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    purchase_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class TrustedDevice(Base):
+    """A browser this user has already OTP-verified — see
+    migrations/044_login_otp_and_trusted_devices.sql. No TimestampMixin:
+    created_at/last_used_at/expires_at below cover everything this row
+    needs, an updated_at would never differ from last_used_at."""
+
+    __tablename__ = "trusted_devices"
+    __table_args__ = (
+        UniqueConstraint("user_id", "device_hash", name="uq_trusted_devices_user_device"),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE")
+    )
+    device_hash: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_used_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

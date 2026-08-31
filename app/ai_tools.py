@@ -22,6 +22,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import cache, media
+from app.config import settings
 from app.models import Order, OrderItem, Product, Site, Tenant
 
 log = logging.getLogger(__name__)
@@ -212,7 +213,7 @@ async def _get_site_info(db: AsyncSession, tenant_id: uuid.UUID) -> dict:
     return {
         "site_name": site.name,
         "site_status": site.status,
-        "subdomain": f"{site.subdomain}.softune.xyz",
+        "subdomain": f"{site.subdomain}.{settings.site_base_domain}",
         "custom_domain": site.custom_domain,
         "published": site.status == "published",
         "business_name": business.get("name") or None,

@@ -11,10 +11,11 @@ cd templates/bazaar
 npx next dev -p 3050
 npx next dev -p 3052
 
-aurora-owner@softune.app
+kallol.business.ds@gmail.com
 12345679
 
-
+admin@softunebd.com
+yzb5CEBgwg5RUhURIuE9
 
 cd ~/saas-backend && git pull && docker compose -f docker-compose.prod.yml up -d --build api worker
 docker compose -f docker-compose.prod.yml ps

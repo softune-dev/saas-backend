@@ -1,16 +1,18 @@
 """Help Desk — support tickets. Tenant-scoped (not site-scoped, an account's
-support history isn't split per storefront). No admin/agent reply flow yet
-(soft launch, see HelpTicket's docstring) — this is create + list only.
+support history isn't split per storefront). Create + list here; the reply
+flow (email-only, not a chat thread — see HelpTicketReply's docstring)
+lives in app/api/superadmin.py, since only a superadmin replies.
 """
 
 from typing import Annotated
 
 from fastapi import APIRouter, Depends
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import crud
+from app import crud, mailer, queue
 from app.db import get_db
-from app.models import HelpTicket
+from app.models import HelpTicket, User
 from app.schemas import HelpTicketCreate, HelpTicketOut, Page
 from app.security import CurrentUser
 
@@ -46,4 +48,15 @@ async def create_ticket(
         priority=payload.priority,
         message=payload.message,
     )
-    return await crud.save(db, ticket)
+    ticket = await crud.save(db, ticket)
+
+    db_user = (await db.execute(select(User).where(User.id == user.user_id))).scalar_one()
+    ticket_number_display = f"TKT-{ticket.ticket_number:05d}"
+    subject, html_body, text_body = mailer.ticket_created_email(
+        db_user.full_name, ticket_number_display, ticket.subject, ticket.message
+    )
+    await queue.publish(
+        queue.JOB_SEND_EMAIL,
+        {"to": db_user.email, "subject": subject, "html_body": html_body, "text_body": text_body},
+    )
+    return ticket

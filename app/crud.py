@@ -308,12 +308,13 @@ async def create_tenant_owner_and_site(
     db: AsyncSession,
     *,
     email: str,
-    password: str,
     workspace_name: str,
     plan: str,
     template_key: str,
     site_name: str,
     subdomain: str,
+    password: str | None = None,
+    password_hash: str | None = None,
     full_name: str | None = None,
 ) -> tuple["User", "Site"]:
     """Provision a full paid account in one transaction: workspace, owner
@@ -329,11 +330,20 @@ async def create_tenant_owner_and_site(
     called — kept as one function so "creating an account" can't drift
     between callers.
 
+    Exactly one of password/password_hash must be given. password_hash lets
+    a lead's existing hash (app/models.py's Lead) carry straight into their
+    real account when a superadmin converts them — see
+    superadmin.py's convert_lead — without ever needing their plaintext
+    password, which was never stored anywhere in the first place.
+
     Raises HTTPException(409) if the email is taken, 404 if template_key
     doesn't match an active template.
     """
     from app.models import Tenant, Template, User
     from app.security import hash_password
+
+    if (password is None) == (password_hash is None):
+        raise ValueError("Exactly one of password or password_hash must be given.")
 
     existing = await db.execute(select(User.id).where(User.email == email))
     if existing.scalar_one_or_none():
@@ -365,7 +375,7 @@ async def create_tenant_owner_and_site(
     user = User(
         tenant_id=tenant.id,
         email=email,
-        password_hash=hash_password(password),
+        password_hash=password_hash or hash_password(password),
         full_name=full_name,
         role="owner",
     )

@@ -29,6 +29,7 @@ sys.path.insert(0, ".")
 from pydantic import ValidationError
 from sqlalchemy import select
 
+from app.config import settings
 from app.crud import create_tenant_owner_and_site
 from app.db import SessionLocal
 from app.models import Template
@@ -135,7 +136,7 @@ async def main() -> None:
         print(f"  plan:      {plan}")
         print(f"  site_id:   {site.id}")
         print(f"  template:  {template_key}")
-        print(f"  subdomain: {subdomain}.softune.xyz (live only after they publish)")
+        print(f"  subdomain: {subdomain}.{settings.site_base_domain} (live only after they publish)")
 
 
 if __name__ == "__main__":

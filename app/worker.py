@@ -166,13 +166,18 @@ async def handle_generate_sitemap(payload: dict) -> None:
 
 
 async def handle_send_email(payload: dict) -> None:
-    """Placeholder. Wire up SMTP settings from .env when you need real mail.
+    """Real send via app/mailer.py (Hostinger SMTP) — this is exactly the
+    "slow email send never makes a user wait" case this module's own
+    docstring describes. Callers (app/api/leads.py) queue this instead of
+    awaiting mailer.send_email() inline, which is what made signup take
+    7+ seconds before this existed."""
+    from app import mailer
 
-    For local development, run maildev (see .env.example section 9) and point
-    SMTP_HOST/SMTP_PORT at it — you get a web inbox instead of real sending.
-    """
-    log.info("email: to=%s subject=%s (not sent - no SMTP configured)",
-             payload.get("to"), payload.get("subject"))
+    sent = await mailer.send_email(
+        payload["to"], payload["subject"], payload["html_body"], payload["text_body"]
+    )
+    if not sent:
+        log.warning("email: failed to send to %s (subject=%s)", payload.get("to"), payload.get("subject"))
 
 
 async def handle_send_order_notifications(payload: dict) -> None:

@@ -13,15 +13,17 @@ means every template — Next.js or Vite, now or in two years — gets identical
 correct metadata without reimplementing the fallback rules.
 """
 
+import json
 import logging
 import re
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import RedirectResponse
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import cache, crud, queue, recaptcha
+from app import bkash, cache, courier_crypto, crud, mailer, nagad, queue, recaptcha, sslcommerz
 from app.ratelimit import _client_ip, rate_limit
 from app.config import settings
 from app.db import get_db
@@ -41,6 +43,7 @@ from app.schemas import (
     InquiryCreate,
     InquiryOut,
     PageViewIn,
+    PlatformContactIn,
     PublicOrderCreate,
     PublicOrderItemOut,
     PublicOrderOut,
@@ -410,6 +413,34 @@ async def get_public_product(host: str, slug: str, db: DB) -> dict:
 
 
 @router.post(
+    "/contact",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(rate_limit("platform-contact", limit=5, window_seconds=600))],
+)
+async def submit_platform_contact(payload: PlatformContactIn, request: Request) -> None:
+    """The landing site's own "Contact Us" — platform-level, no site/host
+    involved at all (unlike submit_contact_form below, which is a
+    merchant's storefront contact form and requires one). Previously had NO
+    backend at all — the landing form just opened a mailto: link. Queued,
+    not awaited inline — same reasoning as _queue_otp_email in
+    app/api/leads.py: a real SMTP send takes several seconds, which
+    shouldn't sit in front of the visitor's "Message sent" confirmation.
+    """
+    recaptcha.enforce(
+        await recaptcha.verify(
+            payload.recaptcha_token, "platform_contact", _client_ip(request), payload.recaptcha_v2_token
+        )
+    )
+    subject, html_body, text_body = mailer.contact_email(
+        f"{payload.first_name} {payload.last_name}", payload.email, payload.phone, payload.message
+    )
+    await queue.publish(
+        queue.JOB_SEND_EMAIL,
+        {"to": settings.smtp_from_email, "subject": subject, "html_body": html_body, "text_body": text_body},
+    )
+
+
+@router.post(
     "/site/{host}/contact",
     response_model=InquiryOut,
     status_code=status.HTTP_201_CREATED,
@@ -747,6 +778,235 @@ async def create_public_order(
         delivery_location=payload.delivery_location,
         created_at=order.created_at,
     )
+
+
+# =============================================================================
+#  Gateway checkout — bKash / SSLCommerz / Nagad
+# =============================================================================
+# The order already exists (status="pending", created by create_public_order
+# above, same as a COD/manual order) by the time any of this runs — these
+# endpoints only ever ADVANCE that order to "paid" (or leave it "pending"/
+# mark "cancelled" on failure), never create one. Keyed by order_number, not
+# the internal id — PublicOrderOut never exposes that (see its own
+# docstring), and order_number is exactly what the storefront already has.
+#
+# Real proof of payment is always a server-to-server call THIS backend makes
+# (validate_transaction / execute_payment / verify_payment) — never trusting
+# a redirect or webhook body on its own, which is trivially spoofable by
+# anyone who can guess or intercept the callback URL.
+
+
+async def _find_order_by_number(host: str, order_number: str, db: AsyncSession) -> tuple[Site, Order]:
+    site = await _find_published_site(host, db)
+    order = (
+        await db.execute(
+            select(Order).where(Order.site_id == site.id, Order.order_number == order_number)
+        )
+    ).scalar_one_or_none()
+    if order is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
+    return site, order
+
+
+async def _connected_gateway(site_id, provider: str, db: AsyncSession) -> PaymentConnection | None:
+    return (
+        await db.execute(
+            select(PaymentConnection).where(
+                PaymentConnection.site_id == site_id,
+                PaymentConnection.provider == provider,
+                PaymentConnection.status == "connected",
+            )
+        )
+    ).scalar_one_or_none()
+
+
+def _storefront_redirect(host: str, order_number: str, ok: bool) -> str:
+    outcome = "success" if ok else "failed"
+    return f"https://{host}/checkout/{outcome}?order={order_number}"
+
+
+async def _finalize_gateway_payment(
+    db: AsyncSession, site: Site, order: Order, provider: str,
+    ok: bool, transaction_ref: str | None, raw: dict | None,
+) -> None:
+    """Idempotent: SSLCommerz can hit this twice for the same order (IPN
+    AND the browser redirect both land here) — once the order is off
+    "pending", every later call is a no-op, not a double-charge/refund."""
+    if order.status != "pending":
+        return
+    order.status = "paid" if ok else "cancelled"
+    order.meta = {
+        **order.meta,
+        f"{provider}_transaction_id": transaction_ref,
+        f"{provider}_confirmed_status": (raw or {}).get("status"),
+    }
+    await crud.save(db, order)
+    await cache.invalidate_dashboard(str(site.id))
+    if ok:
+        await queue.publish(
+            queue.JOB_SEND_ORDER_NOTIFICATIONS,
+            {
+                "tenant_id": str(site.tenant_id),
+                "site_id": str(site.id),
+                "type": "order_created",
+                "title": f"Payment confirmed — {order.order_number}",
+                "body": f"{provider.capitalize()} payment of {order.currency} "
+                f"{order.total_cents / 100:.2f} confirmed.",
+                "link": f"/orders?highlight={order.id}",
+                "send_push": True,
+            },
+        )
+
+
+@router.post(
+    "/site/{host}/orders/{order_number}/pay/{provider}",
+    dependencies=[Depends(rate_limit("gateway-init", limit=10, window_seconds=300))],
+)
+async def init_gateway_payment(
+    host: str, order_number: str, provider: str, request: Request, db: DB
+) -> dict:
+    """Starts a real checkout session and returns the URL to send the
+    customer's browser to. Called right after create_public_order, when the
+    customer picked bkash/sslcommerz/nagad instead of cod/manual."""
+    if provider not in ("sslcommerz", "bkash", "nagad"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unknown or unsupported gateway '{provider}'")
+
+    site, order = await _find_order_by_number(host, order_number, db)
+    if order.status != "pending":
+        raise HTTPException(status.HTTP_409_CONFLICT, "This order has already been paid or cancelled.")
+
+    conn = await _connected_gateway(site.id, provider, db)
+    if conn is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{provider} isn't set up for this store.")
+
+    sandbox = bool((conn.config or {}).get("sandbox", True))
+    callback_url = f"{settings.api_base_url}/public/site/{host}/orders/{order_number}/pay/{provider}/callback"
+    amount = order.total_cents / 100
+    customer = order.customer or {}
+    customer_name = " ".join(
+        str(customer.get(k, "")).strip() for k in ("first_name", "last_name")
+    ).strip() or "Customer"
+    customer_phone = crud.extract_customer_phone(customer) or ""
+    customer_email = customer.get("email") if isinstance(customer.get("email"), str) else ""
+    redirect_url: str | None = None
+    error: str | None = None
+
+    if provider == "sslcommerz":
+        store_id = courier_crypto.decrypt(conn.api_key_encrypted)
+        store_passwd = courier_crypto.decrypt(conn.secret_key_encrypted)
+        redirect_url, error = await sslcommerz.create_session(
+            store_id, store_passwd, sandbox=sandbox,
+            tran_id=order_number, amount=amount, currency=order.currency,
+            success_url=callback_url, fail_url=callback_url,
+            cancel_url=callback_url, ipn_url=callback_url,
+            customer_name=customer_name, customer_email=customer_email,
+            customer_phone=customer_phone,
+            customer_address=customer.get("address") if isinstance(customer.get("address"), str) else "",
+            product_name=f"Order {order_number}",
+        )
+    elif provider == "bkash":
+        app_key = courier_crypto.decrypt(conn.api_key_encrypted)
+        app_secret = courier_crypto.decrypt(conn.secret_key_encrypted)
+        extra = json.loads(courier_crypto.decrypt(conn.extra_encrypted or ""))
+        token, token_error = await bkash.grant_token(
+            app_key, app_secret, extra["username"], extra["password"], sandbox
+        )
+        if token is None:
+            error = token_error
+        else:
+            redirect_url, payment_id, error = await bkash.create_payment(
+                app_key, token, sandbox=sandbox, amount=amount, currency=order.currency,
+                merchant_invoice_number=order_number, callback_url=callback_url,
+            )
+            if payment_id:
+                order.meta = {**order.meta, "bkash_payment_id": payment_id}
+                await crud.save(db, order)
+    else:  # nagad
+        merchant_id = (conn.config or {}).get("merchant_id", "")
+        merchant_private_key = courier_crypto.decrypt(conn.secret_key_encrypted)
+        extra = json.loads(courier_crypto.decrypt(conn.extra_encrypted or ""))
+        redirect_url, error = await nagad.create_payment(
+            merchant_id, merchant_private_key, extra["nagad_public_key"], sandbox=sandbox,
+            client_ip=_client_ip(request), order_id=order_number, amount=amount,
+            callback_url=callback_url,
+        )
+
+    if redirect_url is None:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, error or f"{provider} couldn't start this checkout.")
+    return {"redirect_url": redirect_url}
+
+
+@router.api_route("/site/{host}/orders/{order_number}/pay/sslcommerz/callback", methods=["GET", "POST"])
+async def sslcommerz_callback(host: str, order_number: str, request: Request, db: DB):
+    """Handles BOTH SSLCommerz's IPN (server-to-server POST — the real
+    confirmation) and the customer's browser being redirected here after
+    paying (GET). Either way, val_id is only trusted after
+    validate_transaction confirms it server-to-server."""
+    site, order = await _find_order_by_number(host, order_number, db)
+
+    if request.method == "POST":
+        form = await request.form()
+        val_id = form.get("val_id")
+    else:
+        val_id = request.query_params.get("val_id")
+
+    ok = False
+    if val_id:
+        conn = await _connected_gateway(site.id, "sslcommerz", db)
+        if conn:
+            store_id = courier_crypto.decrypt(conn.api_key_encrypted)
+            store_passwd = courier_crypto.decrypt(conn.secret_key_encrypted)
+            sandbox = bool((conn.config or {}).get("sandbox", True))
+            ok, data, _error = await sslcommerz.validate_transaction(
+                store_id, store_passwd, sandbox=sandbox, val_id=str(val_id)
+            )
+            await _finalize_gateway_payment(db, site, order, "sslcommerz", ok, str(val_id), data)
+
+    if request.method == "POST":
+        return {"status": "ok"}
+    return RedirectResponse(_storefront_redirect(host, order_number, ok))
+
+
+@router.get("/site/{host}/orders/{order_number}/pay/bkash/callback")
+async def bkash_callback(host: str, order_number: str, request: Request, db: DB) -> RedirectResponse:
+    site, order = await _find_order_by_number(host, order_number, db)
+
+    payment_id = request.query_params.get("paymentID")
+    status_param = request.query_params.get("status")
+    ok = False
+    if payment_id and status_param == "success":
+        conn = await _connected_gateway(site.id, "bkash", db)
+        if conn:
+            app_key = courier_crypto.decrypt(conn.api_key_encrypted)
+            app_secret = courier_crypto.decrypt(conn.secret_key_encrypted)
+            extra = json.loads(courier_crypto.decrypt(conn.extra_encrypted or ""))
+            sandbox = bool((conn.config or {}).get("sandbox", True))
+            token, _token_error = await bkash.grant_token(
+                app_key, app_secret, extra["username"], extra["password"], sandbox
+            )
+            if token:
+                ok, data, _error = await bkash.execute_payment(
+                    app_key, token, sandbox=sandbox, payment_id=payment_id
+                )
+                await _finalize_gateway_payment(db, site, order, "bkash", ok, payment_id, data)
+
+    return RedirectResponse(_storefront_redirect(host, order_number, ok))
+
+
+@router.get("/site/{host}/orders/{order_number}/pay/nagad/callback")
+async def nagad_callback(host: str, order_number: str, request: Request, db: DB) -> RedirectResponse:
+    site, order = await _find_order_by_number(host, order_number, db)
+
+    payment_ref_id = request.query_params.get("payment_ref_id")
+    ok = False
+    if payment_ref_id:
+        conn = await _connected_gateway(site.id, "nagad", db)
+        if conn:
+            sandbox = bool((conn.config or {}).get("sandbox", True))
+            ok, data, _error = await nagad.verify_payment(payment_ref_id, sandbox=sandbox)
+            await _finalize_gateway_payment(db, site, order, "nagad", ok, payment_ref_id, data)
+
+    return RedirectResponse(_storefront_redirect(host, order_number, ok))
 
 
 @router.get("/site/{host}/sitemap.xml")

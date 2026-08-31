@@ -12,11 +12,20 @@ Two rules followed throughout:
    everything I omitted".
 """
 
+import re
 import uuid
 from datetime import datetime
 from typing import Any, Generic, Literal, TypeVar
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    EmailStr,
+    Field,
+    computed_field,
+    field_validator,
+    model_validator,
+)
 
 T = TypeVar("T")
 
@@ -62,6 +71,30 @@ class LoginIn(BaseModel):
     # Present only on a retry after a "please verify" challenge (v3 scored
     # too low) — see app/recaptcha.py's fallback flow.
     recaptcha_v2_token: str = ""
+    # Client-generated, persisted in localStorage (never a cookie) — see
+    # app/security.py's hash_device_id. Omitted/unrecognized -> OTP required;
+    # a previously-verified device -> skip straight to real tokens.
+    device_id: str | None = Field(default=None, max_length=200)
+
+
+class LoginResultOut(BaseModel):
+    """Either real tokens (device already trusted) OR an OTP challenge —
+    never both. otp_required tells the frontend which shape it got."""
+
+    otp_required: bool = False
+    login_token: str | None = None
+    access_token: str | None = None
+    refresh_token: str | None = None
+    token_type: str = "bearer"
+    expires_in: int | None = None
+
+
+class VerifyLoginOtpIn(BaseModel):
+    otp: str = Field(min_length=6, max_length=6)
+    device_id: str | None = Field(default=None, max_length=200)
+    # Default True: the whole point of this feature is "not every login",
+    # so the common case is "yes, remember this browser."
+    remember_device: bool = True
 
 
 class RefreshIn(BaseModel):
@@ -118,6 +151,7 @@ class UserOut(ORMModel):
     timezone: str | None
     avatar_url: str | None
     role: str
+    is_superadmin: bool
     created_at: datetime
 
 
@@ -548,6 +582,19 @@ class OrderItemOut(ORMModel):
     total_cents: int
 
 
+class PlatformContactIn(BaseModel):
+    """Landing site's own "Contact Us" — platform-level, not tied to any
+    merchant's storefront (that's InquiryCreate below, a separate thing)."""
+
+    first_name: str = Field(min_length=1, max_length=80)
+    last_name: str = Field(min_length=1, max_length=80)
+    email: EmailStr
+    phone: str | None = Field(default=None, max_length=32)
+    message: str = Field(min_length=1, max_length=2000)
+    recaptcha_token: str = ""
+    recaptcha_v2_token: str = ""
+
+
 class InquiryCreate(BaseModel):
     """Public — no auth. Shape is deliberately loose: each site's ContactForm
     block declares its own subset of fields (name/email/phone/message/...), so
@@ -710,8 +757,19 @@ class PaymentConnectIn(BaseModel):
     wallets: list[Literal["bkash", "nagad", "rocket"]] | None = None
     merchant_id: str | None = Field(default=None, max_length=120)
     # Gateway credentials — only meaningful for bkash/nagad/sslcommerz/rocket.
+    # api_key/secret_key double as store_id/store_passwd for sslcommerz and
+    # app_key/app_secret for bkash — same two slots, different provider's
+    # names for them. sandbox defaults True: a newly connected gateway
+    # should never point at production money by accident.
     api_key: str | None = Field(default=None, min_length=1, max_length=200)
     secret_key: str | None = Field(default=None, min_length=1, max_length=200)
+    sandbox: bool = True
+    # bkash only.
+    username: str | None = Field(default=None, min_length=1, max_length=200)
+    password: str | None = Field(default=None, min_length=1, max_length=200)
+    # nagad only — PEM blocks, meaningfully longer than the other fields.
+    merchant_private_key: str | None = Field(default=None, min_length=1, max_length=4000)
+    nagad_public_key: str | None = Field(default=None, min_length=1, max_length=4000)
 
 
 class PaymentConnectionOut(ORMModel):
@@ -724,6 +782,7 @@ class PaymentConnectionOut(ORMModel):
     # Deliberately NOT api_key_encrypted/secret_key_encrypted — same rule as
     # CourierConnectionOut above.
     api_key_hint: str | None
+    last_verified_at: datetime | None
     created_at: datetime
     updated_at: datetime
 
@@ -750,6 +809,220 @@ class MarketingConnectionOut(ORMModel):
     access_token_hint: str
     created_at: datetime
     updated_at: datetime
+
+
+# =============================================================================
+#  Superadmin — platform operator, cross-tenant. See app/api/superadmin.py.
+# =============================================================================
+
+TenantPlan = Literal["free", "starter", "pro", "enterprise"]
+TenantStatus = Literal["active", "suspended", "cancelled"]
+
+
+class SuperAdminStatsOut(BaseModel):
+    total_tenants: int
+    total_users: int
+    active_users: int
+    new_tenants_7d: int
+    tenants_by_plan: dict[str, int]
+    tenants_by_status: dict[str, int]
+    total_leads: int
+    leads_by_status: dict[str, int]
+
+
+class SuperAdminTenantOut(ORMModel):
+    id: uuid.UUID
+    slug: str
+    name: str
+    plan: str
+    status: str
+    created_at: datetime
+
+
+class SuperAdminUserOut(ORMModel):
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    # Not on the User model itself — the router joins Tenant to fill this in,
+    # since a flat user list with only a tenant_id UUID is useless to scan.
+    tenant_name: str
+    email: str
+    full_name: str | None
+    role: str
+    is_active: bool
+    is_superadmin: bool
+    last_login_at: datetime | None
+    created_at: datetime
+
+
+class SuperAdminAccountCreateIn(BaseModel):
+    """A brand new paying customer — tenant + owner login + their one site,
+    all together. Mirrors scripts/create_account.py's prompts exactly; this
+    endpoint is what replaces running that script by hand."""
+
+    email: str = Field(min_length=3, max_length=255)
+    password: str = Field(min_length=8, max_length=72)
+    workspace_name: str = Field(min_length=1, max_length=120)
+    full_name: str | None = Field(default=None, max_length=120)
+    plan: TenantPlan = "starter"
+    template_key: str = Field(min_length=1, max_length=60)
+    site_name: str = Field(min_length=1, max_length=120)
+    subdomain: str = Field(min_length=1, max_length=63)
+
+
+class SuperAdminUserCreateIn(BaseModel):
+    """A second login under an EXISTING tenant (a customer's teammate) — not
+    a new customer. Use SuperAdminAccountCreateIn for that."""
+
+    tenant_id: uuid.UUID
+    email: str = Field(min_length=3, max_length=255)
+    password: str = Field(min_length=8, max_length=72)
+    full_name: str | None = Field(default=None, max_length=120)
+    role: Literal["owner", "admin", "member"] = "member"
+
+
+class SuperAdminUserUpdate(BaseModel):
+    role: Literal["owner", "admin", "member"] | None = None
+    is_active: bool | None = None
+    is_superadmin: bool | None = None
+    # Set only to force-reset a password (e.g. a locked-out customer) — never
+    # returned, and the plaintext is never logged/stored past this request.
+    new_password: str | None = Field(default=None, min_length=8, max_length=72)
+
+
+class SuperAdminTenantUpdate(BaseModel):
+    plan: TenantPlan | None = None
+    status: TenantStatus | None = None
+
+
+# =============================================================================
+#  Leads — prospects who signed up but haven't bought yet. See
+#  app/api/leads.py and migrations/043_leads.sql.
+# =============================================================================
+
+
+class LeadSignupIn(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=72)
+    full_name: str | None = Field(default=None, max_length=120)
+    recaptcha_token: str = ""
+    recaptcha_v2_token: str = ""
+
+    @field_validator("password")
+    @classmethod
+    def _password_strength(cls, value: str) -> str:
+        # Basic, standard rules — not requiring a special character on top:
+        # length + mixed case + a digit is the well-understood floor that
+        # doesn't make a real prospect give up mid-signup over a password
+        # rule. Checked server-side because the frontend's own strength
+        # meter is a UX nicety, never the actual enforcement.
+        if not any(c.isupper() for c in value):
+            raise ValueError("Password needs at least one uppercase letter.")
+        if not any(c.islower() for c in value):
+            raise ValueError("Password needs at least one lowercase letter.")
+        if not any(c.isdigit() for c in value):
+            raise ValueError("Password needs at least one number.")
+        return value
+
+
+class LeadTokenOut(BaseModel):
+    lead_token: str
+    status: str
+
+
+class LeadLoginIn(BaseModel):
+    """A lead's own login — separate from /auth/login (real dashboard
+    users). Lets someone whose lead_token expired or got cleared get back
+    into the funnel instead of being stuck (signup 409s on an
+    already-verified email with no way back in otherwise)."""
+
+    email: EmailStr
+    password: str = Field(min_length=1, max_length=72)
+    recaptcha_token: str = ""
+    recaptcha_v2_token: str = ""
+
+
+class LeadMeOut(BaseModel):
+    """What the frontend calls on load with a stored lead_token to figure
+    out where to resume — e.g. someone who signed up, closed the tab, and
+    clicked "Get started" again later shouldn't have to redo signup/OTP."""
+
+    email: str
+    full_name: str | None
+    phone: str | None
+    shop_name: str | None
+    shop_category: str | None
+    status: str
+
+
+class LeadOtpVerifyIn(BaseModel):
+    otp: str = Field(min_length=6, max_length=6)
+
+
+class LeadProfileUpdate(BaseModel):
+    full_name: str | None = Field(default=None, max_length=120)
+    phone: str | None = Field(default=None, max_length=32)
+    shop_name: str | None = Field(default=None, max_length=120)
+    shop_category: str | None = Field(default=None, max_length=80)
+
+    @field_validator("phone")
+    @classmethod
+    def _validate_bd_phone(cls, value: str | None) -> str | None:
+        # Same pattern as app/api/public.py's _validate_bd_phone (all 7 real
+        # BD mobile operator prefixes) — accepts +8801XXXXXXXXX, 8801XXXXXXXXX,
+        # or bare 01XXXXXXXXX (spaces/dashes stripped), always normalizes to
+        # the bare 11-digit local form so every stored phone number looks
+        # the same regardless of how the frontend sent it.
+        if value is None or not value.strip():
+            return None
+        digits = re.sub(r"\D", "", value)
+        if digits.startswith("880"):
+            digits = "0" + digits[3:]
+        if not re.match(r"^01[3-9]\d{8}$", digits):
+            raise ValueError(
+                "Please enter a valid Bangladeshi mobile number (e.g. 01XXXXXXXXX)."
+            )
+        return digits
+
+
+class LeadPurchaseRequestIn(BaseModel):
+    message: str | None = Field(default=None, max_length=1000)
+
+
+class LeadDemoAccessOut(BaseModel):
+    access_token: str
+    refresh_token: str
+    expires_in: int
+
+
+class LeadPurchaseRequestOut(BaseModel):
+    sent: bool
+    whatsapp_url: str | None = None
+
+
+class SuperAdminConvertLeadIn(BaseModel):
+    """A lead becoming a real customer — same shape as
+    SuperAdminAccountCreateIn minus email/password, which come from the
+    lead's own row instead (their existing password carries straight over,
+    see crud.create_tenant_owner_and_site's password_hash param)."""
+
+    workspace_name: str = Field(min_length=1, max_length=120)
+    plan: TenantPlan = "starter"
+    template_key: str = Field(min_length=1, max_length=60)
+    site_name: str = Field(min_length=1, max_length=120)
+    subdomain: str = Field(min_length=1, max_length=63)
+
+
+class SuperAdminLeadOut(ORMModel):
+    id: uuid.UUID
+    email: str
+    full_name: str | None
+    phone: str | None
+    shop_name: str | None
+    shop_category: str | None
+    status: str
+    demo_accessed_at: datetime | None
+    purchase_requested_at: datetime | None
+    created_at: datetime
 
 
 # =============================================================================
@@ -832,6 +1105,7 @@ class HelpTicketOut(ORMModel):
     id: uuid.UUID
     tenant_id: uuid.UUID
     user_id: uuid.UUID
+    ticket_number: int
     subject: str
     category: str
     priority: str
@@ -839,3 +1113,46 @@ class HelpTicketOut(ORMModel):
     message: str
     created_at: datetime
     updated_at: datetime
+
+    @computed_field
+    @property
+    def ticket_number_display(self) -> str:
+        # Single source of truth for the "TKT-01001" format — both the
+        # dashboard and superadmin panel read this instead of each
+        # formatting ticket_number themselves and risking drift.
+        return f"TKT-{self.ticket_number:05d}"
+
+
+class HelpTicketReplyIn(BaseModel):
+    message: str = Field(min_length=1, max_length=5000)
+
+
+class HelpTicketReplyOut(ORMModel):
+    id: uuid.UUID
+    ticket_id: uuid.UUID
+    message: str
+    created_at: datetime
+
+
+class SuperAdminTicketOut(ORMModel):
+    id: uuid.UUID
+    ticket_number: int
+    tenant_id: uuid.UUID
+    tenant_name: str
+    user_email: str
+    subject: str
+    category: str
+    priority: str
+    status: str
+    message: str
+    created_at: datetime
+    updated_at: datetime
+
+    @computed_field
+    @property
+    def ticket_number_display(self) -> str:
+        return f"TKT-{self.ticket_number:05d}"
+
+
+class SuperAdminTicketUpdate(BaseModel):
+    status: str | None = Field(default=None, max_length=40)

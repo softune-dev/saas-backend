@@ -45,7 +45,7 @@ Required for the *storefront to be publishable at all*:
 
    | Variable | Value | Notes |
    |---|---|---|
-   | `NEXT_PUBLIC_API_URL` | `https://api.softune.xyz` | The real backend. **This is the one that has bitten us twice** — see §5. |
+   | `NEXT_PUBLIC_API_URL` | `https://api.softunebd.com` | The real backend. **This is the one that has bitten us twice** — see §5. |
    | `REVALIDATE_SECRET` | same value as the backend's `.env` | Must match exactly or `/api/revalidate` calls from the worker 401. |
 
    `SITE_HOST` / `NEXT_PUBLIC_SITE_HOST` are optional local-dev fallbacks only
@@ -53,11 +53,11 @@ Required for the *storefront to be publishable at all*:
    production; real traffic always carries a real Host header.
 
 3. **Domains** — add nothing here manually except the project's own
-   `*.vercel.app` default. Do **not** try to add `*.softune.xyz` (the
+   `*.vercel.app` default. Do **not** try to add `*.softunebd.com` (the
    wildcard) to a second project — Vercel only lets one project own a wildcard
    domain, and it already belongs to whichever theme claimed it first (today:
    aurora, `saas-theme1`). Every other theme's sites get their *exact*
-   subdomain (e.g. `myshop.softune.xyz`, not the wildcard) attached
+   subdomain (e.g. `myshop.softunebd.com`, not the wildcard) attached
    automatically per-site by `app/vercel.py`'s `add_domain_to_project`, which
    is exactly why §1's `vercel_project_id` has to be right — Vercel lets an
    exact hostname attached to project B win over a wildcard on project A, no
@@ -107,9 +107,9 @@ Separate from the Vercel project's own env vars: the **backend's** `.env` has
 (revalidate calls, domain-attach calls, the dashboard's "Storefront address").
 It defaults to `vercel.app` (`app/config.py`) — a working-sounding placeholder,
 not a real gap you'd notice from a type error. If it's ever `vercel.app`
-instead of `softune.xyz`, every domain-attach and revalidate call silently
+instead of `softunebd.com`, every domain-attach and revalidate call silently
 targets the wrong host (`{subdomain}.vercel.app` instead of
-`{subdomain}.softune.xyz`) and just quietly does nothing useful. Check this
+`{subdomain}.softunebd.com`) and just quietly does nothing useful. Check this
 value first if a freshly-published site's real domain never gets attached.
 
 ## 6. End-to-end verification checklist
@@ -124,7 +124,7 @@ Before calling a new theme launch-ready, actually do all of these — a clean
    **Ready**, not **Error** (check the project's Deployments tab — a failed
    build silently leaves production on whatever the last working build was,
    with no error surfaced anywhere in the dashboard).
-3. Visit the real `{subdomain}.softune.xyz` in a real browser (not the
+3. Visit the real `{subdomain}.softunebd.com` in a real browser (not the
    dashboard preview) and confirm it's actually this theme, not another one
    served by the wildcard's default project.
 4. Open the theme editor for this site and confirm the preview iframe loads

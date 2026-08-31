@@ -1,5 +1,7 @@
 """Password hashing, JWT tokens, and the current-identity dependency."""
 
+import hashlib
+import secrets
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -15,6 +17,29 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.db import get_db
 from app.models import Tenant
+
+
+# ---------------------------------------------------------------------------
+#  Shared 6-digit OTP helpers — used by both app/api/leads.py (email
+#  verification) and app/api/auth.py (device-remembered login 2FA). Plain
+#  SHA-256, not bcrypt: a 6-digit code is low-entropy either way, the real
+#  protection is the short expiry + attempt cap each caller enforces
+#  itself, not the hash algorithm.
+# ---------------------------------------------------------------------------
+
+
+def generate_otp() -> str:
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
+def hash_otp(otp: str) -> str:
+    return hashlib.sha256(otp.encode()).hexdigest()
+
+
+def hash_device_id(device_id: str) -> str:
+    """Same instinct as hash_otp — a DB leak alone shouldn't hand out
+    working trusted-device tokens."""
+    return hashlib.sha256(device_id.encode()).hexdigest()
 
 ALGORITHM = "HS256"
 _bearer = HTTPBearer(auto_error=False)
@@ -50,7 +75,7 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 
 def _encode(
-    *, user_id: uuid.UUID, tenant_id: uuid.UUID, role: str,
+    *, user_id: uuid.UUID, tenant_id: uuid.UUID, role: str, is_superadmin: bool,
     kind: Literal["access", "refresh"], ttl: timedelta,
 ) -> str:
     now = datetime.now(UTC)
@@ -58,6 +83,7 @@ def _encode(
         "sub": str(user_id),
         "tid": str(tenant_id),  # tenant — the isolation key, see note below
         "role": role,
+        "sa": is_superadmin,
         "typ": kind,
         "iat": now,
         "exp": now + ttl,
@@ -68,17 +94,21 @@ def _encode(
     return jwt.encode(payload, settings.secret_key, algorithm=ALGORITHM)
 
 
-def create_access_token(user_id: uuid.UUID, tenant_id: uuid.UUID, role: str) -> str:
+def create_access_token(
+    user_id: uuid.UUID, tenant_id: uuid.UUID, role: str, is_superadmin: bool = False
+) -> str:
     return _encode(
-        user_id=user_id, tenant_id=tenant_id, role=role, kind="access",
-        ttl=timedelta(minutes=settings.access_token_expire_minutes),
+        user_id=user_id, tenant_id=tenant_id, role=role, is_superadmin=is_superadmin,
+        kind="access", ttl=timedelta(minutes=settings.access_token_expire_minutes),
     )
 
 
-def create_refresh_token(user_id: uuid.UUID, tenant_id: uuid.UUID, role: str) -> str:
+def create_refresh_token(
+    user_id: uuid.UUID, tenant_id: uuid.UUID, role: str, is_superadmin: bool = False
+) -> str:
     return _encode(
-        user_id=user_id, tenant_id=tenant_id, role=role, kind="refresh",
-        ttl=timedelta(days=settings.refresh_token_expire_days),
+        user_id=user_id, tenant_id=tenant_id, role=role, is_superadmin=is_superadmin,
+        kind="refresh", ttl=timedelta(days=settings.refresh_token_expire_days),
     )
 
 
@@ -149,6 +179,83 @@ async def revoke_token(jti: str, expires_at: datetime) -> None:
         logging.getLogger(__name__).warning("failed to revoke token %s: %s", jti, exc)
 
 
+def create_login_otp_token(user_id: uuid.UUID) -> str:
+    """Issued by POST /auth/login when a device isn't trusted yet, instead
+    of real tokens. typ "login_otp" so it can never be presented anywhere
+    outside POST /auth/verify-login-otp — carries no role/tenant, same
+    reasoning as create_lead_token."""
+    now = datetime.now(UTC)
+    payload = {"sub": str(user_id), "typ": "login_otp", "iat": now, "exp": now + timedelta(minutes=10)}
+    return jwt.encode(payload, settings.secret_key, algorithm=ALGORITHM)
+
+
+async def get_login_otp_user_id(
+    creds: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+) -> uuid.UUID:
+    if creds is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing bearer token")
+    try:
+        payload = jwt.decode(creds.credentials, settings.secret_key, algorithms=[ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Code expired — please log in again") from None
+    except jwt.InvalidTokenError:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token") from None
+    if payload.get("typ") != "login_otp":
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Wrong token type")
+    try:
+        return uuid.UUID(payload["sub"])
+    except (KeyError, ValueError):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Malformed token") from None
+
+
+CurrentLoginOtp = Annotated[uuid.UUID, Depends(get_login_otp_user_id)]
+
+
+def create_lead_token(lead_id: uuid.UUID) -> str:
+    """A SEPARATE, much narrower credential from create_access_token — typ
+    "lead" so it can never be presented to a normal authenticated endpoint
+    (get_principal only ever decodes typ "access"). Carries no role/tenant
+    at all; a lead isn't a Principal, just a prospect walking a funnel.
+    Long-lived (days, not minutes) since a prospect might not finish
+    signup -> OTP -> profile -> demo in one sitting.
+    """
+    now = datetime.now(UTC)
+    payload = {
+        "sub": str(lead_id),
+        "typ": "lead",
+        "iat": now,
+        "exp": now + timedelta(days=settings.lead_token_expire_days),
+    }
+    return jwt.encode(payload, settings.secret_key, algorithm=ALGORITHM)
+
+
+async def get_lead_id(
+    creds: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+) -> uuid.UUID:
+    """Auth dependency for app/api/leads.py's post-signup steps (verify-otp
+    already has the lead_id from the signup response; the steps AFTER that
+    — profile, demo-access, purchase-request — need this token instead of
+    asking the prospect to log in again with no real account to log into).
+    """
+    if creds is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing bearer token")
+    try:
+        payload = jwt.decode(creds.credentials, settings.secret_key, algorithms=[ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Session expired — please sign up again") from None
+    except jwt.InvalidTokenError:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token") from None
+    if payload.get("typ") != "lead":
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Wrong token type")
+    try:
+        return uuid.UUID(payload["sub"])
+    except (KeyError, ValueError):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Malformed token") from None
+
+
+CurrentLead = Annotated[uuid.UUID, Depends(get_lead_id)]
+
+
 async def revoke_all_user_tokens(user_id: uuid.UUID) -> None:
     """Bulk-revoke every token issued to this user before right now,
     regardless of each token's own expiry — used for password change and
@@ -183,6 +290,7 @@ class Principal:
     user_id: uuid.UUID
     tenant_id: uuid.UUID
     role: str
+    is_superadmin: bool = False
 
     @property
     def is_admin(self) -> bool:
@@ -215,6 +323,7 @@ async def get_principal(
             user_id=uuid.UUID(payload["sub"]),
             tenant_id=uuid.UUID(payload["tid"]),
             role=payload.get("role", "member"),
+            is_superadmin=bool(payload.get("sa", False)),
         )
     except (KeyError, ValueError):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Malformed token") from None
@@ -231,6 +340,19 @@ def require_admin(user: CurrentUser) -> Principal:
 
 
 AdminUser = Annotated[Principal, Depends(require_admin)]
+
+
+def require_superadmin(user: CurrentUser) -> Principal:
+    """Dependency for /superadmin/* only. Deliberately 404, not 403 — same
+    reasoning as CLAUDE.md's tenant-isolation rule 3: a 403 here would
+    confirm to any authenticated (non-superadmin) user that this router
+    exists at all, which a 404 doesn't."""
+    if not user.is_superadmin:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
+    return user
+
+
+SuperAdminUser = Annotated[Principal, Depends(require_superadmin)]
 
 
 # ---------------------------------------------------------------------------
