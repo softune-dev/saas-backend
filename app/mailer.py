@@ -324,46 +324,90 @@ def welcome_email(recipient_name: str | None = None) -> tuple[str, str, str]:
         ("📊", "Real profit analytics", "Actual margin per order, not just visitor counts."),
         ("🎯", "Marketing pixels, done right", "Meta, TikTok, GTM, and server-side conversion tracking — all built in."),
         ("🚚", "Real courier integrations", "Steadfast, Pathao, RedX, eCourier — connected, not promised."),
+        ("💳", "Real payment gateways", "SSLCommerz, bKash, Nagad — accept money from day one."),
     ]
+    # valign/align as HTML attributes, not just CSS — Outlook's Word rendering
+    # engine ignores vertical-align in style= but honors the attribute, which
+    # is what was causing the icon/text misalignment in the previous version.
     feature_rows_html = "".join(
-        f'<tr><td style="padding:12px 0;vertical-align:top;width:40px;">'
-        f'<span style="display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;'
-        f'border-radius:9px;background-color:#FAF9F6;border:1px solid #D4D4D4;font-size:16px;">{icon}</span></td>'
-        f'<td style="padding:12px 0 12px 14px;vertical-align:top;">'
+        f'<tr>'
+        f'<td width="44" valign="top" style="padding:14px 0;">'
+        f'<table role="presentation" cellpadding="0" cellspacing="0" width="36" height="36">'
+        f'<tr><td width="36" height="36" align="center" valign="middle" '
+        f'style="width:36px;height:36px;border-radius:10px;background-color:#FFF2ED;'
+        f'font-size:17px;line-height:36px;text-align:center;">{icon}</td></tr>'
+        f'</table></td>'
+        f'<td valign="top" style="padding:14px 0 14px 14px;">'
         f'<p style="margin:0;font-size:14px;font-weight:700;color:#0F0F0F;">{title}</p>'
-        f'<p style="margin:2px 0 0 0;font-size:13px;color:#6B7280;line-height:1.5;">{desc}</p>'
+        f'<p style="margin:3px 0 0 0;font-size:13px;color:#6B7280;line-height:1.5;">{desc}</p>'
         f'</td></tr>'
         for icon, title, desc in features
     )
     feature_rows_text = "\n".join(f"{icon} {title} — {desc}" for icon, title, desc in features)
 
+    steps = [
+        ("1", "Preview a live demo store", "See a real, working storefront before you commit to anything."),
+        ("2", "Pick the plan that fits", "Every plan includes the builder, analytics, and integrations above."),
+        ("3", "Launch with real payments connected", "SSLCommerz, bKash, Nagad, and courier handoff — wired in, not bolted on later."),
+    ]
+    steps_rows_html = "".join(
+        f'<tr>'
+        f'<td width="32" valign="top" style="padding:10px 0;">'
+        f'<span style="display:inline-block;width:24px;height:24px;border-radius:50%;background-color:#0F0F0F;'
+        f'color:#FFFFFF;font-size:12px;font-weight:700;line-height:24px;text-align:center;">{n}</span></td>'
+        f'<td valign="top" style="padding:10px 0 10px 12px;">'
+        f'<p style="margin:0;font-size:14px;font-weight:700;color:#0F0F0F;">{title}</p>'
+        f'<p style="margin:3px 0 0 0;font-size:13px;color:#6B7280;line-height:1.5;">{desc}</p>'
+        f'</td></tr>'
+        for n, title, desc in steps
+    )
+    steps_text = "\n".join(f"{n}. {title} — {desc}" for n, title, desc in steps)
+
     body_html = f"""\
 <tr>
   <td style="padding:20px 40px 8px 40px;text-align:center;">
-    <h1 style="margin:0 0 12px 0;font-size:24px;font-weight:800;color:#0F0F0F;">Welcome to Softune 🎉</h1>
+    <h1 style="margin:0 0 12px 0;font-size:25px;font-weight:800;color:#0F0F0F;">Welcome to Softune 🎉</h1>
     <p style="margin:0;font-size:15px;color:#0F0F0F;">{greeting}</p>
     <p style="margin:8px 0 0 0;font-size:14px;line-height:1.6;color:#6B7280;">
-      You're one step closer to a real online store. Here's a quick look at what's already
-      built and waiting for you.
+      You're one step closer to a real online store. Here's what's already built and
+      waiting for you — and how to get from here to launched.
     </p>
   </td>
 </tr>
 <tr>
-  <td style="padding:16px 40px;">
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+  <td style="padding:20px 40px 8px 40px;">
+    <p style="margin:0 0 4px 0;font-size:12px;font-weight:700;color:#FF5733;text-transform:uppercase;letter-spacing:0.06em;">
+      What's already built
+    </p>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid #F0EEEA;">
       {feature_rows_html}
     </table>
   </td>
 </tr>
 <tr>
-  <td style="padding:16px 40px 32px 40px;text-align:center;">
+  <td style="padding:8px 40px 8px 40px;">
+    <div style="border-top:1px solid #F0EEEA;"></div>
+  </td>
+</tr>
+<tr>
+  <td style="padding:8px 40px 4px 40px;">
+    <p style="margin:0 0 4px 0;font-size:12px;font-weight:700;color:#FF5733;text-transform:uppercase;letter-spacing:0.06em;">
+      Get started in 3 steps
+    </p>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+      {steps_rows_html}
+    </table>
+  </td>
+</tr>
+<tr>
+  <td style="padding:20px 40px 32px 40px;text-align:center;">
     <a href="https://www.softunebd.com/pricing"
        style="display:inline-block;background-color:#FF5733;color:#FFFFFF;font-size:15px;font-weight:700;
               padding:14px 36px;border-radius:999px;text-decoration:none;box-shadow:0 6px 16px rgba(255,87,51,0.32);">
       See plans &amp; pricing
     </a>
     <p style="margin:14px 0 0 0;font-size:13px;color:#6B7280;">
-      Or head back to your dashboard to try a live demo store first.
+      Or reply to this email and we'll walk you through a live demo store ourselves.
     </p>
   </td>
 </tr>
@@ -375,6 +419,8 @@ def welcome_email(recipient_name: str | None = None) -> tuple[str, str, str]:
         "Welcome to Softune! You're one step closer to a real online store. "
         "Here's what's already built and waiting for you:\n\n"
         f"{feature_rows_text}\n\n"
+        "Get started in 3 steps:\n"
+        f"{steps_text}\n\n"
         "See plans & pricing: https://www.softunebd.com/pricing\n\n"
         "Questions? Just reply to this email — a real person reads it.\n\n"
         "Softune — softunebd.com"
