@@ -11,14 +11,20 @@ app/config.py — but unlike those, a failed OTP send is NOT swallowed by its
 caller (app/api/leads.py raises a clear 502) because the recipient has no
 other way to get the code they need to proceed.
 
-All customer-facing templates share _shell() below: one header (logo badge),
-one footer (support line + social icons), one font stack. Gmail and Outlook
+All customer-facing templates share _shell() below: one header (logo), one
+footer (support line), one font stack. Gmail and Outlook
 strip <link>/@font-face font loading entirely and fall back to their own
 sans-serif regardless of what's declared here — only WebKit-based clients
 (Apple Mail, iOS Mail) and a few others actually render the Google Fonts
 import. The FONT_STACK's system fallbacks are what most recipients see; the
 Google Fonts <link> is a bonus for the clients that honor it, not something
 to rely on.
+
+The logo is a plain remote <img>, not a CID-embedded attachment — embedding
+was tried and reverted: Gmail renders CID images fine in the opened email,
+but its inbox LIST view surfaces every embedded image as a visible
+attachment chip under the subject line, which read as "this email has an
+attachment" and was worse than the remote-load delay it fixed.
 """
 
 import asyncio
@@ -41,27 +47,6 @@ FONT_LINK = (
     '<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700;800&amp;display=swap" '
     'rel="stylesheet">'
 )
-
-# Real social links aren't wired up anywhere in the codebase yet (checked
-# landing/components/footer.tsx and lib/site.ts) — these are placeholders so
-# the footer has the right shape; swap in real URLs once they exist and this
-# stays a one-line change.
-_SOCIAL_LINKS = [
-    ("Facebook", "#", "M13.5 21v-7.9h2.66l.4-3.1h-3.06V8.1c0-.9.25-1.5 1.53-1.5h1.63V3.8"
-     "c-.28-.04-1.25-.12-2.38-.12-2.36 0-3.98 1.44-3.98 4.08v2.24H7.5v3.1h2.9V21h3.1z"),
-    ("Instagram", "#", "M12 2.16c2.67 0 2.99.01 4.04.06 2.67.12 3.92 1.4 4.04 4.04.05 1.05.06 1.37.06 4.04"
-     "s-.01 2.99-.06 4.04c-.12 2.64-1.37 3.92-4.04 4.04-1.05.05-1.37.06-4.04.06s-2.99-.01-4.04-.06"
-     "c-2.67-.12-3.92-1.4-4.04-4.04C3.87 13.29 3.86 12.97 3.86 10.3s.01-2.99.06-4.04C4.04 3.62 5.29 2.34 7.96 2.22"
-     "9.01 2.17 9.33 2.16 12 2.16zM12 0C9.28 0 8.94.01 7.87.06 3.9.24.24 3.9.06 7.87.01 8.94 0 9.28 0 12"
-     "s.01 3.06.06 4.13c.18 3.97 3.84 7.63 7.81 7.81C8.94 23.99 9.28 24 12 24s3.06-.01 4.13-.06"
-     "c3.97-.18 7.63-3.84 7.81-7.81.05-1.07.06-1.41.06-4.13s-.01-3.06-.06-4.13C23.76 3.9 20.1.24 16.13.06"
-     "15.06.01 14.72 0 12 0zm0 5.84A6.16 6.16 0 1 0 18.16 12 6.16 6.16 0 0 0 12 5.84zm0 10.16A4 4 0 1 1 16 12"
-     "a4 4 0 0 1-4 4zm6.4-10.4a1.44 1.44 0 1 1-1.44-1.44 1.44 1.44 0 0 1 1.44 1.44z"),
-    ("LinkedIn", "#", "M20.45 20.45h-3.55v-5.57c0-1.33-.02-3.03-1.85-3.03-1.85 0-2.14 1.45-2.14 2.94v5.66H9.35"
-     "V9h3.41v1.56h.05c.48-.9 1.64-1.85 3.37-1.85 3.6 0 4.27 2.37 4.27 5.46v6.28zM5.34 7.43a2.06 2.06 0 1 1 0-4.12"
-     "2.06 2.06 0 0 1 0 4.12zM7.12 20.45H3.56V9h3.56v11.45z"),
-]
-
 
 def _send_sync(to_email: str, subject: str, html_body: str, text_body: str) -> None:
     # Every template here uses non-ASCII characters (em dashes, emoji) —
@@ -96,21 +81,11 @@ async def send_email(to_email: str, subject: str, html_body: str, text_body: str
         return False
 
 
-def _social_icons_html() -> str:
-    cells = "".join(
-        f'<td style="padding:0 6px;">'
-        f'<a href="{href}" style="display:inline-block;width:32px;height:32px;border-radius:50%;'
-        f'background-color:#FAF9F6;border:1px solid #D4D4D4;text-align:center;line-height:32px;">'
-        f'<svg width="14" height="14" viewBox="0 0 24 24" style="vertical-align:middle;">'
-        f'<path fill="#6B7280" d="{path}"/></svg></a></td>'
-        for _name, href, path in _SOCIAL_LINKS
-    )
-    return f'<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 auto;"><tr>{cells}</tr></table>'
-
-
 def _shell(preheader: str, body_html: str, *, width: int = 520) -> str:
     """Shared wrapper for every customer-facing template: font import, logo
-    badge header, card body, footer with support line + social icons."""
+    header, card body, footer with support line. No social icons — inline
+    <svg> is stripped by Gmail/most clients, so any icon built that way
+    renders as a blank circle; skip rather than ship broken UI."""
     return f"""\
 <!DOCTYPE html>
 <html>
@@ -127,21 +102,13 @@ def _shell(preheader: str, body_html: str, *, width: int = 520) -> str:
         <table role="presentation" width="{width}" cellpadding="0" cellspacing="0"
                style="width:{width}px;max-width:100%;background-color:#FFFFFF;border-radius:20px;overflow:hidden;box-shadow:0 4px 24px rgba(15,15,15,0.08);">
           <tr>
-            <td style="padding:36px 40px 8px 40px;text-align:center;">
-              <span style="display:inline-flex;align-items:center;justify-content:center;width:64px;height:64px;
-                           border-radius:18px;background-color:#FAF9F6;border:1px solid #D4D4D4;">
-                <img src="{settings.email_logo_url}" alt="Softune" style="height:36px;width:auto;vertical-align:middle;" />
-              </span>
+            <td style="padding:40px 40px 4px 40px;text-align:center;">
+              <img src="{settings.email_logo_url}" alt="Softune" style="height:64px;width:auto;" />
             </td>
           </tr>
           {body_html}
           <tr>
-            <td style="padding:28px 40px 12px 40px;background-color:#FAF9F6;border-top:1px solid #D4D4D4;text-align:center;">
-              {_social_icons_html()}
-            </td>
-          </tr>
-          <tr>
-            <td style="padding:0 40px 28px 40px;background-color:#FAF9F6;text-align:center;">
+            <td style="padding:24px 40px 28px 40px;background-color:#FAF9F6;border-top:1px solid #D4D4D4;text-align:center;">
               <p style="margin:0;font-size:12px;line-height:1.7;color:#6B7280;">
                 Softune — Ecommerce Website Builder for Bangladesh<br />
                 <a href="https://www.softunebd.com" style="color:#FF5733;text-decoration:none;font-weight:600;">softunebd.com</a>
@@ -168,7 +135,7 @@ def otp_email(otp: str, recipient_name: str | None = None) -> tuple[str, str, st
 <tr>
   <td style="padding:20px 40px 4px 40px;text-align:center;">
     <p style="margin:0 0 6px 0;font-size:15px;color:#0F0F0F;">{greeting}</p>
-    <h1 style="margin:0 0 14px 0;font-size:22px;font-weight:800;color:#0F0F0F;">Verify your email</h1>
+    <h1 style="margin:0 0 14px 0;font-size:22px;font-weight:600;color:#0F0F0F;">Verify your email</h1>
     <p style="margin:0 0 24px 0;font-size:14px;line-height:1.6;color:#6B7280;">
       Enter this code to confirm your email and continue setting up your Softune account.
     </p>
@@ -177,7 +144,7 @@ def otp_email(otp: str, recipient_name: str | None = None) -> tuple[str, str, st
 <tr>
   <td style="padding:0 40px 24px 40px;text-align:center;">
     <div style="display:inline-block;background:linear-gradient(180deg,#FFF7F4,#FAF9F6);border:1px solid #FFD7C7;border-radius:14px;padding:18px 36px;">
-      <span style="font-size:34px;font-weight:800;letter-spacing:9px;color:#FF5733;">{otp}</span>
+      <span style="font-size:32px;font-weight:700;letter-spacing:8px;color:#FF5733;">{otp}</span>
     </div>
   </td>
 </tr>
@@ -214,7 +181,7 @@ def ticket_created_email(
     body_html = f"""\
 <tr>
   <td style="padding:20px 40px 28px 40px;">
-    <h1 style="margin:0 0 16px 0;font-size:21px;font-weight:800;color:#0F0F0F;text-align:center;">We've got your ticket 🎫</h1>
+    <h1 style="margin:0 0 16px 0;font-size:21px;font-weight:600;color:#0F0F0F;text-align:center;">We've got your ticket 🎫</h1>
     <p style="margin:0 0 16px 0;font-size:14px;color:#0F0F0F;">{greeting}</p>
     <p style="margin:0 0 20px 0;font-size:14px;line-height:1.6;color:#6B7280;">
       We've received your support request and a real person will get back to you here by email —
@@ -224,7 +191,7 @@ def ticket_created_email(
            style="background-color:#FAF9F6;border:1px solid #D4D4D4;border-radius:14px;">
       <tr><td style="padding:18px 20px;">
         <p style="margin:0 0 4px 0;font-size:12px;color:#6B7280;text-transform:uppercase;letter-spacing:0.04em;">Ticket</p>
-        <p style="margin:0 0 12px 0;font-size:16px;font-weight:800;color:#FF5733;">{ticket_number_display}</p>
+        <p style="margin:0 0 12px 0;font-size:16px;font-weight:700;color:#FF5733;">{ticket_number_display}</p>
         <p style="margin:0 0 4px 0;font-size:12px;color:#6B7280;text-transform:uppercase;letter-spacing:0.04em;">Subject</p>
         <p style="margin:0 0 12px 0;font-size:14px;font-weight:600;color:#0F0F0F;">{subject_safe}</p>
         <p style="margin:0 0 4px 0;font-size:12px;color:#6B7280;text-transform:uppercase;letter-spacing:0.04em;">Your message</p>
@@ -257,7 +224,7 @@ def ticket_reply_email(
     body_html = f"""\
 <tr>
   <td style="padding:20px 40px 28px 40px;">
-    <h1 style="margin:0 0 16px 0;font-size:21px;font-weight:800;color:#0F0F0F;text-align:center;">A reply to your ticket 💬</h1>
+    <h1 style="margin:0 0 16px 0;font-size:21px;font-weight:600;color:#0F0F0F;text-align:center;">A reply to your ticket 💬</h1>
     <p style="margin:0 0 16px 0;font-size:14px;color:#0F0F0F;">{greeting}</p>
     <p style="margin:0 0 20px 0;font-size:14px;line-height:1.6;color:#6B7280;">
       Here's an update on your support request <strong style="color:#FF5733;">{ticket_number_display}</strong>:
@@ -338,7 +305,7 @@ def welcome_email(recipient_name: str | None = None) -> tuple[str, str, str]:
         f'font-size:17px;line-height:36px;text-align:center;">{icon}</td></tr>'
         f'</table></td>'
         f'<td valign="top" style="padding:14px 0 14px 14px;">'
-        f'<p style="margin:0;font-size:14px;font-weight:700;color:#0F0F0F;">{title}</p>'
+        f'<p style="margin:0;font-size:14px;font-weight:600;color:#0F0F0F;">{title}</p>'
         f'<p style="margin:3px 0 0 0;font-size:13px;color:#6B7280;line-height:1.5;">{desc}</p>'
         f'</td></tr>'
         for icon, title, desc in features
@@ -356,7 +323,7 @@ def welcome_email(recipient_name: str | None = None) -> tuple[str, str, str]:
         f'<span style="display:inline-block;width:24px;height:24px;border-radius:50%;background-color:#0F0F0F;'
         f'color:#FFFFFF;font-size:12px;font-weight:700;line-height:24px;text-align:center;">{n}</span></td>'
         f'<td valign="top" style="padding:10px 0 10px 12px;">'
-        f'<p style="margin:0;font-size:14px;font-weight:700;color:#0F0F0F;">{title}</p>'
+        f'<p style="margin:0;font-size:14px;font-weight:600;color:#0F0F0F;">{title}</p>'
         f'<p style="margin:3px 0 0 0;font-size:13px;color:#6B7280;line-height:1.5;">{desc}</p>'
         f'</td></tr>'
         for n, title, desc in steps
@@ -366,7 +333,7 @@ def welcome_email(recipient_name: str | None = None) -> tuple[str, str, str]:
     body_html = f"""\
 <tr>
   <td style="padding:20px 40px 8px 40px;text-align:center;">
-    <h1 style="margin:0 0 12px 0;font-size:25px;font-weight:800;color:#0F0F0F;">Welcome to Softune 🎉</h1>
+    <h1 style="margin:0 0 12px 0;font-size:25px;font-weight:600;color:#0F0F0F;">Welcome to Softune 🎉</h1>
     <p style="margin:0;font-size:15px;color:#0F0F0F;">{greeting}</p>
     <p style="margin:8px 0 0 0;font-size:14px;line-height:1.6;color:#6B7280;">
       You're one step closer to a real online store. Here's what's already built and
@@ -376,7 +343,7 @@ def welcome_email(recipient_name: str | None = None) -> tuple[str, str, str]:
 </tr>
 <tr>
   <td style="padding:20px 40px 8px 40px;">
-    <p style="margin:0 0 4px 0;font-size:12px;font-weight:700;color:#FF5733;text-transform:uppercase;letter-spacing:0.06em;">
+    <p style="margin:0 0 4px 0;font-size:12px;font-weight:600;color:#FF5733;text-transform:uppercase;letter-spacing:0.06em;">
       What's already built
     </p>
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid #F0EEEA;">
@@ -391,7 +358,7 @@ def welcome_email(recipient_name: str | None = None) -> tuple[str, str, str]:
 </tr>
 <tr>
   <td style="padding:8px 40px 4px 40px;">
-    <p style="margin:0 0 4px 0;font-size:12px;font-weight:700;color:#FF5733;text-transform:uppercase;letter-spacing:0.06em;">
+    <p style="margin:0 0 4px 0;font-size:12px;font-weight:600;color:#FF5733;text-transform:uppercase;letter-spacing:0.06em;">
       Get started in 3 steps
     </p>
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
@@ -402,7 +369,7 @@ def welcome_email(recipient_name: str | None = None) -> tuple[str, str, str]:
 <tr>
   <td style="padding:20px 40px 32px 40px;text-align:center;">
     <a href="https://www.softunebd.com/pricing"
-       style="display:inline-block;background-color:#FF5733;color:#FFFFFF;font-size:15px;font-weight:700;
+       style="display:inline-block;background-color:#FF5733;color:#FFFFFF;font-size:15px;font-weight:600;
               padding:14px 36px;border-radius:999px;text-decoration:none;box-shadow:0 6px 16px rgba(255,87,51,0.32);">
       See plans &amp; pricing
     </a>
