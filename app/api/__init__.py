@@ -11,7 +11,6 @@ from app.api import (
     customers,
     fraud,
     help_desk,
-    leads,
     marketing,
     media,
     notifications,
@@ -21,6 +20,7 @@ from app.api import (
     push,
     sites,
     superadmin,
+    trial,
 )
 from app.security import block_demo_writes
 
@@ -61,8 +61,8 @@ api_router.include_router(ai.usage_router, dependencies=_demo_guard)
 # and this router's own SuperAdminUser dependency (app/security.py) is a
 # stricter gate than block_demo_writes anyway. See superadmin.py's docstring.
 api_router.include_router(superadmin.router)
-# NOT gated by _demo_guard — leads have no tenant/site at all, block_demo_writes
-# (which resolves CurrentUser) would 401 every call. Its own CurrentLead auth
-# (app/security.py) is a completely separate, narrower credential. See
-# app/api/leads.py's module docstring.
-api_router.include_router(leads.router)
+# NOT gated by _demo_guard — trial signup has no tenant/site at all until
+# POST /trial/complete creates one, and there's no bearer token during
+# signup for block_demo_writes (which resolves CurrentUser) to even check.
+# See app/api/trial.py's module docstring.
+api_router.include_router(trial.router)

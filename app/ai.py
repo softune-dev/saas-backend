@@ -35,17 +35,24 @@ log = logging.getLogger(__name__)
 
 # Daily AI request cap per tenant plan. NOT finalized pricing — deliberately
 # just a dict, not a database column or migration, so it's a one-line change
-# whenever the real plan lineup settles. Four real plans, no "free" tier:
-#   - demo: internal/trial tenants (today's only two real tenants) — enough
-#     allowance to actually try the assistant, not a token amount.
+# whenever the real plan lineup settles.
+#   - demo: the one shared, read-only "click and look around" account
+#     (app/api/public.py's demo_access) — enough allowance to actually try
+#     the assistant, not a token amount. Distinct from trial below.
+#   - trial: self-serve 3-day signup (app/api/trial.py) — gets exactly the
+#     Starter cap, same as the plan it's a preview of. Was silently falling
+#     through to DEFAULT_AI_DAILY_CAP (80, Growth's cap) before this entry
+#     existed, which is wrong on purpose only for plan values that are truly
+#     unrecognized, not for a real, named plan we forgot to list.
 #   - starter: every paying customer gets real AI access, just a lower cap
 #     than the higher tiers — not 0.
 #   - growth / business: real paid-tier allowances.
-# Any plan value not listed falls back to DEFAULT_AI_DAILY_CAP (same as
-# growth) rather than silently 0 — an unrecognized plan should never look
-# like "AI isn't included."
+# Any OTHER plan value not listed falls back to DEFAULT_AI_DAILY_CAP (same
+# as growth) rather than silently 0 — an unrecognized plan should never
+# look like "AI isn't included."
 PLAN_AI_DAILY_CAP: dict[str, int] = {
     "demo": 50,
+    "trial": 15,
     "starter": 15,
     "growth": 80,
     "business": 250,

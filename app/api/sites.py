@@ -12,9 +12,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import cache, crud, media, notifications, queue, vercel
 from app.db import get_db
 from app.models import Site, SitePage, Template
+from app.config import settings
 from app.schemas import (
     DomainStatusOut,
     Page,
+    ProvisionStatusOut,
     SiteCreate,
     SiteOut,
     SiteUpdate,
@@ -114,6 +116,23 @@ async def get_domain_status(site_id: uuid.UUID, user: CurrentUser, db: DB) -> Do
         site.custom_domain, site.template.vercel_project_id or ""
     )
     return DomainStatusOut(domain=site.custom_domain, connected=connected)
+
+
+@router.get("/sites/{site_id}/provision-status", response_model=ProvisionStatusOut)
+async def get_provision_status(
+    site_id: uuid.UUID, user: CurrentUser, db: DB
+) -> ProvisionStatusOut:
+    """Polled right after trial signup to drive a real progress screen —
+    see ProvisionStatusOut's docstring. Not meant for long-term polling:
+    once domain_attached is true (or None, meaning there was nothing to
+    check), the frontend should stop."""
+    site = await crud.get_scoped(db, Site, user.tenant_id, site_id)
+    if site.template.framework != "nextjs" or not site.template.vercel_project_id:
+        return ProvisionStatusOut(published=site.status == "published", domain_attached=None)
+
+    host = site.custom_domain or f"{site.subdomain}.{settings.site_base_domain}"
+    connected = await vercel.check_domain_connected(host, site.template.vercel_project_id)
+    return ProvisionStatusOut(published=site.status == "published", domain_attached=connected)
 
 
 @router.patch("/sites/{site_id}", response_model=SiteOut)
@@ -248,6 +267,20 @@ async def unpublish_site(site_id: uuid.UUID, user: CurrentUser, db: DB) -> Site:
         title="Site unpublished",
         body=f"{site.name} was taken offline.",
     )
+    return site
+
+
+@router.post("/sites/{site_id}/complete-onboarding", response_model=SiteOut)
+async def complete_onboarding(site_id: uuid.UUID, user: CurrentUser, db: DB) -> Site:
+    """Called once, by StepFinish, right after the wizard's own publish
+    succeeds. Idempotent — a repeat call (e.g. re-opening the wizard) leaves
+    the original timestamp alone rather than bumping it, since this marks
+    "did they ever finish", not "when did they last touch it"."""
+    site = await crud.get_scoped(db, Site, user.tenant_id, site_id)
+    if site.onboarding_completed_at is None:
+        site.onboarding_completed_at = datetime.now(UTC)
+        await db.commit()
+        await db.refresh(site)
     return site
 
 

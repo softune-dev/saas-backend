@@ -8,23 +8,17 @@ since smtplib is a blocking library.
 Blank SMTP_USERNAME/PASSWORD -> send_email() logs and returns False instead
 of raising, same blank-able convention as every other integration key in
 app/config.py — but unlike those, a failed OTP send is NOT swallowed by its
-caller (app/api/leads.py raises a clear 502) because the recipient has no
-other way to get the code they need to proceed.
+caller because the recipient has no other way to get the code they need.
 
-All customer-facing templates share _shell() below: one header (logo), one
-footer (support line), one font stack. Gmail and Outlook
-strip <link>/@font-face font loading entirely and fall back to their own
-sans-serif regardless of what's declared here — only WebKit-based clients
-(Apple Mail, iOS Mail) and a few others actually render the Google Fonts
-import. The FONT_STACK's system fallbacks are what most recipients see; the
-Google Fonts <link> is a bonus for the clients that honor it, not something
-to rely on.
+All customer-facing templates share _shell() below. Gmail and Outlook
+strip <link>/@font-face; the FONT_STACK's system fallbacks are what most
+recipients see. The logo is a remote <img>, not a CID attachment — Gmail's
+inbox list treats CID images as attachment chips under the subject.
 
-The logo is a plain remote <img>, not a CID-embedded attachment — embedding
-was tried and reverted: Gmail renders CID images fine in the opened email,
-but its inbox LIST view surfaces every embedded image as a visible
-attachment chip under the subject line, which read as "this email has an
-attachment" and was worse than the remote-load delay it fixed.
+Colors match the landing site (brand #FF5A36, ink #171717, canvas #EAEAEA).
+Layout is table-based and inline-styled because that's what actually
+survives Gmail/Outlook; rounded pills and 16px cards are progressive
+enhancement, not something Outlook is expected to honor.
 """
 
 import asyncio
@@ -44,16 +38,27 @@ FONT_STACK = "'Manrope',-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif
 FONT_LINK = (
     '<link rel="preconnect" href="https://fonts.googleapis.com">'
     '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
-    '<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700;800&amp;display=swap" '
+    '<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500&amp;display=swap" '
     'rel="stylesheet">'
 )
 
+BRAND = "#FF5A36"
+INK = "#171717"
+MUTED = "#6B7280"
+CANVAS = "#EAEAEA"
+SURFACE = "#FFFFFF"
+LINE = "#E5E7EB"
+SOFT = "#F4F4F5"
+SITE = "https://www.softunebd.com"
+DASHBOARD = "https://dashboard.softunebd.com"
+SUPPORT = "support@softunebd.com"
+
+
 def _send_sync(to_email: str, subject: str, html_body: str, text_body: str) -> None:
-    # Every template here uses non-ASCII characters (em dashes, emoji) —
+    # Every template here uses non-ASCII characters (em dashes) —
     # MIMEText defaults to us-ascii and Header() defaults to encoding only
     # non-ASCII runs, so both need an explicit utf-8 charset or these get
-    # mangled in the actually-delivered email (caught by garbled console
-    # output during testing, not by anything that would fail loudly).
+    # mangled in the actually-delivered email.
     msg = MIMEMultipart("alternative")
     msg["Subject"] = Header(subject, "utf-8")
     msg["From"] = formataddr((settings.smtp_from_name, settings.smtp_from_email))
@@ -81,39 +86,50 @@ async def send_email(to_email: str, subject: str, html_body: str, text_body: str
         return False
 
 
-def _shell(preheader: str, body_html: str, *, width: int = 520) -> str:
-    """Shared wrapper for every customer-facing template: font import, logo
-    header, card body, footer with support line. No social icons — inline
-    <svg> is stripped by Gmail/most clients, so any icon built that way
-    renders as a blank circle; skip rather than ship broken UI."""
+RADIUS = "4px"
+
+
+def _btn(href: str, label: str) -> str:
+    return (
+        f'<a href="{href}" style="display:inline-block;background-color:{BRAND};'
+        f'color:#FFFFFF;font-size:14px;font-weight:400;'
+        f'padding:12px 22px;border-radius:{RADIUS};text-decoration:none;">{label}</a>'
+    )
+
+
+def _shell(preheader: str, body_html: str, *, width: int = 560) -> str:
+    """Shared wrapper: logo header, card body, quiet footer. Left-aligned
+    copy — centered-everything emails read as 2016 templates."""
     return f"""\
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light">
+<meta name="supported-color-schemes" content="light">
 {FONT_LINK}
 </head>
-<body style="margin:0;padding:0;background-color:#F5F5F4;font-family:{FONT_STACK};">
-  <span style="display:none;font-size:1px;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;color:#F5F5F4;">{preheader}</span>
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#F5F5F4;padding:48px 16px;">
+<body style="margin:0;padding:0;background-color:{CANVAS};font-family:{FONT_STACK};-webkit-font-smoothing:antialiased;">
+  <span style="display:none;font-size:1px;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;color:{CANVAS};">{preheader}&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;</span>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:{CANVAS};padding:40px 16px;">
     <tr>
       <td align="center">
         <table role="presentation" width="{width}" cellpadding="0" cellspacing="0"
-               style="width:{width}px;max-width:100%;background-color:#FFFFFF;border-radius:20px;overflow:hidden;box-shadow:0 4px 24px rgba(15,15,15,0.08);">
+               style="width:{width}px;max-width:100%;background-color:{SURFACE};border-radius:{RADIUS};overflow:hidden;">
           <tr>
-            <td style="padding:40px 40px 4px 40px;text-align:center;">
-              <img src="{settings.email_logo_url}" alt="Softune" style="height:64px;width:auto;" />
+            <td style="padding:28px 36px 0 36px;">
+              <img src="{settings.email_logo_url}" alt="Softune" width="36" height="36" style="display:block;height:36px;width:36px;border:0;" />
             </td>
           </tr>
           {body_html}
           <tr>
-            <td style="padding:24px 40px 28px 40px;background-color:#FAF9F6;border-top:1px solid #D4D4D4;text-align:center;">
-              <p style="margin:0;font-size:12px;line-height:1.7;color:#6B7280;">
-                Softune — Ecommerce Website Builder for Bangladesh<br />
-                <a href="https://www.softunebd.com" style="color:#FF5733;text-decoration:none;font-weight:600;">softunebd.com</a>
+            <td style="padding:8px 36px 28px 36px;">
+              <p style="margin:0;font-size:12px;line-height:1.7;color:{MUTED};">
+                Softune · Ecommerce for Bangladesh<br />
+                <a href="{SITE}" style="color:{BRAND};text-decoration:none;">softunebd.com</a>
                 &nbsp;·&nbsp;
-                <a href="mailto:support@softunebd.com" style="color:#FF5733;text-decoration:none;font-weight:600;">support@softunebd.com</a>
+                <a href="mailto:{SUPPORT}" style="color:{BRAND};text-decoration:none;">{SUPPORT}</a>
               </p>
             </td>
           </tr>
@@ -127,40 +143,43 @@ def _shell(preheader: str, body_html: str, *, width: int = 520) -> str:
 
 
 def otp_email(otp: str, recipient_name: str | None = None) -> tuple[str, str, str]:
-    """Returns (subject, html_body, text_body) for the signup OTP email."""
-    greeting = f"Hi {recipient_name}," if recipient_name else "Hi,"
-    subject = f"Your Softune verification code: {otp}"
+    """Signup / login verification code."""
+    greeting = f"Hi {html.escape(recipient_name)}," if recipient_name else "Hi,"
+    greeting_text = f"Hi {recipient_name}," if recipient_name else "Hi,"
+    subject = f"Your Softune code: {otp}"
+    digits = "".join(c for c in otp if c.isdigit())[:6].ljust(6)
+    cells = []
+    for i, d in enumerate(digits):
+        cells.append(
+            f'<td width="44" height="52" align="center" valign="middle" '
+            f'style="width:44px;height:52px;background-color:{SOFT};border:1px solid {LINE};'
+            f'border-radius:{RADIUS};font-size:22px;font-weight:400;color:{INK};font-family:ui-monospace,Menlo,Consolas,monospace;">'
+            f"{html.escape(d)}</td>"
+        )
+        if i < 5:
+            cells.append('<td width="8" style="width:8px;font-size:0;line-height:0;">&nbsp;</td>')
+    boxes = "".join(cells)
 
     body_html = f"""\
 <tr>
-  <td style="padding:20px 40px 4px 40px;text-align:center;">
-    <p style="margin:0 0 6px 0;font-size:15px;color:#0F0F0F;">{greeting}</p>
-    <h1 style="margin:0 0 14px 0;font-size:22px;font-weight:600;color:#0F0F0F;">Verify your email</h1>
-    <p style="margin:0 0 24px 0;font-size:14px;line-height:1.6;color:#6B7280;">
-      Enter this code to confirm your email and continue setting up your Softune account.
+  <td style="padding:28px 36px 8px 36px;">
+    <p style="margin:0 0 8px 0;font-size:14px;color:{INK};">{greeting}</p>
+    <h1 style="margin:0 0 10px 0;font-size:22px;line-height:1.3;font-weight:400;color:{INK};">Your verification code</h1>
+    <p style="margin:0 0 24px 0;font-size:15px;line-height:1.55;color:{MUTED};">
+      Enter this code to continue. It expires in 10 minutes.
     </p>
-  </td>
-</tr>
-<tr>
-  <td style="padding:0 40px 24px 40px;text-align:center;">
-    <div style="display:inline-block;background:linear-gradient(180deg,#FFF7F4,#FAF9F6);border:1px solid #FFD7C7;border-radius:14px;padding:18px 36px;">
-      <span style="font-size:32px;font-weight:700;letter-spacing:8px;color:#FF5733;">{otp}</span>
-    </div>
-  </td>
-</tr>
-<tr>
-  <td style="padding:0 40px 32px 40px;text-align:center;">
-    <p style="margin:0;font-size:13px;color:#6B7280;">
-      This code expires in 10 minutes. If you didn't request this, you can safely ignore this email.
+    <table role="presentation" cellpadding="0" cellspacing="0"><tr>{boxes}</tr></table>
+    <p style="margin:24px 0 0 0;font-size:13px;line-height:1.5;color:{MUTED};">
+      If you didn&apos;t request this, you can ignore this email.
     </p>
   </td>
 </tr>
 """
-    html_body = _shell(f"Your verification code is {otp}", body_html)
+    html_body = _shell(f"Your Softune code is {otp}", body_html)
     text_body = (
-        f"{greeting}\n\n"
+        f"{greeting_text}\n\n"
         f"Your Softune verification code is: {otp}\n\n"
-        "This code expires in 10 minutes. If you didn't request this, you can safely ignore this email.\n\n"
+        "It expires in 10 minutes. If you didn't request this, ignore this email.\n\n"
         "Softune — softunebd.com"
     )
     return subject, html_body, text_body
@@ -169,33 +188,30 @@ def otp_email(otp: str, recipient_name: str | None = None) -> tuple[str, str, st
 def ticket_created_email(
     recipient_name: str | None, ticket_number_display: str, subject: str, message: str,
 ) -> tuple[str, str, str]:
-    """Returns (subject, html, text) — sent to the MERCHANT right after
-    they open a ticket. Confirms it was received and gives them the real
-    ticket number to reference, nothing more (no chat thread — see
-    HelpTicketReply's docstring)."""
-    greeting = f"Hi {recipient_name}," if recipient_name else "Hi,"
-    email_subject = f"[{ticket_number_display}] We've got your ticket — {subject}"
+    """Sent to the merchant right after they open a ticket."""
+    greeting = f"Hi {html.escape(recipient_name)}," if recipient_name else "Hi,"
+    greeting_text = f"Hi {recipient_name}," if recipient_name else "Hi,"
+    email_subject = f"[{ticket_number_display}] We received your ticket"
     subject_safe = html.escape(subject)
     message_safe = html.escape(message)
 
     body_html = f"""\
 <tr>
-  <td style="padding:20px 40px 28px 40px;">
-    <h1 style="margin:0 0 16px 0;font-size:21px;font-weight:600;color:#0F0F0F;text-align:center;">We've got your ticket 🎫</h1>
-    <p style="margin:0 0 16px 0;font-size:14px;color:#0F0F0F;">{greeting}</p>
-    <p style="margin:0 0 20px 0;font-size:14px;line-height:1.6;color:#6B7280;">
-      We've received your support request and a real person will get back to you here by email —
-      reply to this thread any time, it goes straight to our support inbox.
+  <td style="padding:28px 36px 8px 36px;">
+    <p style="margin:0 0 8px 0;font-size:14px;color:{INK};">{greeting}</p>
+    <h1 style="margin:0 0 10px 0;font-size:22px;line-height:1.3;font-weight:400;color:{INK};">We&apos;ve got it</h1>
+    <p style="margin:0 0 22px 0;font-size:15px;line-height:1.55;color:{MUTED};">
+      A real person will reply to this email. Keep this thread — it stays on ticket {html.escape(ticket_number_display)}.
     </p>
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
-           style="background-color:#FAF9F6;border:1px solid #D4D4D4;border-radius:14px;">
-      <tr><td style="padding:18px 20px;">
-        <p style="margin:0 0 4px 0;font-size:12px;color:#6B7280;text-transform:uppercase;letter-spacing:0.04em;">Ticket</p>
-        <p style="margin:0 0 12px 0;font-size:16px;font-weight:700;color:#FF5733;">{ticket_number_display}</p>
-        <p style="margin:0 0 4px 0;font-size:12px;color:#6B7280;text-transform:uppercase;letter-spacing:0.04em;">Subject</p>
-        <p style="margin:0 0 12px 0;font-size:14px;font-weight:600;color:#0F0F0F;">{subject_safe}</p>
-        <p style="margin:0 0 4px 0;font-size:12px;color:#6B7280;text-transform:uppercase;letter-spacing:0.04em;">Your message</p>
-        <p style="margin:0;font-size:14px;color:#0F0F0F;white-space:pre-wrap;">{message_safe}</p>
+           style="background-color:{SOFT};border-radius:{RADIUS};">
+      <tr><td style="padding:16px 18px;">
+        <p style="margin:0 0 4px 0;font-size:12px;color:{MUTED};">Ticket</p>
+        <p style="margin:0 0 14px 0;font-size:16px;font-weight:400;color:{BRAND};">{html.escape(ticket_number_display)}</p>
+        <p style="margin:0 0 4px 0;font-size:12px;color:{MUTED};">Subject</p>
+        <p style="margin:0 0 14px 0;font-size:15px;font-weight:400;color:{INK};">{subject_safe}</p>
+        <p style="margin:0 0 4px 0;font-size:12px;color:{MUTED};">Your message</p>
+        <p style="margin:0;font-size:14px;line-height:1.55;color:{INK};white-space:pre-wrap;">{message_safe}</p>
       </td></tr>
     </table>
   </td>
@@ -203,10 +219,10 @@ def ticket_created_email(
 """
     html_body = _shell(f"Ticket {ticket_number_display} received", body_html)
     text_body = (
-        f"{greeting}\n\nWe've received your support request.\n\n"
+        f"{greeting_text}\n\nWe've received your support request.\n\n"
         f"Ticket: {ticket_number_display}\nSubject: {subject}\n\nYour message:\n{message}\n\n"
-        "Reply to this email any time — it goes straight to our support inbox.\n\n"
-        "Softune Support — support@softunebd.com"
+        "Reply to this email any time — it stays on the same ticket.\n\n"
+        f"Softune Support — {SUPPORT}"
     )
     return email_subject, html_body, text_body
 
@@ -214,38 +230,38 @@ def ticket_created_email(
 def ticket_reply_email(
     recipient_name: str | None, ticket_number_display: str, subject: str, reply_message: str,
 ) -> tuple[str, str, str]:
-    """Returns (subject, html, text) — sent when a superadmin replies. One
-    outbound message, not a chat bubble — see HelpTicketReply's docstring
-    for why."""
-    greeting = f"Hi {recipient_name}," if recipient_name else "Hi,"
+    """Sent when a superadmin replies — one outbound message, not a chat bubble."""
+    greeting = f"Hi {html.escape(recipient_name)}," if recipient_name else "Hi,"
+    greeting_text = f"Hi {recipient_name}," if recipient_name else "Hi,"
     email_subject = f"[{ticket_number_display}] Re: {subject}"
     reply_safe = html.escape(reply_message)
+    num_safe = html.escape(ticket_number_display)
 
     body_html = f"""\
 <tr>
-  <td style="padding:20px 40px 28px 40px;">
-    <h1 style="margin:0 0 16px 0;font-size:21px;font-weight:600;color:#0F0F0F;text-align:center;">A reply to your ticket 💬</h1>
-    <p style="margin:0 0 16px 0;font-size:14px;color:#0F0F0F;">{greeting}</p>
-    <p style="margin:0 0 20px 0;font-size:14px;line-height:1.6;color:#6B7280;">
-      Here's an update on your support request <strong style="color:#FF5733;">{ticket_number_display}</strong>:
+  <td style="padding:28px 36px 8px 36px;">
+    <p style="margin:0 0 8px 0;font-size:14px;color:{INK};">{greeting}</p>
+    <h1 style="margin:0 0 10px 0;font-size:22px;line-height:1.3;font-weight:400;color:{INK};">A reply on {num_safe}</h1>
+    <p style="margin:0 0 22px 0;font-size:15px;line-height:1.55;color:{MUTED};">
+      Here&apos;s an update on your request.
     </p>
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
-           style="background-color:#FAF9F6;border:1px solid #D4D4D4;border-radius:14px;">
+           style="background-color:{SOFT};border-radius:{RADIUS};border-left:3px solid {BRAND};">
       <tr><td style="padding:18px 20px;">
-        <p style="margin:0;font-size:14px;color:#0F0F0F;white-space:pre-wrap;">{reply_safe}</p>
+        <p style="margin:0;font-size:15px;line-height:1.6;color:{INK};white-space:pre-wrap;">{reply_safe}</p>
       </td></tr>
     </table>
-    <p style="margin:20px 0 0 0;font-size:13px;color:#6B7280;">
-      Need anything else? Just reply to this email and we'll pick it up on the same ticket.
+    <p style="margin:20px 0 0 0;font-size:13px;line-height:1.5;color:{MUTED};">
+      Need anything else? Reply to this email — it stays on the same ticket.
     </p>
   </td>
 </tr>
 """
     html_body = _shell(f"Update on ticket {ticket_number_display}", body_html)
     text_body = (
-        f"{greeting}\n\nHere's an update on your support request {ticket_number_display}:\n\n"
-        f"{reply_message}\n\nNeed anything else? Just reply to this email.\n\n"
-        "Softune Support — support@softunebd.com"
+        f"{greeting_text}\n\nHere's an update on {ticket_number_display}:\n\n"
+        f"{reply_message}\n\nNeed anything else? Reply to this email.\n\n"
+        f"Softune Support — {SUPPORT}"
     )
     return email_subject, html_body, text_body
 
@@ -253,176 +269,127 @@ def ticket_reply_email(
 def contact_email(
     name: str, email: str, phone: str | None, message: str,
 ) -> tuple[str, str, str]:
-    """Returns (subject, html_body, text_body) — sent to the SUPPORT inbox
-    (settings.smtp_from_email), for the landing site's platform-level
-    "Contact Us" form (not a merchant's own storefront contact form — that's
-    app/api/public.py's submit_contact_form, a completely separate, already-
-    working, per-tenant thing). Internal/ops email, so it skips the branded
-    shell — plain and functional is more useful here than on-brand."""
+    """Internal — landing Contact Us form to the support inbox. Skips the
+    branded shell; plain is more useful here than on-brand."""
     subject = f"Contact form — {name}"
     rows = [("Name", name), ("Email", email), ("Phone", phone or "—"), ("Message", message)]
     text_body = "New contact form submission:\n\n" + "\n".join(f"{k}: {v}" for k, v in rows)
     html_rows = "".join(
-        f'<tr><td style="padding:6px 12px;color:#6B7280;font-size:13px;vertical-align:top;">{k}</td>'
-        f'<td style="padding:6px 12px;color:#0F0F0F;font-size:13px;font-weight:500;white-space:pre-wrap;">{v}</td></tr>'
+        f'<tr><td style="padding:8px 0;color:{MUTED};font-size:12px;'
+        f'width:88px;vertical-align:top;">{k}</td>'
+        f'<td style="padding:8px 0;color:{INK};font-size:14px;white-space:pre-wrap;">{html.escape(str(v))}</td></tr>'
         for k, v in rows
     )
     html_body = f"""\
 <!DOCTYPE html>
-<html><body style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;padding:24px;">
-<h2 style="color:#0F0F0F;">New contact form submission</h2>
-<table role="presentation" cellpadding="0" cellspacing="0">{html_rows}</table>
+<html><body style="margin:0;padding:24px;background:{CANVAS};font-family:{FONT_STACK};">
+<table role="presentation" width="520" cellpadding="0" cellspacing="0" style="max-width:100%;background:{SURFACE};border-radius:{RADIUS};padding:8px 24px;">
+<tr><td style="padding:20px 0 8px 0;">
+<p style="margin:0;font-size:12px;font-weight:400;color:{BRAND};">Inbound</p>
+<h2 style="margin:6px 0 0 0;font-size:20px;color:{INK};">New contact form</h2>
+</td></tr>
+{html_rows}
+</table>
 </body></html>
 """
     return subject, html_body, text_body
 
 
 def welcome_email(recipient_name: str | None = None) -> tuple[str, str, str]:
-    """Returns (subject, html_body, text_body) — sent once, right after a
-    lead verifies their OTP (app/api/leads.py's verify_otp). Not the OTP
-    email itself; this is the marketing nudge that follows it, aimed at
-    getting them to finish the funnel (demo -> purchase request)."""
-    greeting = f"Hi {recipient_name}," if recipient_name else "Hi there,"
-    subject = "Welcome to Softune — here's what you can build"
+    """Sent once after POST /trial/complete — the store already exists."""
+    greeting = f"Hi {html.escape(recipient_name)}," if recipient_name else "Hi,"
+    greeting_text = f"Hi {recipient_name}," if recipient_name else "Hi,"
+    subject = "Your Softune store is ready"
 
-    features = [
-        ("🎨", "Drag-and-drop store builder", "Launch a real storefront without touching code."),
-        ("🤖", "AI-assisted copywriting", "Describe a product, get sellable copy — built into the editor."),
-        ("📊", "Real profit analytics", "Actual margin per order, not just visitor counts."),
-        ("🎯", "Marketing pixels, done right", "Meta, TikTok, GTM, and server-side conversion tracking — all built in."),
-        ("🚚", "Real courier integrations", "Steadfast, Pathao, RedX, eCourier — connected, not promised."),
-        ("💳", "Real payment gateways", "SSLCommerz, bKash, Nagad — accept money from day one."),
+    items = [
+        ("Theme editor", "Colors, fonts, and sections — live preview, no code."),
+        ("Payments that Bangladesh uses", "COD, bKash, Nagad, and SSLCommerz."),
+        ("Couriers, connected", "Steadfast, Pathao, RedX, and eCourier."),
+        ("Three days, no card", "Full dashboard access. Upgrade when you're ready."),
     ]
-    # valign/align as HTML attributes, not just CSS — Outlook's Word rendering
-    # engine ignores vertical-align in style= but honors the attribute, which
-    # is what was causing the icon/text misalignment in the previous version.
-    feature_rows_html = "".join(
+    rows_html = "".join(
         f'<tr>'
-        f'<td width="44" valign="top" style="padding:14px 0;">'
-        f'<table role="presentation" cellpadding="0" cellspacing="0" width="36" height="36">'
-        f'<tr><td width="36" height="36" align="center" valign="middle" '
-        f'style="width:36px;height:36px;border-radius:10px;background-color:#FFF2ED;'
-        f'font-size:17px;line-height:36px;text-align:center;">{icon}</td></tr>'
-        f'</table></td>'
-        f'<td valign="top" style="padding:14px 0 14px 14px;">'
-        f'<p style="margin:0;font-size:14px;font-weight:600;color:#0F0F0F;">{title}</p>'
-        f'<p style="margin:3px 0 0 0;font-size:13px;color:#6B7280;line-height:1.5;">{desc}</p>'
+        f'<td valign="top" width="28" style="padding:0 0 14px 0;font-size:14px;color:{MUTED};">{i}.</td>'
+        f'<td valign="top" style="padding:0 0 14px 0;">'
+        f'<p style="margin:0;font-size:15px;font-weight:400;color:{INK};">{title}</p>'
+        f'<p style="margin:4px 0 0 0;font-size:14px;line-height:1.5;color:{MUTED};">{desc}</p>'
         f'</td></tr>'
-        for icon, title, desc in features
+        for i, (title, desc) in enumerate(items, start=1)
     )
-    feature_rows_text = "\n".join(f"{icon} {title} — {desc}" for icon, title, desc in features)
-
-    steps = [
-        ("1", "Preview a live demo store", "See a real, working storefront before you commit to anything."),
-        ("2", "Pick the plan that fits", "Every plan includes the builder, analytics, and integrations above."),
-        ("3", "Launch with real payments connected", "SSLCommerz, bKash, Nagad, and courier handoff — wired in, not bolted on later."),
-    ]
-    steps_rows_html = "".join(
-        f'<tr>'
-        f'<td width="32" valign="top" style="padding:10px 0;">'
-        f'<span style="display:inline-block;width:24px;height:24px;border-radius:50%;background-color:#0F0F0F;'
-        f'color:#FFFFFF;font-size:12px;font-weight:700;line-height:24px;text-align:center;">{n}</span></td>'
-        f'<td valign="top" style="padding:10px 0 10px 12px;">'
-        f'<p style="margin:0;font-size:14px;font-weight:600;color:#0F0F0F;">{title}</p>'
-        f'<p style="margin:3px 0 0 0;font-size:13px;color:#6B7280;line-height:1.5;">{desc}</p>'
-        f'</td></tr>'
-        for n, title, desc in steps
-    )
-    steps_text = "\n".join(f"{n}. {title} — {desc}" for n, title, desc in steps)
+    rows_text = "\n".join(f"{i}. {t} — {d}" for i, (t, d) in enumerate(items, start=1))
 
     body_html = f"""\
 <tr>
-  <td style="padding:20px 40px 8px 40px;text-align:center;">
-    <h1 style="margin:0 0 12px 0;font-size:25px;font-weight:600;color:#0F0F0F;">Welcome to Softune 🎉</h1>
-    <p style="margin:0;font-size:15px;color:#0F0F0F;">{greeting}</p>
-    <p style="margin:8px 0 0 0;font-size:14px;line-height:1.6;color:#6B7280;">
-      You're one step closer to a real online store. Here's what's already built and
-      waiting for you — and how to get from here to launched.
+  <td style="padding:28px 36px 8px 36px;">
+    <p style="margin:0 0 8px 0;font-size:14px;color:{INK};">{greeting}</p>
+    <h1 style="margin:0 0 10px 0;font-size:22px;line-height:1.3;font-weight:400;color:{INK};">Your store is live</h1>
+    <p style="margin:0 0 24px 0;font-size:15px;line-height:1.55;color:{MUTED};">
+      The 3-day trial is on. Open the dashboard, add a product, and publish when it looks right.
     </p>
+    {_btn(DASHBOARD, "Open dashboard")}
   </td>
 </tr>
 <tr>
-  <td style="padding:20px 40px 8px 40px;">
-    <p style="margin:0 0 4px 0;font-size:12px;font-weight:600;color:#FF5733;text-transform:uppercase;letter-spacing:0.06em;">
-      What's already built
-    </p>
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid #F0EEEA;">
-      {feature_rows_html}
-    </table>
-  </td>
-</tr>
-<tr>
-  <td style="padding:8px 40px 8px 40px;">
-    <div style="border-top:1px solid #F0EEEA;"></div>
-  </td>
-</tr>
-<tr>
-  <td style="padding:8px 40px 4px 40px;">
-    <p style="margin:0 0 4px 0;font-size:12px;font-weight:600;color:#FF5733;text-transform:uppercase;letter-spacing:0.06em;">
-      Get started in 3 steps
-    </p>
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
-      {steps_rows_html}
-    </table>
-  </td>
-</tr>
-<tr>
-  <td style="padding:20px 40px 32px 40px;text-align:center;">
-    <a href="https://www.softunebd.com/pricing"
-       style="display:inline-block;background-color:#FF5733;color:#FFFFFF;font-size:15px;font-weight:600;
-              padding:14px 36px;border-radius:999px;text-decoration:none;box-shadow:0 6px 16px rgba(255,87,51,0.32);">
-      See plans &amp; pricing
-    </a>
-    <p style="margin:14px 0 0 0;font-size:13px;color:#6B7280;">
-      Or reply to this email and we'll walk you through a live demo store ourselves.
-    </p>
+  <td style="padding:32px 36px 8px 36px;">
+    <p style="margin:0 0 16px 0;font-size:14px;font-weight:400;color:{INK};">What you can do now</p>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0">{rows_html}</table>
   </td>
 </tr>
 """
-    html_body = _shell("Welcome to Softune — here's what's already built for you", body_html)
-
+    html_body = _shell("Your Softune store is ready — 3-day trial, no card", body_html)
     text_body = (
-        f"{greeting}\n\n"
-        "Welcome to Softune! You're one step closer to a real online store. "
-        "Here's what's already built and waiting for you:\n\n"
-        f"{feature_rows_text}\n\n"
-        "Get started in 3 steps:\n"
-        f"{steps_text}\n\n"
-        "See plans & pricing: https://www.softunebd.com/pricing\n\n"
-        "Questions? Just reply to this email — a real person reads it.\n\n"
+        f"{greeting_text}\n\n"
+        "Your store is live. The 3-day trial is on — no credit card.\n\n"
+        f"Open dashboard: {DASHBOARD}\n\n"
+        f"{rows_text}\n\n"
+        "Questions? Reply to this email.\n\n"
         "Softune — softunebd.com"
     )
     return subject, html_body, text_body
 
 
-def purchase_request_email(
-    lead_email: str, full_name: str | None, phone: str | None,
-    shop_name: str | None, shop_category: str | None, message: str | None,
-) -> tuple[str, str, str]:
-    """Returns (subject, html_body, text_body) — sent to the SALES inbox
-    (settings.smtp_from_email), not the lead. Plain and functional; this
-    one's read by a human on your team, not a prospect, so no logo/branding
-    needed."""
-    subject = f"Purchase request — {shop_name or full_name or lead_email}"
-    rows = [
-        ("Name", full_name or "—"),
-        ("Email", lead_email),
-        ("Phone", phone or "—"),
-        ("Shop name", shop_name or "—"),
-        ("Shop category", shop_category or "—"),
-        ("Message", message or "—"),
+def demo_followup_email() -> tuple[str, str, str]:
+    """One-click send from the superadmin demo-requests list. Pitch is
+    'you've seen the demo — start a trial', not the welcome intro."""
+    subject = "Build your own store — 3 days free, no card"
+    signup = f"{SITE}/signup"
+    bullets = [
+        "Your shop name, theme, and products",
+        "COD, bKash, Nagad, and SSLCommerz",
+        "Three days, no credit card",
     ]
-    text_body = "New purchase request:\n\n" + "\n".join(f"{k}: {v}" for k, v in rows)
-    html_rows = "".join(
-        f'<tr><td style="padding:6px 12px;color:#6B7280;font-size:13px;">{k}</td>'
-        f'<td style="padding:6px 12px;color:#0F0F0F;font-size:13px;font-weight:500;">{v}</td></tr>'
-        for k, v in rows
+    bullets_html = "".join(
+        f'<tr>'
+        f'<td valign="top" width="18" style="padding:0 0 8px 0;font-size:14px;color:{MUTED};">•</td>'
+        f'<td valign="top" style="padding:0 0 8px 0;font-size:15px;line-height:1.5;color:{INK};">{item}</td>'
+        f'</tr>'
+        for item in bullets
     )
-    html_body = f"""\
-<!DOCTYPE html>
-<html><body style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;padding:24px;">
-<h2 style="color:#0F0F0F;">New purchase request</h2>
-<table role="presentation" cellpadding="0" cellspacing="0">{html_rows}</table>
-</body></html>
+    bullets_text = "\n".join(f"• {item}" for item in bullets)
+
+    body_html = f"""\
+<tr>
+  <td style="padding:28px 36px 8px 36px;">
+    <p style="margin:0 0 8px 0;font-size:14px;font-weight:400;color:{BRAND};">You tried the demo</p>
+    <h1 style="margin:0 0 12px 0;font-size:22px;line-height:1.3;font-weight:400;color:{INK};">Now make it yours</h1>
+    <p style="margin:0 0 18px 0;font-size:15px;line-height:1.55;color:{MUTED};">
+      The demo is a shared, read-only shop. A trial is your shop for three days.
+    </p>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 22px 0;">{bullets_html}</table>
+    {_btn(signup, "Start free trial")}
+    <p style="margin:20px 0 0 0;font-size:13px;line-height:1.5;color:{MUTED};">
+      About five minutes. Pick a theme, add your shop name, and you&apos;re in.
+    </p>
+  </td>
+</tr>
 """
+    html_body = _shell("Start your free 3-day trial — no card required", body_html)
+    text_body = (
+        "You tried the demo. Now make it yours.\n\n"
+        "The demo is a shared, read-only shop. A trial is your shop for three days.\n\n"
+        f"{bullets_text}\n\n"
+        f"Start free trial: {signup}\n\n"
+        "About five minutes. Pick a theme, add your shop name, and you're in.\n\n"
+        "Softune — softunebd.com"
+    )
     return subject, html_body, text_body

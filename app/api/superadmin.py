@@ -30,13 +30,14 @@ from app.db import get_db
 from app.models import (
     Category,
     CourierConnection,
+    DemoAccessRequest,
     HelpTicket,
     HelpTicketReply,
-    Lead,
     Order,
     PaymentConnection,
     Product,
     Site,
+    Template,
     Tenant,
     User,
 )
@@ -45,8 +46,7 @@ from app.schemas import (
     HelpTicketReplyOut,
     Page,
     SuperAdminAccountCreateIn,
-    SuperAdminConvertLeadIn,
-    SuperAdminLeadOut,
+    SuperAdminDemoAccessOut,
     SuperAdminStatsOut,
     SuperAdminTenantOut,
     SuperAdminTenantUpdate,
@@ -91,10 +91,13 @@ async def get_stats(admin: SuperAdminUser, db: DB) -> dict:
         await db.execute(select(func.count(Tenant.id)).where(Tenant.created_at >= week_ago))
     ).scalar_one()
 
-    total_leads = (await db.execute(select(func.count(Lead.id)))).scalar_one()
-    lead_status_rows = (
-        await db.execute(select(Lead.status, func.count(Lead.id)).group_by(Lead.status))
-    ).all()
+    active_trials = (
+        await db.execute(
+            select(func.count(Tenant.id)).where(
+                Tenant.plan == "trial", Tenant.trial_expires_at > func.now()
+            )
+        )
+    ).scalar_one()
 
     return {
         "total_tenants": total_tenants,
@@ -103,8 +106,7 @@ async def get_stats(admin: SuperAdminUser, db: DB) -> dict:
         "new_tenants_7d": new_tenants_7d,
         "tenants_by_plan": dict(plan_rows),
         "tenants_by_status": dict(status_rows),
-        "total_leads": total_leads,
-        "leads_by_status": dict(lead_status_rows),
+        "active_trials": active_trials,
     }
 
 
@@ -121,6 +123,7 @@ async def _tenant_aggregates(db: AsyncSession, tenant_ids: list[uuid.UUID]) -> d
         "site_count": 0, "category_count": 0, "product_count": 0,
         "order_count": 0, "user_count": 0,
         "payment_providers": [], "courier_providers": [],
+        "owner_last_login_at": None, "template_key": None,
     } for tid in tenant_ids}
     if not tenant_ids:
         return out
@@ -151,6 +154,31 @@ async def _tenant_aggregates(db: AsyncSession, tenant_ids: list[uuid.UUID]) -> d
         for tid, provider in rows:
             out[tid][key].append(provider)
 
+    owner_rows = (
+        await db.execute(
+            select(User.tenant_id, User.last_login_at)
+            .where(User.tenant_id.in_(tenant_ids), User.role == "owner")
+        )
+    ).all()
+    for tid, last_login_at in owner_rows:
+        out[tid]["owner_last_login_at"] = last_login_at
+
+    # Which template a tenant's site is actually built on — real-quick way
+    # to verify "the theme they picked at signup is the theme that's
+    # actually stored," rather than trusting the dashboard's own preview.
+    # A tenant with multiple sites (Business plan) shows whichever comes
+    # back first; there's no "the" template once that's possible.
+    template_rows = (
+        await db.execute(
+            select(Site.tenant_id, Template.key)
+            .join(Template, Site.template_id == Template.id)
+            .where(Site.tenant_id.in_(tenant_ids))
+        )
+    ).all()
+    for tid, key in template_rows:
+        if out[tid]["template_key"] is None:
+            out[tid]["template_key"] = key
+
     return out
 
 
@@ -158,6 +186,7 @@ def _tenant_out(tenant: Tenant, aggregates: dict) -> dict:
     return {
         "id": tenant.id, "slug": tenant.slug, "name": tenant.name, "plan": tenant.plan,
         "status": tenant.status, "created_at": tenant.created_at, "business": tenant.business,
+        "trial_expires_at": tenant.trial_expires_at,
         **aggregates,
     }
 
@@ -231,6 +260,22 @@ async def update_tenant(
     tenant = await crud.save(db, tenant)
     aggregates = (await _tenant_aggregates(db, [tenant.id]))[tenant.id]
     return _tenant_out(tenant, aggregates)
+
+
+@router.delete("/tenants/{tenant_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_tenant(tenant_id: uuid.UUID, admin: SuperAdminUser, db: DB) -> None:
+    """Hard delete — irreversible. Every FK to tenants.id in this schema is
+    ondelete="CASCADE", so this takes the tenant's site/products/orders/etc.
+    with it in one statement; the same mechanism app/worker.py's trial
+    expiry sweep uses. For a trial tenant this is the manual "ban/delete
+    now" action instead of waiting for that sweep; PATCH status="suspended"
+    (above) is the reversible alternative when the intent is just to block
+    access, not erase the account."""
+    tenant = (await db.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one_or_none()
+    if tenant is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Tenant not found")
+    await db.delete(tenant)
+    await db.commit()
 
 
 # =============================================================================
@@ -356,70 +401,6 @@ async def update_ticket(
 
 
 # =============================================================================
-#  Leads
-# =============================================================================
-
-
-@router.get("/leads", response_model=Page[SuperAdminLeadOut])
-async def list_leads(
-    admin: SuperAdminUser,
-    db: DB,
-    q: str | None = None,
-    status_filter: str | None = None,
-    limit: Annotated[int, "1-100"] = 50,
-    offset: int = 0,
-) -> dict:
-    filters = []
-    if q:
-        filters.append(
-            or_(Lead.email.ilike(f"%{q}%"), Lead.full_name.ilike(f"%{q}%"), Lead.shop_name.ilike(f"%{q}%"))
-        )
-    if status_filter:
-        filters.append(Lead.status == status_filter)
-
-    total = (await db.execute(select(func.count(Lead.id)).where(*filters))).scalar_one()
-    rows = (
-        await db.execute(
-            select(Lead).where(*filters).order_by(Lead.created_at.desc())
-            .limit(limit).offset(offset)
-        )
-    ).scalars().all()
-    return {"items": rows, "total": total, "limit": limit, "offset": offset}
-
-
-@router.post(
-    "/leads/{lead_id}/convert",
-    response_model=SuperAdminTenantOut,
-    status_code=status.HTTP_201_CREATED,
-)
-async def convert_lead(
-    lead_id: uuid.UUID, payload: SuperAdminConvertLeadIn, admin: SuperAdminUser, db: DB
-) -> Tenant:
-    """A lead who paid becomes a real customer — reuses their existing
-    email and password hash from signup (crud.create_tenant_owner_and_site's
-    password_hash param) rather than making them set a new password. The
-    lead row itself is left as-is afterward, a historical record; trying to
-    convert the same lead twice just 409s (their email is now taken)."""
-    lead = (await db.execute(select(Lead).where(Lead.id == lead_id))).scalar_one_or_none()
-    if lead is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Lead not found")
-
-    user, _site = await crud.create_tenant_owner_and_site(
-        db,
-        email=lead.email,
-        password_hash=lead.password_hash,
-        workspace_name=payload.workspace_name,
-        plan=payload.plan,
-        template_key=payload.template_key,
-        site_name=payload.site_name,
-        subdomain=payload.subdomain,
-        full_name=lead.full_name,
-    )
-    tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
-    return tenant
-
-
-# =============================================================================
 #  Users
 # =============================================================================
 
@@ -522,4 +503,53 @@ async def update_user(
         full_name=user.full_name, role=user.role, is_active=user.is_active,
         is_superadmin=user.is_superadmin, last_login_at=user.last_login_at,
         created_at=user.created_at,
+    )
+
+
+# =============================================================================
+#  Demo access — the outreach list. See migrations/050_demo_access_requests.sql
+#  and app/api/public.py's demo_access.
+# =============================================================================
+
+
+@router.get("/demo-requests", response_model=Page[SuperAdminDemoAccessOut])
+async def list_demo_requests(
+    admin: SuperAdminUser,
+    db: DB,
+    q: str | None = None,
+    limit: Annotated[int, "1-100"] = 50,
+    offset: int = 0,
+) -> dict:
+    filters = []
+    if q:
+        filters.append(DemoAccessRequest.email.ilike(f"%{q}%"))
+
+    total = (
+        await db.execute(select(func.count(DemoAccessRequest.id)).where(*filters))
+    ).scalar_one()
+    rows = (
+        await db.execute(
+            select(DemoAccessRequest).where(*filters)
+            .order_by(DemoAccessRequest.last_requested_at.desc())
+            .limit(limit).offset(offset)
+        )
+    ).scalars().all()
+    return {"items": rows, "total": total, "limit": limit, "offset": offset}
+
+
+@router.post("/demo-requests/{request_id}/send-marketing-email", status_code=status.HTTP_204_NO_CONTENT)
+async def send_demo_marketing_email(request_id: uuid.UUID, admin: SuperAdminUser, db: DB) -> None:
+    """One-click nudge for someone who took the read-only demo but never
+    started a trial — queued the same way ticket-reply emails are, so a
+    slow SMTP call never blocks this request."""
+    row = (
+        await db.execute(select(DemoAccessRequest).where(DemoAccessRequest.id == request_id))
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Demo request not found")
+
+    subject, html_body, text_body = mailer.demo_followup_email()
+    await queue.publish(
+        queue.JOB_SEND_EMAIL,
+        {"to": row.email, "subject": subject, "html_body": html_body, "text_body": text_body},
     )

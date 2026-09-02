@@ -71,6 +71,17 @@ class Tenant(Base, TimestampMixin):
     # Legal/tax identity for billing & invoicing — distinct from any site's
     # customer-facing Site.business (contact info shown on the storefront).
     business: Mapped[dict] = mapped_column(JSONB, default=dict)
+    # Only set when plan == "trial" (see migrations/047). Login is blocked
+    # once trial_expires_at passes (app/api/auth.py); a background sweep
+    # (app/worker.py) hard-deletes the tenant settings.trial_grace_days
+    # after that. A real purchase just changes `plan` away from "trial" —
+    # no separate "recovered" flag needed, the sweep then ignores it.
+    trial_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    trial_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     users: Mapped[list["User"]] = relationship(back_populates="tenant")
 
@@ -110,7 +121,7 @@ class User(Base, TimestampMixin):
         DateTime(timezone=True), nullable=True
     )
     # Device-remembered login 2FA — see migrations/044. Hashed, short-lived,
-    # attempt-capped, same instinct as Lead.otp_hash.
+    # attempt-capped, same instinct as the trial signup OTP in app/api/trial.py.
     login_otp_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     login_otp_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -185,6 +196,13 @@ class Site(Base, TimestampMixin):
     # lives outside media.py's VALID_CATEGORIES and never counts against the
     # plan's storage quota.
     screenshot_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Set once by StepFinish's own publish action (dashboard onboarding
+    # wizard) — never inferred from `status`, since a trial signup already
+    # publishes the site before the merchant ever opens the wizard. This is
+    # the only honest "did they actually finish Setup" signal.
+    onboarding_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     template: Mapped["Template"] = relationship(lazy="joined")
     pages: Mapped[list["SitePage"]] = relationship(
@@ -690,32 +708,24 @@ class OrderCounter(Base):
     next_number: Mapped[int] = mapped_column(Integer, default=1000)
 
 
-class Lead(Base, TimestampMixin):
-    """A prospect who signed up but hasn't bought yet — deliberately NOT a
-    tenant/user row. See migrations/043_leads.sql for the full funnel this
-    walks through and why converting one into a real paying customer is
-    still a separate, human, superadmin-triggered step.
-    """
+class DemoAccessRequest(Base):
+    """One row per email that's ever asked for the public demo — an
+    outreach list, not a click log (see migrations/050). No TimestampMixin:
+    first/last_requested_at below cover it, an updated_at would just
+    duplicate last_requested_at."""
 
-    __tablename__ = "leads"
+    __tablename__ = "demo_access_requests"
 
     id: Mapped[uuid.UUID] = _pk()
     email: Mapped[str] = mapped_column(CITEXT, unique=True)
-    password_hash: Mapped[str] = mapped_column(Text)
-
-    full_name: Mapped[str | None] = mapped_column(Text, nullable=True)
-    phone: Mapped[str | None] = mapped_column(Text, nullable=True)
-    shop_name: Mapped[str | None] = mapped_column(Text, nullable=True)
-    shop_category: Mapped[str | None] = mapped_column(Text, nullable=True)
-
-    status: Mapped[str] = mapped_column(Text, default="signed_up")
-
-    otp_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
-    otp_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    otp_attempts: Mapped[int] = mapped_column(Integer, default=0)
-
-    demo_accessed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    purchase_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ip: Mapped[str | None] = mapped_column(Text, nullable=True)
+    request_count: Mapped[int] = mapped_column(Integer, default=1)
+    first_requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+    last_requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
 
 
 class TrustedDevice(Base):

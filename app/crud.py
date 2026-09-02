@@ -316,6 +316,10 @@ async def create_tenant_owner_and_site(
     password: str | None = None,
     password_hash: str | None = None,
     full_name: str | None = None,
+    phone: str | None = None,
+    trial_days: int | None = None,
+    site_theme_overrides: dict | None = None,
+    site_business_overrides: dict | None = None,
 ) -> tuple["User", "Site"]:
     """Provision a full paid account in one transaction: workspace, owner
     login, plan, and the one site tied to it.
@@ -330,11 +334,23 @@ async def create_tenant_owner_and_site(
     called — kept as one function so "creating an account" can't drift
     between callers.
 
-    Exactly one of password/password_hash must be given. password_hash lets
-    a lead's existing hash (app/models.py's Lead) carry straight into their
-    real account when a superadmin converts them — see
-    superadmin.py's convert_lead — without ever needing their plaintext
-    password, which was never stored anywhere in the first place.
+    Exactly one of password/password_hash must be given — password_hash
+    lets a caller pass through an already-hashed password (e.g. app/api/
+    trial.py's Redis-staged signup) without ever handling the plaintext a
+    second time.
+
+    trial_days, if given, stamps Tenant.trial_started_at/trial_expires_at
+    (see migrations/047) — used only by the self-serve trial signup path.
+    site_theme_overrides/site_business_overrides shallow-merge onto the new
+    Site's theme/business JSONB after the template's own defaults, for
+    callers (trial signup) that collect a couple of fields (color/font,
+    tagline) up front instead of leaving the site fully blank.
+    phone lands on User.phone (personal account contact, shown/edited on
+    the dashboard's own Account page) — separate from but initially the
+    same number as site_business_overrides["phone"] (the shop's
+    customer-facing contact): a brand-new trial signup only ever collects
+    one phone number, so both start out equal until the merchant changes
+    either one independently later.
 
     Raises HTTPException(409) if the email is taken, 404 if template_key
     doesn't match an active template.
@@ -367,6 +383,12 @@ async def create_tenant_owner_and_site(
         slug = f"{base}-{n}"
 
     tenant = Tenant(slug=slug, name=workspace_name, plan=plan)
+    if trial_days is not None:
+        from datetime import UTC, datetime, timedelta
+
+        now = datetime.now(UTC)
+        tenant.trial_started_at = now
+        tenant.trial_expires_at = now + timedelta(days=trial_days)
     db.add(tenant)
     # flush (not commit) sends the INSERT so tenant.id is populated, while the
     # transaction stays open and still rolls back as one unit.
@@ -377,6 +399,7 @@ async def create_tenant_owner_and_site(
         email=email,
         password_hash=password_hash or hash_password(password),
         full_name=full_name,
+        phone=phone,
         role="owner",
     )
     db.add(user)
@@ -384,6 +407,10 @@ async def create_tenant_owner_and_site(
     site = await provision_site(
         db, tenant_id=tenant.id, template=template, name=site_name, subdomain=subdomain
     )
+    if site_theme_overrides:
+        site.theme = {**site.theme, **site_theme_overrides}
+    if site_business_overrides:
+        site.business = {**site.business, **site_business_overrides}
 
     await db.commit()
     await db.refresh(user)

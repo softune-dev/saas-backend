@@ -23,7 +23,7 @@ from sqlalchemy import delete, select
 
 from app.config import settings
 from app.db import SessionLocal, engine
-from app.models import MarketingConnection, Notification, Site
+from app.models import MarketingConnection, Notification, Site, Tenant
 from app.queue import (
     JOB_ATTACH_DOMAIN,
     JOB_CAPTURE_SCREENSHOT,
@@ -394,6 +394,39 @@ async def notification_cleanup_loop() -> None:
 
 
 # ---------------------------------------------------------------------------
+#  Trial expiry sweep — the only place expired trial tenants actually get
+#  deleted. Login itself already rejects a trial past trial_expires_at (see
+#  app/api/auth.py's _check_tenant_access), so this isn't what blocks
+#  access; it's just the cleanup, running trial_grace_days later. Every FK
+#  to tenants.id in this schema is ondelete="CASCADE", so one DELETE here
+#  takes the tenant's site/products/orders/etc. with it — no manual
+#  multi-table cleanup needed.
+# ---------------------------------------------------------------------------
+
+TRIAL_SWEEP_INTERVAL_SECONDS = 60 * 60  # hourly
+
+
+async def sweep_expired_trials() -> None:
+    cutoff = datetime.now(UTC) - timedelta(days=settings.trial_grace_days)
+    async with SessionLocal() as db:
+        result = await db.execute(
+            delete(Tenant).where(Tenant.plan == "trial", Tenant.trial_expires_at < cutoff)
+        )
+        await db.commit()
+        if result.rowcount:
+            log.info("trial sweep: deleted %d expired trial tenant(s)", result.rowcount)
+
+
+async def trial_sweep_loop() -> None:
+    while True:
+        try:
+            await sweep_expired_trials()
+        except Exception:  # noqa: BLE001 - a failed sweep must not kill the worker
+            log.exception("trial expiry sweep failed")
+        await asyncio.sleep(TRIAL_SWEEP_INTERVAL_SECONDS)
+
+
+# ---------------------------------------------------------------------------
 #  Consumer loop
 # ---------------------------------------------------------------------------
 
@@ -437,6 +470,7 @@ async def main() -> None:
         log.info("listening on '%s'. Ctrl+C to stop.", settings.queue_name)
         await q.consume(on_message)
         asyncio.create_task(notification_cleanup_loop())
+        asyncio.create_task(trial_sweep_loop())
         await asyncio.Future()  # sleep forever
 
 

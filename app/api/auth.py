@@ -59,6 +59,26 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 DB = Annotated[AsyncSession, Depends(get_db)]
 
 
+async def _check_tenant_access(db: AsyncSession, tenant_id: uuid.UUID) -> None:
+    """Rejects login for a tenant that's suspended, or a trial past its
+    trial_expires_at — same "one message, no distinguishing reasons" spirit
+    as the invalid-credentials check, since this fires after the password
+    already checked out. Called from /login, /verify-login-otp, and
+    /refresh (the three places that mint real tokens), not baked into
+    every request via the stateless JWT — see security.py's Principal
+    docstring on why that tradeoff exists."""
+    tenant = (await db.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one_or_none()
+    if tenant is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Account unavailable")
+    if tenant.status == "suspended":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "This account has been suspended.")
+    if tenant.plan == "trial" and tenant.trial_expires_at and datetime.now(UTC) > tenant.trial_expires_at:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Your 3-day trial has ended — upgrade to keep access.",
+        )
+
+
 def _tokens(user: User) -> TokenOut:
     return TokenOut(
         access_token=create_access_token(
@@ -71,13 +91,12 @@ def _tokens(user: User) -> TokenOut:
     )
 
 
-# Public self-signup (POST /register) is intentionally removed: this is a
-# paid-only service, and an open registration endpoint on a public domain
-# meant anyone could create a free account with no payment step in between.
-# Until real billing exists, accounts are created directly by us after
-# payment is received — see scripts/create_account.py, which uses the exact
-# same crud.create_tenant_and_owner() this endpoint used to call, so nothing
-# about what "creating an account" means has changed, only who can trigger it.
+# No POST /register here — public self-signup is app/api/trial.py's job
+# (creates a real Tenant+User on plan="trial", not a free-forever account).
+# A superadmin can still provision a real paid account directly via
+# POST /superadmin/tenants, both paths converging on the same
+# crud.create_tenant_owner_and_site() so "creating an account" never drifts
+# between callers.
 
 
 async def _queue_login_otp_email(to_email: str, otp: str, full_name: str | None) -> None:
@@ -115,6 +134,7 @@ async def login(payload: LoginIn, request: Request, db: DB) -> LoginResultOut:
         raise invalid
     if not user.is_active:
         raise invalid
+    await _check_tenant_access(db, user.tenant_id)
 
     # Device-remembered login 2FA — "not always, only when needed": a device
     # this user has already OTP-verified skips straight to real tokens; an
@@ -160,6 +180,7 @@ async def verify_login_otp(payload: VerifyLoginOtpIn, user_id: CurrentLoginOtp, 
     user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
     if user is None or not user.is_active:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Account unavailable")
+    await _check_tenant_access(db, user.tenant_id)
 
     invalid = HTTPException(status.HTTP_400_BAD_REQUEST, "Incorrect or expired code.")
 
@@ -222,6 +243,7 @@ async def refresh(payload: RefreshIn, db: DB) -> TokenOut:
     ).scalar_one_or_none()
     if user is None or not user.is_active:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Account unavailable")
+    await _check_tenant_access(db, user.tenant_id)
     return _tokens(user)
 
 

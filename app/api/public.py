@@ -24,11 +24,12 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import bkash, cache, courier_crypto, crud, mailer, nagad, queue, recaptcha, sslcommerz
-from app.ratelimit import _client_ip, rate_limit
+from app.ratelimit import _client_ip, demo_access_rate_limit, rate_limit
 from app.config import settings
 from app.db import get_db
 from app.models import (
     Category,
+    DemoAccessRequest,
     FraudBlocklistEntry,
     Inquiry,
     Order,
@@ -38,8 +39,10 @@ from app.models import (
     Product,
     Site,
     SitePage,
+    User,
 )
 from app.schemas import (
+    DemoAccessIn,
     InquiryCreate,
     InquiryOut,
     PageViewIn,
@@ -47,6 +50,7 @@ from app.schemas import (
     PublicOrderCreate,
     PublicOrderItemOut,
     PublicOrderOut,
+    TokenOut,
 )
 
 log = logging.getLogger(__name__)
@@ -1007,6 +1011,57 @@ async def nagad_callback(host: str, order_number: str, request: Request, db: DB)
             await _finalize_gateway_payment(db, site, order, "nagad", ok, payment_ref_id, data)
 
     return RedirectResponse(_storefront_redirect(host, order_number, ok))
+
+
+@router.post(
+    "/demo-access",
+    response_model=TokenOut,
+    dependencies=[Depends(demo_access_rate_limit)],
+)
+async def demo_access(payload: DemoAccessIn, request: Request, db: DB) -> dict:
+    """Mints a real token pair for the shared plan="demo" account — no
+    signup, no password, no lead-funnel staging. Still requires a real
+    email first: previously this handed out working tokens for free with
+    nothing recorded, no way to follow up with anyone who tried it. One
+    row per email in demo_access_requests (an outreach list, not a click
+    log — see migrations/050). No IP limit and no error on a repeat email —
+    the demo is meant to have zero friction, it just upserts the same row.
+    Only cap is 5/day per email (demo_access_rate_limit), to stop one
+    address being scripted, not to gate real visitors.
+
+    Read-only regardless of who's holding the token afterward, enforced by
+    block_demo_writes (app/security.py) — deliberately decoupled from trial
+    signup (app/api/trial.py), which is the "actually use it" path."""
+    recaptcha.enforce(
+        await recaptcha.verify(
+            payload.recaptcha_token, "demo_access", _client_ip(request), payload.recaptcha_v2_token
+        )
+    )
+
+    demo_user = (
+        await db.execute(select(User).where(User.email == settings.demo_user_email))
+    ).scalar_one_or_none()
+    if demo_user is None:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Demo isn't available right now — please contact us instead.",
+        )
+
+    existing = (
+        await db.execute(select(DemoAccessRequest).where(DemoAccessRequest.email == payload.email))
+    ).scalar_one_or_none()
+    ip = _client_ip(request)
+    if existing:
+        existing.request_count += 1
+        existing.last_requested_at = func.now()
+        existing.ip = ip
+        await crud.save(db, existing)
+    else:
+        await crud.save(db, DemoAccessRequest(email=payload.email, ip=ip))
+
+    from app.api.auth import _tokens  # local import: avoids a circular import at module load
+
+    return _tokens(demo_user).model_dump()
 
 
 @router.get("/site/{host}/sitemap.xml")

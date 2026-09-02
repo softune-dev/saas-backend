@@ -125,7 +125,7 @@ class Settings(BaseSettings):
     # run up a surprise bill. Generous enough for real iterative use.
     ai_suggestions_per_tenant_per_day: int = 50
 
-    # --- lead capture / demo access (app/api/leads.py) ---
+    # --- trial signup / demo access (app/api/trial.py, app/api/public.py) ---
     # Real SMTP send via Hostinger's mail server — the OTP email is the
     # first thing this codebase actually sends (see app/mailer.py); nothing
     # before this sent real email. Blank-able like every other integration
@@ -140,19 +140,27 @@ class Settings(BaseSettings):
     # Landing's own hosted logo — the icon mark (not the wordmark), for the
     # email header badge.
     email_logo_url: str = "https://www.softunebd.com/logo-icon.png"
-    lead_token_expire_days: int = 7
-    # Which real (plan="demo") tenant's login a lead is minted a token for
-    # when they click "See a live demo" — the same shared Aurora demo
-    # account merchants have always been handed manually. Not a secret:
-    # this identifies WHICH account, app/security.py mints the token itself,
-    # no password involved.
+    # A signup's pre-verification state (email/password/OTP/shop basics)
+    # lives in Redis, not Postgres — see app/api/trial.py's module
+    # docstring. This is that blob's TTL: long enough to fill out a
+    # multi-step form, short enough that an abandoned signup just vanishes
+    # on its own instead of needing manual cleanup.
+    trial_signup_ttl_minutes: int = 45
+    # How long a trial tenant can log in for. Login is rejected once
+    # Tenant.trial_expires_at (trial_started_at + this) passes — see
+    # app/api/auth.py.
+    trial_days: int = 3
+    # Extra days AFTER trial_expires_at before app/worker.py's sweep hard-
+    # deletes the tenant — total lifetime of an unpurchased trial is
+    # trial_days + this. A real purchase within that window just changes
+    # `plan` away from "trial", which takes it out of the sweep's filter.
+    trial_grace_days: int = 4
+    # Which real (plan="demo") tenant's login the public "See a live demo"
+    # button mints a token for (app/api/public.py) — a shared, read-only
+    # account, decoupled from trial signup entirely. Not a secret: this
+    # identifies WHICH account, app/security.py mints the token itself, no
+    # password involved.
     demo_user_email: str = "kallol.business.ds@gmail.com"
-    # wa.me deep link number, digits only with country code (e.g.
-    # "8801XXXXXXXXX"), no "+". Blank means the frontend just doesn't show
-    # a WhatsApp option — see POST /leads/purchase-request.
-    # 8801831624571 — real BD mobile, wa.me format (country code, no
-    # leading 0, no "+"). 01831624571 (local) -> 880 + 1831624571.
-    whatsapp_business_number: str = "8801831624571"
 
     @property
     def cors_list(self) -> list[str]:

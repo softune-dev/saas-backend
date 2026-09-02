@@ -57,6 +57,7 @@ VIDEO_MAX_BYTES = 100 * 1024 * 1024
 # so a per-site ceiling is what those screens can actually show truthfully.
 PLAN_STORAGE_LIMIT_BYTES: dict[str, int] = {
     "demo": 800 * 1024 * 1024,        # 800 MB
+    "trial": 500 * 1024 * 1024,       # 500 MB — same as starter, a trial previews it exactly
     "starter": 500 * 1024 * 1024,     # 500 MB
     "growth": 2 * 1024 * 1024 * 1024,  # 2 GB
     "business": 5 * 1024 * 1024 * 1024,  # 5 GB

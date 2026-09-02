@@ -58,6 +58,47 @@ def rate_limit(key: str, limit: int, window_seconds: int):
     return _dependency
 
 
+async def demo_access_rate_limit(request: Request) -> None:
+    """Demo access has no per-visitor friction by design — anyone can request
+    it, repeatedly, from anywhere; the endpoint itself upserts by email
+    instead of erroring on a repeat. The only cap is per-email (5/day),
+    purely to stop one address from being hammered/scripted; there's
+    deliberately no IP window, since a shared office/campus IP legitimately
+    generates many distinct real signups.
+
+    Reads the email from the request body directly, same trick
+    login_rate_limit uses — Starlette caches the raw body, so this doesn't
+    interfere with the route's own `payload: DemoAccessIn` parsing after.
+    """
+    email = ""
+    try:
+        body = await request.json()
+        email = str(body.get("email", "")).strip().lower()
+    except Exception:  # noqa: BLE001 - malformed body; the route's own validation rejects it
+        pass
+
+    if not email:
+        return
+    checks = [(f"ratelimit:demo_email:{email}", 5, 86400)]
+
+    try:
+        c = cache.client()
+        for redis_key, limit, window_seconds in checks:
+            count = await c.incr(redis_key)
+            if count == 1:
+                await c.expire(redis_key, window_seconds)
+            if count > limit:
+                raise HTTPException(
+                    status.HTTP_429_TOO_MANY_REQUESTS,
+                    "Too many demo requests. Please try again later.",
+                )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - see module docstring
+        log.warning("demo access rate limit check failed for %s: %s (allowing request)", ip, exc)
+        return
+
+
 async def login_rate_limit(request: Request) -> None:
     """Two independent windows, both enforced: per-IP (catches a single
     attacker spraying many emails) and per-email (catches a distributed

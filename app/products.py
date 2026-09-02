@@ -65,6 +65,7 @@ _HEX_COLOR = re.compile(r"^#[0-9A-Fa-f]{6}$")
 # to DEFAULT_PRODUCT_LIMIT rather than silently unlimited.
 PLAN_PRODUCT_LIMIT: dict[str, int] = {
     "demo": 50,
+    "trial": 50,  # same as starter — a trial previews the Starter plan exactly
     "starter": 50,
     "growth": 200,
     "business": 500,

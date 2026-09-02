@@ -162,6 +162,9 @@ class TenantOut(ORMModel):
     plan: str
     status: str
     business: TenantBusinessOut
+    # Only meaningful when plan == "trial" — the dashboard's trial badge
+    # reads this to show a countdown; null for every other plan.
+    trial_expires_at: datetime | None
     created_at: datetime
 
 
@@ -246,6 +249,7 @@ class SiteOut(ORMModel):
     fraud_rules: dict
     screenshot_url: str | None
     published_at: datetime | None
+    onboarding_completed_at: datetime | None
     created_at: datetime
     updated_at: datetime
 
@@ -259,6 +263,20 @@ class DomainStatusOut(BaseModel):
 
     domain: str
     connected: bool | None
+
+
+class ProvisionStatusOut(BaseModel):
+    """Real progress signal for the "building your store" screen right
+    after trial signup — see app/api/trial.py's complete(). published is
+    always true by the time this is ever polled (POST /trial/complete
+    commits it synchronously before returning tokens); domain_attached is
+    the one genuinely async step, since JOB_ATTACH_DOMAIN is a queued
+    Vercel API call. domain_attached=None means the check itself couldn't
+    run (no Vercel token, or a Vite template with nothing to attach) —
+    the frontend should treat that the same as done, not keep polling."""
+
+    published: bool
+    domain_attached: bool | None
 
 
 # =============================================================================
@@ -815,7 +833,7 @@ class MarketingConnectionOut(ORMModel):
 #  Superadmin — platform operator, cross-tenant. See app/api/superadmin.py.
 # =============================================================================
 
-TenantPlan = Literal["free", "starter", "pro", "enterprise"]
+TenantPlan = Literal["trial", "demo", "starter", "growth", "business"]
 TenantStatus = Literal["active", "suspended", "cancelled"]
 
 
@@ -826,8 +844,7 @@ class SuperAdminStatsOut(BaseModel):
     new_tenants_7d: int
     tenants_by_plan: dict[str, int]
     tenants_by_status: dict[str, int]
-    total_leads: int
-    leads_by_status: dict[str, int]
+    active_trials: int
 
 
 class SuperAdminTenantOut(ORMModel):
@@ -851,6 +868,16 @@ class SuperAdminTenantOut(ORMModel):
     # verified". A row existing means someone configured it at some point.
     payment_providers: list[str]
     courier_providers: list[str]
+    # Only meaningful when plan == "trial" — null for every other plan.
+    trial_expires_at: datetime | None
+    # The owner User's own last_login_at — "check their activity" without a
+    # separate activity-log system; joined in by the router, not a Tenant
+    # column.
+    owner_last_login_at: datetime | None
+    # Which template this tenant's site actually uses — joined from
+    # Site.template_id, not a duplicate Tenant-level column (that would be
+    # a second source of truth for something a real FK already answers).
+    template_key: str | None
 
 
 class SuperAdminUserOut(ORMModel):
@@ -909,12 +936,29 @@ class SuperAdminTenantUpdate(BaseModel):
 
 
 # =============================================================================
-#  Leads — prospects who signed up but haven't bought yet. See
-#  app/api/leads.py and migrations/043_leads.sql.
+#  Trial signup — self-serve, creates a real Tenant+User immediately on
+#  plan="trial". Pre-verification state (email/password/OTP/shop basics)
+#  lives in Redis, not Postgres — see app/api/trial.py's module docstring.
 # =============================================================================
 
 
-class LeadSignupIn(BaseModel):
+def _validate_bd_phone(value: str | None) -> str | None:
+    # All 7 real BD mobile operator prefixes — accepts +8801XXXXXXXXX,
+    # 8801XXXXXXXXX, or bare 01XXXXXXXXX (spaces/dashes stripped), always
+    # normalizes to the bare 11-digit local form so every stored phone
+    # number looks the same regardless of how the frontend sent it. Same
+    # pattern as app/api/public.py's own BD phone validator.
+    if value is None or not value.strip():
+        return None
+    digits = re.sub(r"\D", "", value)
+    if digits.startswith("880"):
+        digits = "0" + digits[3:]
+    if not re.match(r"^01[3-9]\d{8}$", digits):
+        raise ValueError("Please enter a valid Bangladeshi mobile number (e.g. 01XXXXXXXXX).")
+    return digits
+
+
+class TrialStartIn(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8, max_length=72)
     full_name: str | None = Field(default=None, max_length=120)
@@ -926,9 +970,9 @@ class LeadSignupIn(BaseModel):
     def _password_strength(cls, value: str) -> str:
         # Basic, standard rules — not requiring a special character on top:
         # length + mixed case + a digit is the well-understood floor that
-        # doesn't make a real prospect give up mid-signup over a password
-        # rule. Checked server-side because the frontend's own strength
-        # meter is a UX nicety, never the actual enforcement.
+        # doesn't make someone give up mid-signup over a password rule.
+        # Checked server-side because the frontend's own strength meter is
+        # a UX nicety, never the actual enforcement.
         if not any(c.isupper() for c in value):
             raise ValueError("Password needs at least one uppercase letter.")
         if not any(c.islower() for c in value):
@@ -938,105 +982,98 @@ class LeadSignupIn(BaseModel):
         return value
 
 
-class LeadTokenOut(BaseModel):
-    lead_token: str
-    status: str
+class TrialSignupTokenOut(BaseModel):
+    signup_token: str
+    email_verified: bool
 
 
-class LeadLoginIn(BaseModel):
-    """A lead's own login — separate from /auth/login (real dashboard
-    users). Lets someone whose lead_token expired or got cleared get back
-    into the funnel instead of being stuck (signup 409s on an
-    already-verified email with no way back in otherwise)."""
+class TrialResendOtpIn(BaseModel):
+    signup_token: str
+
+
+class TrialVerifyOtpIn(BaseModel):
+    signup_token: str
+    otp: str = Field(min_length=6, max_length=6)
+
+
+class TrialDetailsIn(BaseModel):
+    signup_token: str
+    shop_name: str = Field(min_length=1, max_length=120)
+    phone: str | None = Field(default=None, max_length=32)
+    tagline: str | None = Field(default=None, max_length=160)
+    # Free string, not a backend enum — same convention as the dashboard's
+    # own onboarding (step-shop-basics.tsx's Shop category/niche select),
+    # which stores this identical value straight into Site.business.type
+    # with no server-side allowlist either. Keeping the option list itself
+    # frontend-only means adding a category later needs no backend change.
+    category: str | None = Field(default=None, max_length=40)
+
+    @field_validator("phone")
+    @classmethod
+    def _phone(cls, value: str | None) -> str | None:
+        return _validate_bd_phone(value)
+
+
+class TrialThemeIn(BaseModel):
+    """Client-side-only choice until POST /trial/complete — see
+    app/api/trial.py. Colors/fonts, not a full theme editor payload; a
+    trial site starts from the chosen template's own defaults otherwise."""
+
+    primary_color: str | None = Field(default=None, max_length=20)
+    # Maps to Site.theme.displayFont/bodyFont — the same two keys the real
+    # theme editor reads (see dashboard/components/themes/editor/
+    # editor-types.ts). `font` here is the heading/display choice; keeping
+    # the wire name as `font` since that's what the wizard's already-shipped
+    # request body calls it, but it must land under `displayFont` in the
+    # stored theme, not a `font` key nothing else reads.
+    font: str | None = Field(default=None, max_length=60)
+    body_font: str | None = Field(default=None, max_length=60)
+
+
+class TrialCompleteIn(BaseModel):
+    signup_token: str
+    template_key: str = Field(min_length=1, max_length=60)
+    theme: TrialThemeIn = TrialThemeIn()
+
+
+class SuperAdminDemoAccessOut(ORMModel):
+    """The outreach list — everyone who's ever asked for the public demo.
+    One row per email (request_count/last_requested_at track repeats), not
+    one row per click. See migrations/050_demo_access_requests.sql."""
+
+    id: uuid.UUID
+    email: str
+    ip: str | None
+    request_count: int
+    first_requested_at: datetime
+    last_requested_at: datetime
+
+
+class DemoAccessIn(BaseModel):
+    """Email required before the public demo hands out tokens — see
+    app/api/public.py's demo_access. Same recaptcha pattern as trial
+    signup; no password-strength-style validation needed, this isn't
+    creating an account."""
 
     email: EmailStr
-    password: str = Field(min_length=1, max_length=72)
     recaptcha_token: str = ""
     recaptcha_v2_token: str = ""
 
 
-class LeadMeOut(BaseModel):
-    """What the frontend calls on load with a stored lead_token to figure
-    out where to resume — e.g. someone who signed up, closed the tab, and
-    clicked "Get started" again later shouldn't have to redo signup/OTP."""
+class TrialStatusOut(BaseModel):
+    """Lets the frontend resume a signup that got interrupted (closed the
+    tab to check email for the OTP, phone locked, etc.) at the right step
+    instead of restarting from Account every time — see app/api/trial.py's
+    GET /trial/status. Never includes password_hash or otp_hash."""
 
+    signup_token: str
     email: str
     full_name: str | None
-    phone: str | None
+    email_verified: bool
     shop_name: str | None
-    shop_category: str | None
-    status: str
-
-
-class LeadOtpVerifyIn(BaseModel):
-    otp: str = Field(min_length=6, max_length=6)
-
-
-class LeadProfileUpdate(BaseModel):
-    full_name: str | None = Field(default=None, max_length=120)
-    phone: str | None = Field(default=None, max_length=32)
-    shop_name: str | None = Field(default=None, max_length=120)
-    shop_category: str | None = Field(default=None, max_length=80)
-
-    @field_validator("phone")
-    @classmethod
-    def _validate_bd_phone(cls, value: str | None) -> str | None:
-        # Same pattern as app/api/public.py's _validate_bd_phone (all 7 real
-        # BD mobile operator prefixes) — accepts +8801XXXXXXXXX, 8801XXXXXXXXX,
-        # or bare 01XXXXXXXXX (spaces/dashes stripped), always normalizes to
-        # the bare 11-digit local form so every stored phone number looks
-        # the same regardless of how the frontend sent it.
-        if value is None or not value.strip():
-            return None
-        digits = re.sub(r"\D", "", value)
-        if digits.startswith("880"):
-            digits = "0" + digits[3:]
-        if not re.match(r"^01[3-9]\d{8}$", digits):
-            raise ValueError(
-                "Please enter a valid Bangladeshi mobile number (e.g. 01XXXXXXXXX)."
-            )
-        return digits
-
-
-class LeadPurchaseRequestIn(BaseModel):
-    message: str | None = Field(default=None, max_length=1000)
-
-
-class LeadDemoAccessOut(BaseModel):
-    access_token: str
-    refresh_token: str
-    expires_in: int
-
-
-class LeadPurchaseRequestOut(BaseModel):
-    sent: bool
-    whatsapp_url: str | None = None
-
-
-class SuperAdminConvertLeadIn(BaseModel):
-    """A lead becoming a real customer — same shape as
-    SuperAdminAccountCreateIn minus email/password, which come from the
-    lead's own row instead (their existing password carries straight over,
-    see crud.create_tenant_owner_and_site's password_hash param)."""
-
-    workspace_name: str = Field(min_length=1, max_length=120)
-    plan: TenantPlan = "starter"
-    template_key: str = Field(min_length=1, max_length=60)
-    site_name: str = Field(min_length=1, max_length=120)
-    subdomain: str = Field(min_length=1, max_length=63)
-
-
-class SuperAdminLeadOut(ORMModel):
-    id: uuid.UUID
-    email: str
-    full_name: str | None
     phone: str | None
-    shop_name: str | None
-    shop_category: str | None
-    status: str
-    demo_accessed_at: datetime | None
-    purchase_requested_at: datetime | None
-    created_at: datetime
+    tagline: str | None
+    category: str | None
 
 
 # =============================================================================
