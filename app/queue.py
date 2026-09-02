@@ -40,6 +40,26 @@ JOB_GENERATE_SITEMAP = "generate_sitemap"
 # request made every order slower, worse the more tenants place orders
 # concurrently.
 JOB_SEND_ORDER_NOTIFICATIONS = "send_order_notifications"
+# Order-confirmation email to the tenant owner. Separate from
+# JOB_SEND_ORDER_NOTIFICATIONS (bell/push) for the same reason that job is
+# queued at all: rendering the email needs a few extra DB lookups (owner
+# User row, product images for the line items) that have no business
+# happening before the customer's checkout response goes out. Payload is
+# just the order id — the handler re-fetches everything else, same as
+# handle_send_order_notifications does.
+JOB_SEND_ORDER_EMAIL = "send_order_email"
+# Sent once when a product's stock crosses DOWN to _LOW_STOCK_THRESHOLD
+# (app/api/public.py) — not on every order after, only that one transition.
+# Payload is just the product id, same "handler re-fetches everything"
+# shape as JOB_SEND_ORDER_EMAIL.
+JOB_SEND_LOW_STOCK_EMAIL = "send_low_stock_email"
+# Renders app/invoices.py's HTML via Playwright and uploads the resulting
+# PDF to Cloudinary (see app/media.py's upload_invoice_pdf) — same "real
+# browser render, worker-only" reasoning as JOB_CAPTURE_SCREENSHOT. Queued
+# right after an Invoice row is created (trial start, or a manual plan
+# change) so the row exists immediately even though pdf_url fills in a
+# moment later.
+JOB_GENERATE_INVOICE_PDF = "generate_invoice_pdf"
 # Attach a newly-published site's subdomain to its template's Vercel
 # project — see app/vercel.py's module docstring for why this exists.
 JOB_ATTACH_DOMAIN = "attach_domain"

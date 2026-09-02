@@ -17,10 +17,13 @@ from sqlalchemy import (
     ARRAY,
     Boolean,
     CheckConstraint,
+    Column,
     DateTime,
     ForeignKey,
     Integer,
+    SmallInteger,
     String,
+    Table,
     Text,
     UniqueConstraint,
     func,
@@ -85,6 +88,18 @@ class Tenant(Base, TimestampMixin):
 
     users: Mapped[list["User"]] = relationship(back_populates="tenant")
 
+    # Notification email toggles live under settings["notifications"] —
+    # not a real column, so TenantOut (from_attributes) needs this property
+    # to read it the same way it reads a real one. Defaults ("on" for
+    # orders/low_stock/billing, "off" for marketing) apply to every tenant
+    # that's never touched the Account -> Notifications page, so real
+    # emails send correctly from day one rather than only after a settings
+    # page has been opened once.
+    @property
+    def notifications(self) -> dict:
+        defaults = {"orders": True, "low_stock": True, "billing": True, "marketing": False}
+        return {**defaults, **(self.settings or {}).get("notifications", {})}
+
 
 class User(Base, TimestampMixin):
     __tablename__ = "users"
@@ -127,6 +142,14 @@ class User(Base, TimestampMixin):
         DateTime(timezone=True), nullable=True
     )
     login_otp_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    # Separate columns from login_otp_* above — a password change requested
+    # mid-login-OTP-challenge must not stomp on (or be stomped by) that
+    # in-progress code. See migrations/052.
+    password_otp_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    password_otp_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    password_otp_attempts: Mapped[int] = mapped_column(Integer, default=0)
 
     tenant: Mapped["Tenant"] = relationship(back_populates="users")
 
@@ -319,6 +342,51 @@ class Product(Base, TimestampMixin):
     features: Mapped[list] = mapped_column(JSONB, default=list)
 
 
+# Pure association table (no extra columns — membership is the only fact
+# it records), declared before Event so `secondary="event_products"` in
+# Event.products resolves without relying on later mapper-configure-time
+# string lookup.
+event_products = Table(
+    "event_products",
+    Base.metadata,
+    Column("event_id", UUID(as_uuid=True), ForeignKey("events.id", ondelete="CASCADE"), primary_key=True),
+    Column("product_id", UUID(as_uuid=True), ForeignKey("products.id", ondelete="CASCADE"), primary_key=True),
+)
+
+
+class Event(Base, TimestampMixin):
+    """A merchant sale/promo campaign (e.g. "Summer Sale") applying
+    discount_percent to whichever real products it's bound to via
+    event_products. A product may belong to only one ACTIVE event at a
+    time — enforced in app/api/events.py, not here (see migrations/
+    055_events.sql's own comment): draft/inactive events must stay free to
+    list any products without conflict."""
+
+    __tablename__ = "events"
+    __table_args__ = (UniqueConstraint("site_id", "slug", name="uq_events_site_slug"),)
+
+    id: Mapped[uuid.UUID] = _pk()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    site_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("sites.id", ondelete="CASCADE")
+    )
+    name: Mapped[str] = mapped_column(Text)
+    slug: Mapped[str] = mapped_column(CITEXT)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cta_label: Mapped[str] = mapped_column(Text, default="Shop now")
+    discount_percent: Mapped[int] = mapped_column(SmallInteger)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # lazy="selectin": listing N events must not fire N+1 queries for each
+    # one's bound product ids (the dashboard list shows a product count).
+    products: Mapped[list["Product"]] = relationship(
+        secondary=event_products, lazy="selectin"
+    )
+
+
 class Customer(Base, TimestampMixin):
     __tablename__ = "customers"
     __table_args__ = (
@@ -419,6 +487,12 @@ class OrderItem(Base):
     cost_price_cents_snapshot: Mapped[int | None] = mapped_column(Integer, nullable=True)
     quantity: Mapped[int] = mapped_column(Integer)
     total_cents: Mapped[int] = mapped_column(Integer)
+    # Which Event's discount (if any) applied to this line at sale time —
+    # plain text/number, not a FK, same reasoning as name_snapshot/
+    # sku_snapshot above: the receipt must keep showing the right discount
+    # even after the event is later edited or deleted (CLAUDE.md rule 8).
+    event_name_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
+    event_discount_percent_snapshot: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
     created_at: Mapped[datetime] = _created()
 
     order: Mapped["Order"] = relationship(back_populates="items")
@@ -706,6 +780,49 @@ class OrderCounter(Base):
         UUID(as_uuid=True), ForeignKey("sites.id", ondelete="CASCADE"), primary_key=True
     )
     next_number: Mapped[int] = mapped_column(Integer, default=1000)
+
+
+class InvoiceCounter(Base):
+    """Same shape as OrderCounter, keyed on tenant_id instead of site_id —
+    invoices are billed per-tenant (one subscription), not per-site."""
+
+    __tablename__ = "invoice_counters"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    next_number: Mapped[int] = mapped_column(Integer, default=1000)
+
+
+class Invoice(Base):
+    """One row per issued invoice — event-triggered (trial start, or a
+    manual plan change by the team), not a recurring billing-cycle job; see
+    migrations/053 for why. `plan`/`amount_cents`/`tenant_business_snapshot`
+    are all captured AT ISSUE TIME and never touched again even if the
+    tenant's plan or business info later changes — same immutability
+    principle as order_items' *_snapshot columns (CLAUDE.md rule 8). No
+    TimestampMixin: issued_at is the only timestamp an invoice needs, and it
+    never gets an updated_at since invoices are never edited."""
+
+    __tablename__ = "invoices"
+
+    id: Mapped[uuid.UUID] = _pk()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    invoice_number: Mapped[str] = mapped_column(Text)
+    plan: Mapped[str] = mapped_column(Text)
+    amount_cents: Mapped[int] = mapped_column(Integer)
+    currency: Mapped[str] = mapped_column(Text, default="BDT")
+    period_label: Mapped[str] = mapped_column(Text)
+    tenant_business_snapshot: Mapped[dict] = mapped_column(JSONB, default=dict)
+    # Cloudinary URL — set by the worker once JOB_GENERATE_INVOICE_PDF
+    # renders and uploads the PDF; null in the gap between the row being
+    # created and that job draining.
+    pdf_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    issued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
 
 
 class DemoAccessRequest(Base):

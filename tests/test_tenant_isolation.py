@@ -137,6 +137,24 @@ async def test_other_tenant_cannot_see_products(two_accounts, template_id):
     assert (await b.get(f"/sites/{site['id']}/products")).status_code == 404
 
 
+async def test_other_tenant_cannot_see_events(two_accounts, template_id):
+    a, b = two_accounts
+    site = await _make_site(a, template_id)
+
+    created = await a.post(
+        f"/sites/{site['id']}/events", json={"name": "Secret Sale", "discount_percent": 20}
+    )
+    assert created.status_code == 201
+    event_id = created.json()["id"]
+
+    assert (await b.get(f"/sites/{site['id']}/events/{event_id}")).status_code == 404
+    assert (await b.get(f"/sites/{site['id']}/events")).status_code == 404
+    assert (
+        await b.patch(f"/sites/{site['id']}/events/{event_id}", json={"discount_percent": 50})
+    ).status_code == 404
+    assert (await b.delete(f"/sites/{site['id']}/events/{event_id}")).status_code == 404
+
+
 async def test_other_tenant_cannot_see_orders(two_accounts, template_id):
     a, b = two_accounts
     site = await _make_site(a, template_id)

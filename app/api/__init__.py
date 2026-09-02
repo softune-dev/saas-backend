@@ -6,9 +6,11 @@ from app.api import (
     ai,
     analytics,
     auth,
+    billing,
     commerce,
     courier,
     customers,
+    events,
     fraud,
     help_desk,
     marketing,
@@ -40,11 +42,13 @@ api_router.include_router(auth.router)
 # non-GET requests (see security.py).
 _demo_guard = [Depends(block_demo_writes)]
 api_router.include_router(analytics.router, dependencies=_demo_guard)
+api_router.include_router(billing.router, dependencies=_demo_guard)
 api_router.include_router(sites.router, dependencies=_demo_guard)
 api_router.include_router(media.router, dependencies=_demo_guard)
 api_router.include_router(pages.router, dependencies=_demo_guard)
 api_router.include_router(commerce.router, dependencies=_demo_guard)
 api_router.include_router(customers.router, dependencies=_demo_guard)
+api_router.include_router(events.router, dependencies=_demo_guard)
 api_router.include_router(courier.router, dependencies=_demo_guard)
 api_router.include_router(payments.router, dependencies=_demo_guard)
 api_router.include_router(marketing.router, dependencies=_demo_guard)

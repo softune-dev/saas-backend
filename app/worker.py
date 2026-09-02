@@ -23,15 +23,18 @@ from sqlalchemy import delete, select
 
 from app.config import settings
 from app.db import SessionLocal, engine
-from app.models import MarketingConnection, Notification, Site, Tenant
+from app.models import Category, Invoice, MarketingConnection, Notification, Order, Product, Site, Tenant, User
 from app.queue import (
     JOB_ATTACH_DOMAIN,
     JOB_CAPTURE_SCREENSHOT,
     JOB_DETACH_DOMAIN,
+    JOB_GENERATE_INVOICE_PDF,
     JOB_GENERATE_SITEMAP,
     JOB_REVALIDATE_SITE,
     JOB_SEND_EMAIL,
     JOB_SEND_META_CAPI_EVENT,
+    JOB_SEND_LOW_STOCK_EMAIL,
+    JOB_SEND_ORDER_EMAIL,
     JOB_SEND_ORDER_NOTIFICATIONS,
 )
 
@@ -213,6 +216,275 @@ async def handle_send_order_notifications(payload: dict) -> None:
             )
 
 
+async def handle_send_order_email(payload: dict) -> None:
+    """Order-confirmation email to the tenant owner — see
+    queue.JOB_SEND_ORDER_EMAIL's own comment for why this is a separate job
+    from handle_send_order_notifications above (same "don't slow the
+    checkout response" reasoning, just for the owner's email instead of the
+    dashboard bell/push)."""
+    from app import crud, mailer
+
+    order_id = payload["order_id"]
+    async with SessionLocal() as db:
+        order = (
+            await db.execute(select(Order).where(Order.id == order_id))
+        ).scalar_one_or_none()
+        if order is None:
+            return
+
+        site = (
+            await db.execute(select(Site).where(Site.id == order.site_id))
+        ).scalar_one_or_none()
+        tenant = (
+            await db.execute(select(Tenant).where(Tenant.id == order.tenant_id))
+        ).scalar_one_or_none()
+        if site is None or tenant is None:
+            return
+
+        # Tenant.notifications defaults every key to on except marketing —
+        # the toggle UI may never have been touched, and "never sent a real
+        # order email until someone opens a settings page" is the wrong
+        # default.
+        if not tenant.notifications.get("orders", True):
+            return
+
+        owner = (
+            await db.execute(
+                select(User).where(User.tenant_id == tenant.id, User.role == "owner")
+            )
+        ).scalars().first()
+        if owner is None:
+            return
+
+        product_ids = [i.product_id for i in order.items if i.product_id]
+        images_by_id: dict[uuid.UUID, str | None] = {}
+        category_by_id: dict[uuid.UUID, str | None] = {}
+        if product_ids:
+            products = (
+                await db.execute(select(Product).where(Product.id.in_(product_ids)))
+            ).scalars().all()
+            category_ids = [p.category_id for p in products if p.category_id]
+            categories_by_cat_id: dict[uuid.UUID, str] = {}
+            if category_ids:
+                cats = (
+                    await db.execute(select(Category).where(Category.id.in_(category_ids)))
+                ).scalars().all()
+                categories_by_cat_id = {c.id: c.name for c in cats}
+            for p in products:
+                images_by_id[p.id] = p.images[0].get("url") if p.images else None
+                category_by_id[p.id] = (
+                    categories_by_cat_id.get(p.category_id) if p.category_id else None
+                )
+
+        items = [
+            {
+                "name": item.name_snapshot,
+                "quantity": item.quantity,
+                "unit_price_cents": item.unit_price_cents,
+                "total_cents": item.total_cents,
+                "image_url": images_by_id.get(item.product_id) if item.product_id else None,
+                "category": category_by_id.get(item.product_id) if item.product_id else None,
+                # Read straight off OrderItem's own snapshot columns — no
+                # extra query, and it keeps showing correctly even after
+                # the event is later edited or deleted (CLAUDE.md rule 8).
+                "event_name": item.event_name_snapshot,
+                "event_discount_percent": item.event_discount_percent_snapshot,
+            }
+            for item in order.items
+        ]
+
+        shop_name = (site.business or {}).get("name") or site.name
+        shop_domain = site.custom_domain or f"{site.subdomain}.{settings.site_base_domain}"
+
+        # order.customer is a free-form checkout payload — key names vary by
+        # storefront theme, same reasoning as crud.extract_customer_phone.
+        raw_customer = order.customer or {}
+        customer_name = " ".join(
+            str(raw_customer.get(k, "")).strip() for k in ("first_name", "last_name")
+        ).strip()
+        customer_address = (
+            raw_customer.get("address")
+            or raw_customer.get("shipping_address")
+            or raw_customer.get("street_address")
+        )
+        customer = {
+            "name": customer_name or None,
+            "phone": crud.extract_customer_phone(raw_customer) or None,
+            "email": raw_customer.get("email"),
+            "address": customer_address,
+        }
+
+        subject, html_body, text_body = mailer.order_created_email(
+            shop_name=shop_name,
+            order_number=order.order_number,
+            items=items,
+            total_cents=order.total_cents,
+            currency=order.currency,
+            order_link=f"{mailer.DASHBOARD}/orders?highlight={order.id}",
+            recipient_name=owner.full_name,
+            customer=customer,
+            shop_domain=shop_domain,
+        )
+        sent = await mailer.send_email(owner.email, subject, html_body, text_body)
+        if not sent:
+            log.warning("order email: failed to send to %s (order=%s)", owner.email, order.order_number)
+
+
+async def handle_send_low_stock_email(payload: dict) -> None:
+    """One product just crossed down to the low-stock line — see
+    queue.JOB_SEND_LOW_STOCK_EMAIL for why this is queued (small payload,
+    handler does its own lookups) rather than rendered inline in
+    create_public_order."""
+    from app import mailer
+
+    product_id = payload["product_id"]
+    async with SessionLocal() as db:
+        product = (
+            await db.execute(select(Product).where(Product.id == product_id))
+        ).scalar_one_or_none()
+        if product is None:
+            return
+
+        site = (
+            await db.execute(select(Site).where(Site.id == product.site_id))
+        ).scalar_one_or_none()
+        tenant = (
+            await db.execute(select(Tenant).where(Tenant.id == product.tenant_id))
+        ).scalar_one_or_none()
+        if site is None or tenant is None:
+            return
+
+        if not tenant.notifications.get("low_stock", True):
+            return
+
+        owner = (
+            await db.execute(
+                select(User).where(User.tenant_id == tenant.id, User.role == "owner")
+            )
+        ).scalars().first()
+        if owner is None:
+            return
+
+        category_name = None
+        if product.category_id:
+            category = (
+                await db.execute(select(Category).where(Category.id == product.category_id))
+            ).scalar_one_or_none()
+            category_name = category.name if category else None
+
+        subject, html_body, text_body = mailer.low_stock_email(
+            product_name=product.name,
+            current_stock=product.stock,
+            product_link=f"{mailer.DASHBOARD}/products/{product.id}/edit",
+            image_url=product.images[0].get("url") if product.images else None,
+            category=category_name,
+        )
+        sent = await mailer.send_email(owner.email, subject, html_body, text_body)
+        if not sent:
+            log.warning("low stock email: failed to send to %s (product=%s)", owner.email, product.name)
+
+
+async def handle_generate_invoice_pdf(payload: dict) -> None:
+    """Renders app/invoices.py's HTML via headless Chromium and uploads the
+    PDF to Cloudinary — same "real browser render, worker-only" reasoning
+    as handle_capture_screenshot above. Best-effort: a rendering/upload
+    failure leaves Invoice.pdf_url null rather than crashing the job loop;
+    the invoice row itself (already created by the caller) is unaffected."""
+    from playwright.async_api import async_playwright
+
+    from app import invoices as invoices_module
+    from app import mailer, media
+
+    invoice_id = payload["invoice_id"]
+    async with SessionLocal() as db:
+        invoice = (
+            await db.execute(select(Invoice).where(Invoice.id == invoice_id))
+        ).scalar_one_or_none()
+        if invoice is None:
+            return
+        tenant = (
+            await db.execute(select(Tenant).where(Tenant.id == invoice.tenant_id))
+        ).scalar_one_or_none()
+        if tenant is None:
+            return
+        owner = (
+            await db.execute(
+                select(User).where(User.tenant_id == tenant.id, User.role == "owner")
+            )
+        ).scalars().first()
+        site = (
+            await db.execute(select(Site).where(Site.tenant_id == tenant.id))
+        ).scalars().first()
+        site_domain = (
+            (site.custom_domain or f"{site.subdomain}.{settings.site_base_domain}")
+            if site is not None
+            else None
+        )
+
+        html = invoices_module.invoice_html(
+            invoice_number=invoice.invoice_number,
+            plan=invoice.plan,
+            amount_cents=invoice.amount_cents,
+            currency=invoice.currency,
+            period_label=invoice.period_label,
+            issued_at=invoice.issued_at.strftime("%d %b %Y"),
+            tenant_name=tenant.name,
+            tenant_business=invoice.tenant_business_snapshot,
+            owner_name=owner.full_name if owner is not None else None,
+            owner_email=owner.email if owner is not None else None,
+            owner_phone=owner.phone if owner is not None else None,
+            site_domain=site_domain,
+        )
+
+    try:
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch()
+            try:
+                page = await browser.new_page()
+                await page.set_content(html, wait_until="load")
+                pdf_bytes = await page.pdf(format="A4", print_background=True)
+            finally:
+                await browser.close()
+        uploaded = media.upload_invoice_pdf(pdf_bytes, invoice_number=invoice.invoice_number)
+    except Exception as exc:  # noqa: BLE001 — Playwright/Cloudinary both raise a wide variety of exception types
+        log.warning("invoice pdf: could not generate %s (%s)", invoice.invoice_number, exc)
+        return
+
+    async with SessionLocal() as db:
+        invoice = (
+            await db.execute(select(Invoice).where(Invoice.id == invoice_id))
+        ).scalar_one_or_none()
+        if invoice is None:
+            return
+        invoice.pdf_url = uploaded["url"]
+        tenant = (
+            await db.execute(select(Tenant).where(Tenant.id == invoice.tenant_id))
+        ).scalar_one_or_none()
+        await db.commit()
+    log.info("invoice pdf: generated %s -> %s", invoice.invoice_number, uploaded["url"])
+
+    if tenant is not None and tenant.notifications.get("billing", True):
+        if owner is not None:
+            subject, html_body, text_body = mailer.invoice_email(
+                tenant_name=tenant.name,
+                invoice_number=invoice.invoice_number,
+                plan_name=invoices_module.PLAN_NAMES.get(invoice.plan, invoice.plan.title()),
+                amount_cents=invoice.amount_cents,
+                currency=invoice.currency,
+                period_label=invoice.period_label,
+                issued_at=invoice.issued_at.strftime("%d %b %Y"),
+            )
+            sent = await mailer.send_email(
+                owner.email,
+                subject,
+                html_body,
+                text_body,
+                attachment=(f"{invoice.invoice_number}.pdf", pdf_bytes),
+            )
+            if not sent:
+                log.warning("invoice email: failed to send to %s (invoice=%s)", owner.email, invoice.invoice_number)
+
+
 async def handle_send_meta_capi_event(payload: dict) -> None:
     """Server-side Meta Purchase event for one just-placed order.
 
@@ -324,7 +596,11 @@ async def handle_capture_screenshot(payload: dict) -> None:
         # is infra-generated, not a merchant upload, so it must never count
         # against the tenant's plan storage quota or show up in their Media
         # Library listing (both only ever iterate VALID_CATEGORIES).
-        uploaded = media.upload_image(png, subdomain=site.subdomain, category="_system")
+        # upload_site_screenshot (not upload_image directly) also prunes
+        # this folder down to media.SITE_SCREENSHOT_KEEP files — every
+        # publish captures a new screenshot and nothing else ever deleted
+        # the old ones, so this folder grew unbounded before that existed.
+        uploaded = media.upload_site_screenshot(png, subdomain=site.subdomain)
     except Exception as exc:  # noqa: BLE001 — Playwright/Cloudinary both raise
         # a wide variety of exception types here; any of them is equally
         # "couldn't get a screenshot this time," never worth crashing the job
@@ -348,6 +624,9 @@ HANDLERS = {
     JOB_GENERATE_SITEMAP: handle_generate_sitemap,
     JOB_SEND_EMAIL: handle_send_email,
     JOB_SEND_ORDER_NOTIFICATIONS: handle_send_order_notifications,
+    JOB_SEND_ORDER_EMAIL: handle_send_order_email,
+    JOB_SEND_LOW_STOCK_EMAIL: handle_send_low_stock_email,
+    JOB_GENERATE_INVOICE_PDF: handle_generate_invoice_pdf,
     JOB_ATTACH_DOMAIN: handle_attach_domain,
     JOB_DETACH_DOMAIN: handle_detach_domain,
     JOB_CAPTURE_SCREENSHOT: handle_capture_screenshot,

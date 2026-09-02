@@ -16,6 +16,7 @@ correct metadata without reimplementing the fallback rules.
 import json
 import logging
 import re
+import uuid
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -23,13 +24,14 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import bkash, cache, courier_crypto, crud, mailer, nagad, queue, recaptcha, sslcommerz
+from app import bkash, cache, courier_crypto, crud, events, mailer, nagad, queue, recaptcha, sslcommerz
 from app.ratelimit import _client_ip, demo_access_rate_limit, rate_limit
 from app.config import settings
 from app.db import get_db
 from app.models import (
     Category,
     DemoAccessRequest,
+    Event,
     FraudBlocklistEntry,
     Inquiry,
     Order,
@@ -57,6 +59,9 @@ log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/public", tags=["public"])
 DB = Annotated[AsyncSession, Depends(get_db)]
+
+# Fixed for now, not a per-site setting — see queue.JOB_SEND_LOW_STOCK_EMAIL.
+_LOW_STOCK_THRESHOLD = 5
 
 
 async def _find_published_site(host: str, db: AsyncSession) -> Site:
@@ -284,14 +289,32 @@ def _public_category(category: Category, item_count: int) -> dict[str, Any]:
     }
 
 
-def _public_product(product: Product, category_name: str | None) -> dict[str, Any]:
+def _public_product(
+    product: Product, category_name: str | None, active_event: Event | None = None
+) -> dict[str, Any]:
     """Shape a Product row for template consumption.
 
     Same rule as `_public_category`: only real columns. `price_cents` is the
     source of truth (see CLAUDE.md rule 7 — money is integer cents); this is
     the one place it's converted to a decimal major-unit number for display,
     because templates render prices, they don't do currency math.
+
+    `active_event`, when given, takes precedence over the merchant's own
+    cosmetic `compare_at_cents` for the "was" price: the real (undiscounted)
+    price becomes the shown compareAtPrice, and the event-discounted price
+    becomes the shown price — feeding the exact price/compareAtPrice pair
+    both themes' existing ProductCard already derives its -X% badge from,
+    so an active event's real, checkout-honored discount is what shows,
+    not whatever compare-at happens to be set.
     """
+    if active_event is not None:
+        display_price_cents = events.round_discounted_cents(
+            product.price_cents, active_event.discount_percent
+        )
+        compare_at_cents = product.price_cents
+    else:
+        display_price_cents = product.price_cents
+        compare_at_cents = product.compare_at_cents
     return {
         "id": str(product.id),
         "slug": product.slug,
@@ -301,9 +324,9 @@ def _public_product(product: Product, category_name: str | None) -> dict[str, An
         # HTML) since a storefront needs a real plain-text excerpt, not one
         # derived by stripping tags off the long version.
         "shortDescription": product.short_description or "",
-        "price": product.price_cents / 100,
+        "price": display_price_cents / 100,
         "compareAtPrice": (
-            product.compare_at_cents / 100 if product.compare_at_cents is not None else None
+            compare_at_cents / 100 if compare_at_cents is not None else None
         ),
         "currency": product.currency,
         "images": [img.get("url", "") for img in (product.images or []) if img.get("url")],
@@ -325,6 +348,60 @@ def _public_product(product: Product, category_name: str | None) -> dict[str, An
             if dc.get("name")
         ],
     }
+
+
+async def _active_events_by_product(
+    db: AsyncSession, site_id: uuid.UUID, product_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, Event]:
+    """Which active Event (if any) applies to each of these products —
+    one query, reused by both the product list and single-product routes.
+    A product can be in at most one active event (enforced app-side in
+    app/api/events.py), so the mapping is always unambiguous."""
+    if not product_ids:
+        return {}
+    rows = (
+        await db.execute(
+            select(Event)
+            .join(Event.products)
+            .where(Event.site_id == site_id, Event.is_active, Product.id.in_(product_ids))
+        )
+    ).scalars().unique().all()
+    by_product: dict[uuid.UUID, Event] = {}
+    for e in rows:
+        for p in e.products:
+            if p.id in product_ids:
+                by_product[p.id] = e
+    return by_product
+
+
+@router.get("/site/{host}/events")
+async def list_public_events(host: str, db: DB) -> list[dict]:
+    """Active events for a published site — the homepage 'Events' section
+    reads this, and the theme editor's featured-events picker uses the
+    same shape. Product ids included so the storefront's ?event= shop
+    filter works client-side without a second round trip, same mechanics
+    as the existing ?category= filter."""
+    site = await _find_published_site(host, db)
+    rows = (
+        await db.execute(
+            select(Event)
+            .where(Event.site_id == site.id, Event.is_active)
+            .order_by(Event.created_at.desc())
+        )
+    ).scalars().unique().all()
+    return [
+        {
+            "id": str(e.id),
+            "slug": e.slug,
+            "name": e.name,
+            "description": e.description or "",
+            "image": e.image_url or "",
+            "ctaLabel": e.cta_label,
+            "discountPercent": e.discount_percent,
+            "productIds": [str(p.id) for p in e.products],
+        }
+        for e in rows
+    ]
 
 
 @router.get("/site/{host}/categories")
@@ -389,8 +466,11 @@ async def list_public_products(
         )
     ).all()
 
+    event_by_product = await _active_events_by_product(db, site.id, [p.id for p, _ in rows])
     return {
-        "items": [_public_product(p, cat_name) for p, cat_name in rows],
+        "items": [
+            _public_product(p, cat_name, event_by_product.get(p.id)) for p, cat_name in rows
+        ],
         "total": total,
         "limit": limit,
         "offset": offset,
@@ -413,7 +493,8 @@ async def get_public_product(host: str, slug: str, db: DB) -> dict:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Product not found")
 
     product, category_name = row
-    return _public_product(product, category_name)
+    event_by_product = await _active_events_by_product(db, site.id, [product.id])
+    return _public_product(product, category_name, event_by_product.get(product.id))
 
 
 @router.post(
@@ -639,11 +720,16 @@ async def create_public_order(
             status.HTTP_400_BAD_REQUEST,
             f"Products not found or unavailable: {', '.join(missing)}",
         )
+    event_by_product = await _active_events_by_product(db, site.id, list(products.keys()))
 
     items: list[OrderItem] = []
     out_items: list[PublicOrderItemOut] = []
     subtotal = 0
     shipping = 0
+    # Products that just crossed DOWN to the low-stock line in this order —
+    # not every order after, only the one transition — see
+    # queue.JOB_SEND_LOW_STOCK_EMAIL.
+    low_stock_product_ids: list[uuid.UUID] = []
     for line in payload.items:
         product = products[line.product_id]
 
@@ -653,7 +739,16 @@ async def create_public_order(
                 f"Only {product.stock} left of '{product.name}'.",
             )
 
-        line_total = product.price_cents * line.quantity
+        # An active event's discount is actually charged here, not cosmetic
+        # (see app/events.py's round_discounted_cents — pure integer
+        # round-half-up, never a float division, per CLAUDE.md rule 7).
+        active_event = event_by_product.get(product.id)
+        charged_unit_price = (
+            events.round_discounted_cents(product.price_cents, active_event.discount_percent)
+            if active_event is not None
+            else product.price_cents
+        )
+        line_total = charged_unit_price * line.quantity
         subtotal += line_total
 
         if not product.free_delivery and payload.delivery_location:
@@ -673,22 +768,36 @@ async def create_public_order(
                 product_id=product.id,
                 name_snapshot=product.name,
                 sku_snapshot=product.sku,
-                unit_price_cents=product.price_cents,
+                unit_price_cents=charged_unit_price,
                 cost_price_cents_snapshot=product.cost_price_cents,
                 quantity=line.quantity,
                 total_cents=line_total,
+                # Immutable snapshot — the receipt keeps showing this even
+                # after the event is later edited or deleted (CLAUDE.md
+                # rule 8), never a live join back to `events`.
+                event_name_snapshot=active_event.name if active_event else None,
+                event_discount_percent_snapshot=(
+                    active_event.discount_percent if active_event else None
+                ),
             )
         )
         out_items.append(
             PublicOrderItemOut(
                 name=product.name,
                 quantity=line.quantity,
-                unit_price_cents=product.price_cents,
+                unit_price_cents=charged_unit_price,
                 total_cents=line_total,
+                event_name=active_event.name if active_event else None,
+                event_discount_percent=(
+                    active_event.discount_percent if active_event else None
+                ),
             )
         )
         if product.track_stock:
+            stock_before = product.stock
             product.stock -= line.quantity
+            if stock_before > _LOW_STOCK_THRESHOLD and product.stock <= _LOW_STOCK_THRESHOLD:
+                low_stock_product_ids.append(product.id)
 
     customer_record = await crud.get_or_create_customer(
         db, tenant_id=site.tenant_id, site_id=site.id, customer=payload.customer
@@ -744,6 +853,12 @@ async def create_public_order(
             "send_push": True,
         },
     )
+    # Order-confirmation email to the tenant owner — see
+    # queue.JOB_SEND_ORDER_EMAIL's own comment for why this is a separate,
+    # queued job rather than rendered inline here.
+    await queue.publish(queue.JOB_SEND_ORDER_EMAIL, {"order_id": str(order.id)})
+    for product_id in low_stock_product_ids:
+        await queue.publish(queue.JOB_SEND_LOW_STOCK_EMAIL, {"product_id": str(product_id)})
 
     # Server-side Meta Purchase event — see app/marketing.py and
     # worker.py's handle_send_meta_capi_event. `event_id` is the order_number

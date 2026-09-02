@@ -19,13 +19,14 @@ still does that the same way as today, not through here.
 """
 
 import uuid
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import crud, mailer, queue
+from app import crud, invoices as invoices_module, mailer, queue
 from app.db import get_db
 from app.models import (
     Category,
@@ -33,6 +34,7 @@ from app.models import (
     DemoAccessRequest,
     HelpTicket,
     HelpTicketReply,
+    Invoice,
     Order,
     PaymentConnection,
     Product,
@@ -256,8 +258,32 @@ async def update_tenant(
     tenant = (await db.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one_or_none()
     if tenant is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Tenant not found")
+    old_plan = tenant.plan
     tenant = crud.apply_updates(tenant, payload.model_dump(exclude_unset=True))
     tenant = await crud.save(db, tenant)
+
+    # A real invoice the moment the team manually switches a tenant onto a
+    # (possibly different) paid plan — see migrations/053's own docstring on
+    # why this is event-triggered rather than a recurring billing job.
+    # "trial"/"demo" never get an invoice at all — there's nothing to bill
+    # or document for a free plan.
+    if (
+        payload.plan is not None
+        and payload.plan != old_plan
+        and payload.plan not in ("trial", "demo")
+    ):
+        invoice = Invoice(
+            tenant_id=tenant.id,
+            invoice_number=await crud.next_invoice_number(db, tenant.id),
+            plan=tenant.plan,
+            amount_cents=invoices_module.PLAN_PRICES_CENTS.get(tenant.plan, 0),
+            currency="BDT",
+            period_label=datetime.now(UTC).strftime("%b %Y"),
+            tenant_business_snapshot=tenant.business,
+        )
+        await crud.save(db, invoice)
+        await queue.publish(queue.JOB_GENERATE_INVOICE_PDF, {"invoice_id": str(invoice.id)})
+
     aggregates = (await _tenant_aggregates(db, [tenant.id]))[tenant.id]
     return _tenant_out(tenant, aggregates)
 

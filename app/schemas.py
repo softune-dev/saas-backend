@@ -112,8 +112,12 @@ class MeUpdate(BaseModel):
     avatar_url: str | None = None
 
 
-class ChangePasswordIn(BaseModel):
+class ChangePasswordRequestOtpIn(BaseModel):
     current_password: str = Field(max_length=72)
+
+
+class ChangePasswordConfirmIn(BaseModel):
+    otp: str = Field(min_length=6, max_length=6)
     new_password: str = Field(min_length=8, max_length=72)
 
 
@@ -133,6 +137,31 @@ class TenantBusinessUpdate(BaseModel):
     trade_license: str | None = Field(default=None, max_length=100)
     tin: str | None = Field(default=None, max_length=100)
     billing_email: str | None = Field(default=None, max_length=200)
+
+
+class TenantNotificationPrefsOut(BaseModel):
+    orders: bool
+    low_stock: bool
+    billing: bool
+    marketing: bool
+
+
+class TenantNotificationPrefsUpdate(BaseModel):
+    orders: bool | None = None
+    low_stock: bool | None = None
+    billing: bool | None = None
+    marketing: bool | None = None
+
+
+class InvoiceOut(ORMModel):
+    id: uuid.UUID
+    invoice_number: str
+    plan: str
+    amount_cents: int
+    currency: str
+    period_label: str
+    pdf_url: str | None
+    issued_at: datetime
 
 
 class TokenOut(BaseModel):
@@ -162,6 +191,7 @@ class TenantOut(ORMModel):
     plan: str
     status: str
     business: TenantBusinessOut
+    notifications: TenantNotificationPrefsOut
     # Only meaningful when plan == "trial" — the dashboard's trial badge
     # reads this to show a countdown; null for every other plan.
     trial_expires_at: datetime | None
@@ -356,6 +386,46 @@ class CategoryOut(ORMModel):
     icon: str | None
     sort_order: int
     is_active: bool
+    created_at: datetime
+
+
+class EventCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    slug: str | None = None  # auto-derived from name when omitted
+    description: str | None = Field(default=None, max_length=2000)
+    image_url: str | None = None
+    cta_label: str = Field(default="Shop now", max_length=40)
+    discount_percent: int = Field(ge=1, le=90)
+    product_ids: list[uuid.UUID] = Field(default_factory=list)
+    is_active: bool = False
+
+
+class EventUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    slug: str | None = None
+    description: str | None = Field(default=None, max_length=2000)
+    image_url: str | None = None
+    cta_label: str | None = Field(default=None, max_length=40)
+    discount_percent: int | None = Field(default=None, ge=1, le=90)
+    product_ids: list[uuid.UUID] | None = None
+    is_active: bool | None = None
+
+
+class EventOut(BaseModel):
+    # Not an ORMModel: product_ids/product_count are derived from the
+    # products relationship, not real columns — built explicitly by
+    # app/api/events.py's _event_out() rather than model_validate(event).
+    id: uuid.UUID
+    site_id: uuid.UUID
+    name: str
+    slug: str
+    description: str | None
+    image_url: str | None
+    cta_label: str
+    discount_percent: int
+    is_active: bool
+    product_ids: list[uuid.UUID]
+    product_count: int
     created_at: datetime
 
 
@@ -558,6 +628,11 @@ class PublicOrderItemOut(BaseModel):
     quantity: int
     unit_price_cents: int
     total_cents: int
+    # Set only when an active Event's discount applied to this line at sale
+    # time — read straight from OrderItem's snapshot columns, so it keeps
+    # showing correctly even after the event is edited/deleted later.
+    event_name: str | None = None
+    event_discount_percent: int | None = None
 
 
 class PublicOrderOut(BaseModel):

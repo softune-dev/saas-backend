@@ -106,7 +106,13 @@ async def _register(client: AsyncClient) -> Account:
             email=email,
             password="test-password-123",
             workspace_name=f"Test WS {suffix}",
-            plan="demo",
+            # Not "demo" — app/security.py's block_demo_writes 403s every
+            # mutating request from a demo-plan tenant, which would break
+            # every fixture-based test that writes anything (i.e. almost
+            # all of them). Tests that specifically need demo-plan behavior
+            # (test_auth.py) create their own tenant inline instead of
+            # using this fixture.
+            plan="starter",
             template_key="aurora",
             site_name=f"Test Site {suffix}",
             subdomain=f"test-fixture-{suffix}",

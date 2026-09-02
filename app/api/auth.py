@@ -16,13 +16,15 @@ from app.db import get_db
 from app.models import Tenant, TrustedDevice, User
 from app.ratelimit import _client_ip, login_rate_limit, rate_limit
 from app.schemas import (
-    ChangePasswordIn,
+    ChangePasswordConfirmIn,
+    ChangePasswordRequestOtpIn,
     LoginIn,
     LoginResultOut,
     MeOut,
     MeUpdate,
     RefreshIn,
     TenantBusinessUpdate,
+    TenantNotificationPrefsUpdate,
     TenantOut,
     TokenOut,
     UserOut,
@@ -99,7 +101,7 @@ def _tokens(user: User) -> TokenOut:
 # between callers.
 
 
-async def _queue_login_otp_email(to_email: str, otp: str, full_name: str | None) -> None:
+async def _queue_otp_email(to_email: str, otp: str, full_name: str | None) -> None:
     """Queued, not awaited inline — same reasoning as app/api/leads.py's
     _queue_otp_email (a real SMTP send measured 6-7 seconds)."""
     subject, html_body, text_body = mailer.otp_email(otp, full_name)
@@ -161,7 +163,7 @@ async def login(payload: LoginIn, request: Request, db: DB) -> LoginResultOut:
         user.login_otp_expires_at = datetime.now(UTC) + timedelta(minutes=_LOGIN_OTP_TTL_MINUTES)
         user.login_otp_attempts = 0
         await db.commit()
-        await _queue_login_otp_email(user.email, otp, user.full_name)
+        await _queue_otp_email(user.email, otp, user.full_name)
         return LoginResultOut(otp_required=True, login_token=create_login_otp_token(user.id))
 
     user.last_login_at = func.now()
@@ -302,12 +304,39 @@ async def update_tenant_business(
     return TenantOut.model_validate(tenant)
 
 
-@router.post(
-    "/change-password",
-    status_code=status.HTTP_204_NO_CONTENT,
-    dependencies=[Depends(block_demo_writes)],
+@router.patch(
+    "/tenant/notifications", response_model=TenantOut, dependencies=[Depends(block_demo_writes)]
 )
-async def change_password(payload: ChangePasswordIn, user: CurrentUser, db: DB) -> None:
+async def update_tenant_notifications(
+    payload: TenantNotificationPrefsUpdate, user: CurrentUser, db: DB
+) -> TenantOut:
+    """Account -> Notifications toggles. Same merge-into-JSONB shape as
+    update_tenant_business above, just nested one level under
+    settings["notifications"] instead of business — see Tenant.notifications
+    (app/models.py) for the read side and its defaults."""
+    tenant = (
+        await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))
+    ).scalar_one_or_none()
+    if tenant is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Account no longer exists")
+    merged_notifications = {**tenant.notifications, **payload.model_dump(exclude_unset=True)}
+    tenant.settings = {**tenant.settings, "notifications": merged_notifications}
+    tenant = await crud.save(db, tenant)
+    return TenantOut.model_validate(tenant)
+
+
+@router.post(
+    "/change-password/request-otp",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(block_demo_writes), Depends(rate_limit("change-password-otp", limit=5, window_seconds=600))],
+)
+async def request_change_password_otp(
+    payload: ChangePasswordRequestOtpIn, user: CurrentUser, db: DB
+) -> None:
+    """Verifies the current password up front, so a wrong current password
+    never even sends a code — separate columns from login_otp_* (see
+    migrations/052) so this never collides with an in-progress login OTP
+    challenge for the same user."""
     db_user = (
         await db.execute(select(User).where(User.id == user.user_id))
     ).scalar_one_or_none()
@@ -315,6 +344,46 @@ async def change_password(payload: ChangePasswordIn, user: CurrentUser, db: DB) 
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Account no longer exists")
     if not verify_password(payload.current_password, db_user.password_hash):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Current password is incorrect")
+
+    otp = generate_otp()
+    db_user.password_otp_hash = hash_otp(otp)
+    db_user.password_otp_expires_at = datetime.now(UTC) + timedelta(minutes=_LOGIN_OTP_TTL_MINUTES)
+    db_user.password_otp_attempts = 0
+    await db.commit()
+    await _queue_otp_email(db_user.email, otp, db_user.full_name)
+
+
+@router.post(
+    "/change-password/confirm",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(block_demo_writes)],
+)
+async def confirm_change_password(
+    payload: ChangePasswordConfirmIn, user: CurrentUser, db: DB
+) -> None:
+    db_user = (
+        await db.execute(select(User).where(User.id == user.user_id))
+    ).scalar_one_or_none()
+    if db_user is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Account no longer exists")
+
+    invalid = HTTPException(status.HTTP_400_BAD_REQUEST, "Incorrect or expired code.")
+    if db_user.password_otp_attempts >= _LOGIN_OTP_MAX_ATTEMPTS:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many attempts — request a new code.")
+    db_user.password_otp_attempts += 1
+
+    if (
+        not db_user.password_otp_hash
+        or not db_user.password_otp_expires_at
+        or datetime.now(UTC) > db_user.password_otp_expires_at
+        or not secrets.compare_digest(db_user.password_otp_hash, hash_otp(payload.otp))
+    ):
+        await db.commit()
+        raise invalid
+
+    db_user.password_otp_hash = None
+    db_user.password_otp_expires_at = None
+    db_user.password_otp_attempts = 0
     db_user.password_hash = hash_password(payload.new_password)
     await crud.save(db, db_user)
     # A password change is exactly the case access-token statelessness can't
@@ -324,6 +393,12 @@ async def change_password(payload: ChangePasswordIn, user: CurrentUser, db: DB) 
     # any refresh token. Kill all of them now; this request's own new tokens
     # (issued after this point) are unaffected since they're issued after.
     await revoke_all_user_tokens(db_user.id)
+
+    subject, html_body, text_body = mailer.password_changed_email(db_user.full_name)
+    await queue.publish(
+        queue.JOB_SEND_EMAIL,
+        {"to": db_user.email, "subject": subject, "html_body": html_body, "text_body": text_body},
+    )
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)

@@ -168,6 +168,7 @@ def _explain(exc: IntegrityError) -> str:
         "uq_products_site_slug": "A product with that URL slug already exists.",
         "uq_products_site_sku": "That SKU is already used on this site.",
         "uq_categories_site_slug": "A category with that URL slug already exists.",
+        "uq_events_site_slug": "An event with that URL slug already exists.",
         "uq_orders_site_number": "That order number already exists.",
         "sites_subdomain_key": "That subdomain is taken. Try another.",
         "uq_sites_custom_domain": "That domain is already connected to another site.",
@@ -302,6 +303,30 @@ async def next_order_number(db: AsyncSession, site_id: uuid.UUID) -> str:
         row = 1001
 
     return f"ORD-{row}"
+
+
+async def next_invoice_number(db: AsyncSession, tenant_id: uuid.UUID) -> str:
+    """Sequential per-tenant invoice reference, e.g. INV-1001 — same
+    atomic UPDATE ... RETURNING shape as next_order_number above, just
+    keyed on tenant_id (invoice_counters, migrations/053) since invoices
+    are billed per-tenant, not per-site."""
+    from app.models import InvoiceCounter
+
+    row = (
+        await db.execute(
+            update(InvoiceCounter)
+            .where(InvoiceCounter.tenant_id == tenant_id)
+            .values(next_number=InvoiceCounter.next_number + 1)
+            .returning(InvoiceCounter.next_number)
+        )
+    ).scalar_one_or_none()
+
+    if row is None:
+        db.add(InvoiceCounter(tenant_id=tenant_id, next_number=1001))
+        await db.flush()
+        row = 1001
+
+    return f"INV-{row}"
 
 
 async def create_tenant_owner_and_site(

@@ -307,6 +307,10 @@ async def complete(payload: TrialCompleteIn, db: DB) -> dict:
 
     await cache.drop(_redis_key(payload.signup_token))
 
+    # No invoice for the trial itself — a trial is free, so there's nothing
+    # to bill or document. Invoices now only start once superadmin sets a
+    # real paid plan (see app/api/superadmin.py's update_tenant).
+
     subject, html_body, text_body = mailer.welcome_email(user.full_name)
     await queue.publish(
         queue.JOB_SEND_EMAIL,

@@ -26,6 +26,7 @@ import html
 import logging
 import smtplib
 from email.header import Header
+from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr
@@ -54,32 +55,62 @@ DASHBOARD = "https://dashboard.softunebd.com"
 SUPPORT = "support@softunebd.com"
 
 
-def _send_sync(to_email: str, subject: str, html_body: str, text_body: str) -> None:
+def _send_sync(
+    to_email: str,
+    subject: str,
+    html_body: str,
+    text_body: str,
+    attachment: tuple[str, bytes] | None = None,
+) -> None:
     # Every template here uses non-ASCII characters (em dashes) —
     # MIMEText defaults to us-ascii and Header() defaults to encoding only
     # non-ASCII runs, so both need an explicit utf-8 charset or these get
     # mangled in the actually-delivered email.
-    msg = MIMEMultipart("alternative")
+    alt = MIMEMultipart("alternative")
+    alt.attach(MIMEText(text_body, "plain", "utf-8"))
+    alt.attach(MIMEText(html_body, "html", "utf-8"))
+
+    if attachment is not None:
+        # A real attachment needs "mixed" as the outer container, with the
+        # text/html alternative nested one level in — attaching a PDF
+        # directly to an "alternative" part makes some clients (Gmail
+        # included) treat the PDF as just another alternative rendering of
+        # the message and silently drop it instead of showing it as a file.
+        filename, data = attachment
+        msg = MIMEMultipart("mixed")
+        msg.attach(alt)
+        part = MIMEApplication(data, _subtype="pdf")
+        part.add_header("Content-Disposition", "attachment", filename=filename)
+        msg.attach(part)
+    else:
+        msg = alt
+
     msg["Subject"] = Header(subject, "utf-8")
     msg["From"] = formataddr((settings.smtp_from_name, settings.smtp_from_email))
     msg["To"] = to_email
-    msg.attach(MIMEText(text_body, "plain", "utf-8"))
-    msg.attach(MIMEText(html_body, "html", "utf-8"))
 
     with smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, timeout=10) as server:
         server.login(settings.smtp_username, settings.smtp_password)
         server.sendmail(settings.smtp_from_email, [to_email], msg.as_string())
 
 
-async def send_email(to_email: str, subject: str, html_body: str, text_body: str) -> bool:
+async def send_email(
+    to_email: str,
+    subject: str,
+    html_body: str,
+    text_body: str,
+    attachment: tuple[str, bytes] | None = None,
+) -> bool:
     """Returns False (never raises) if SMTP isn't configured or the send
     fails — callers that need the send to succeed check the return value
-    themselves rather than relying on an exception."""
+    themselves rather than relying on an exception. `attachment`, when
+    given, is `(filename, file_bytes)` — currently only used for invoice
+    PDFs (see worker.py's handle_generate_invoice_pdf)."""
     if not settings.smtp_username or not settings.smtp_password:
         log.warning("mailer: SMTP not configured, skipping send to %s", to_email)
         return False
     try:
-        await asyncio.to_thread(_send_sync, to_email, subject, html_body, text_body)
+        await asyncio.to_thread(_send_sync, to_email, subject, html_body, text_body, attachment)
         return True
     except Exception as exc:  # noqa: BLE001 - any SMTP/network failure is a clean False, not a 500
         log.warning("mailer: failed to send to %s: %s", to_email, exc)
@@ -343,6 +374,333 @@ def welcome_email(recipient_name: str | None = None) -> tuple[str, str, str]:
         f"Open dashboard: {DASHBOARD}\n\n"
         f"{rows_text}\n\n"
         "Questions? Reply to this email.\n\n"
+        "Softune — softunebd.com"
+    )
+    return subject, html_body, text_body
+
+
+def _format_money(cents: int, currency: str) -> str:
+    symbol = "৳" if currency == "BDT" else ""
+    amount = f"{cents / 100:,.2f}"
+    return f"{symbol}{amount}" if symbol else f"{amount} {currency}"
+
+
+def order_created_email(
+    shop_name: str,
+    order_number: str,
+    items: list[dict],
+    total_cents: int,
+    currency: str,
+    order_link: str,
+    recipient_name: str | None = None,
+    customer: dict | None = None,
+    shop_domain: str | None = None,
+) -> tuple[str, str, str]:
+    """Sent to the tenant owner right after a customer places an order.
+    `items` is [{name, quantity, unit_price_cents, total_cents, image_url,
+    category, event_name, event_discount_percent}], image_url/category/
+    event_name are None when the product was later deleted, has no
+    category, or wasn't part of an event (OrderItem keeps a name_snapshot
+    regardless — see CLAUDE.md rule 8 on immutable history: event_name and
+    event_discount_percent come straight from OrderItem's own snapshot
+    columns, so they keep showing correctly even after the event is later
+    edited or deleted). `customer` is
+    {name, phone, email, address} — any key can be missing/None, since a
+    storefront's checkout form fields vary. `shop_domain` is the site's
+    live host (e.g. "rivelle.softunebd.com") — with multiple sites per
+    tenant possible, the owner needs to know AT A GLANCE which storefront
+    this order is actually from, not just its display name."""
+    greeting = f"Hi {html.escape(recipient_name)}," if recipient_name else "Hi,"
+    greeting_text = f"Hi {recipient_name}," if recipient_name else "Hi,"
+    shop_safe = html.escape(shop_name)
+    order_safe = html.escape(order_number)
+    subject = f"New order {order_number} — {shop_name}"
+    customer = customer or {}
+
+    def item_row(item: dict) -> str:
+        img = item.get("image_url")
+        thumb = (
+            f'<img src="{img}" width="48" height="48" alt="" '
+            f'style="display:block;width:48px;height:48px;border-radius:{RADIUS};'
+            f'object-fit:cover;border:1px solid {LINE};" />'
+            if img
+            else f'<div style="width:48px;height:48px;border-radius:{RADIUS};background-color:{SOFT};border:1px solid {LINE};"></div>'
+        )
+        name_safe = html.escape(item["name"])
+        category = item.get("category")
+        category_line = (
+            f'<p style="margin:2px 0 0 0;font-size:12px;color:{MUTED};">{html.escape(category)}</p>'
+            if category
+            else ""
+        )
+        event_name = item.get("event_name")
+        event_line = (
+            f'<p style="margin:2px 0 0 0;font-size:12px;color:{BRAND};">'
+            f'{html.escape(event_name)} — {item["event_discount_percent"]}% off</p>'
+            if event_name
+            else ""
+        )
+        line_total = _format_money(item["total_cents"], currency)
+        return (
+            f'<tr>'
+            f'<td width="48" style="padding:0 0 14px 0;">{thumb}</td>'
+            f'<td valign="top" style="padding:0 0 14px 14px;">'
+            f'<p style="margin:0;font-size:14px;color:{INK};">{name_safe}</p>'
+            f'<p style="margin:2px 0 0 0;font-size:13px;color:{MUTED};">Qty {item["quantity"]}</p>'
+            f'{category_line}'
+            f'{event_line}'
+            f'</td>'
+            f'<td valign="top" align="right" style="padding:0 0 14px 14px;font-size:14px;color:{INK};white-space:nowrap;">{line_total}</td>'
+            f'</tr>'
+        )
+
+    items_html = "".join(item_row(i) for i in items)
+    items_text = "\n".join(
+        f"- {i['name']} x{i['quantity']} — {_format_money(i['total_cents'], currency)}"
+        + (f" [{i['category']}]" if i.get("category") else "")
+        + (
+            f" ({i['event_name']} -{i['event_discount_percent']}%)"
+            if i.get("event_name")
+            else ""
+        )
+        for i in items
+    )
+    total_display = _format_money(total_cents, currency)
+
+    # Shop identity — which storefront, not just its display name, since a
+    # tenant can run more than one site.
+    shop_domain_line = (
+        f'<p style="margin:2px 0 0 0;font-size:13px;color:{MUTED};">{html.escape(shop_domain)}</p>'
+        if shop_domain
+        else ""
+    )
+
+    # Customer block — every field optional, since checkout forms vary by
+    # theme/payment method.
+    customer_rows = []
+    if customer.get("name"):
+        customer_rows.append(("Name", customer["name"]))
+    if customer.get("phone"):
+        customer_rows.append(("Phone", customer["phone"]))
+    if customer.get("email"):
+        customer_rows.append(("Email", customer["email"]))
+    if customer.get("address"):
+        customer_rows.append(("Address", customer["address"]))
+    customer_html = "".join(
+        f'<tr><td style="padding:3px 0;font-size:12px;color:{MUTED};width:72px;vertical-align:top;">{html.escape(str(k))}</td>'
+        f'<td style="padding:3px 0;font-size:13px;color:{INK};">{html.escape(str(v))}</td></tr>'
+        for k, v in customer_rows
+    )
+    customer_text = "\n".join(f"{k}: {v}" for k, v in customer_rows)
+    customer_block_html = (
+        f"""\
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+           style="border:1px solid {LINE};border-radius:{RADIUS};margin:0 0 18px 0;">
+      <tr><td style="padding:14px 18px;">
+        <p style="margin:0 0 8px 0;font-size:12px;font-weight:400;color:{MUTED};text-transform:uppercase;letter-spacing:0.04em;">Customer</p>
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0">{customer_html}</table>
+      </td></tr>
+    </table>
+"""
+        if customer_rows
+        else ""
+    )
+
+    body_html = f"""\
+<tr>
+  <td style="padding:28px 36px 8px 36px;">
+    <p style="margin:0 0 8px 0;font-size:14px;color:{INK};">{greeting}</p>
+    <h1 style="margin:0 0 4px 0;font-size:22px;line-height:1.3;font-weight:400;color:{INK};">New order on {shop_safe}</h1>
+    {shop_domain_line}
+    <p style="margin:14px 0 18px 0;font-size:15px;line-height:1.55;color:{MUTED};">
+      Order {order_safe} just came in.
+    </p>
+    {customer_block_html}
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+           style="background-color:{SOFT};border-radius:{RADIUS};margin:0 0 22px 0;">
+      <tr><td style="padding:16px 18px;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0">{items_html}</table>
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid {LINE};margin-top:6px;">
+          <tr>
+            <td style="padding:12px 0 0 0;font-size:14px;font-weight:400;color:{INK};">Total</td>
+            <td align="right" style="padding:12px 0 0 0;font-size:14px;font-weight:400;color:{INK};">{total_display}</td>
+          </tr>
+        </table>
+      </td></tr>
+    </table>
+    {_btn(order_link, "View order")}
+  </td>
+</tr>
+"""
+    html_body = _shell(f"New order {order_number} on {shop_name}", body_html)
+    text_body = (
+        f"{greeting_text}\n\n"
+        f"New order on {shop_name}"
+        + (f" ({shop_domain})" if shop_domain else "")
+        + f": {order_number}\n\n"
+        + (f"Customer:\n{customer_text}\n\n" if customer_text else "")
+        + f"{items_text}\n\n"
+        f"Total: {total_display}\n\n"
+        f"View order: {order_link}\n\n"
+        "Softune — softunebd.com"
+    )
+    return subject, html_body, text_body
+
+
+def password_changed_email(recipient_name: str | None = None) -> tuple[str, str, str]:
+    """Sent right after a password change completes — confirmation only,
+    the change has already happened by the time this sends."""
+    greeting = f"Hi {html.escape(recipient_name)}," if recipient_name else "Hi,"
+    greeting_text = f"Hi {recipient_name}," if recipient_name else "Hi,"
+    subject = "Your Softune password was changed"
+
+    body_html = f"""\
+<tr>
+  <td style="padding:28px 36px 8px 36px;">
+    <p style="margin:0 0 8px 0;font-size:14px;color:{INK};">{greeting}</p>
+    <h1 style="margin:0 0 10px 0;font-size:22px;line-height:1.3;font-weight:400;color:{INK};">Password changed</h1>
+    <p style="margin:0 0 8px 0;font-size:15px;line-height:1.55;color:{MUTED};">
+      Your Softune password was just changed. You&apos;ve been signed out of every other device.
+    </p>
+    <p style="margin:0;font-size:13px;line-height:1.5;color:{MUTED};">
+      Wasn&apos;t you? Contact <a href="mailto:{SUPPORT}" style="color:{BRAND};text-decoration:none;">{SUPPORT}</a> right away.
+    </p>
+  </td>
+</tr>
+"""
+    html_body = _shell("Your Softune password was changed", body_html)
+    text_body = (
+        f"{greeting_text}\n\n"
+        "Your Softune password was just changed. You've been signed out of every other device.\n\n"
+        f"Wasn't you? Contact {SUPPORT} right away.\n\n"
+        "Softune — softunebd.com"
+    )
+    return subject, html_body, text_body
+
+
+def low_stock_email(
+    product_name: str,
+    current_stock: int,
+    product_link: str,
+    image_url: str | None = None,
+    category: str | None = None,
+) -> tuple[str, str, str]:
+    """Sent once when a product's stock crosses down to the low-stock line."""
+    subject = f"Low stock: {product_name}"
+    name_safe = html.escape(product_name)
+    category_line = (
+        f'<p style="margin:2px 0 0 0;font-size:13px;color:{MUTED};">{html.escape(category)}</p>'
+        if category
+        else ""
+    )
+    thumb = (
+        f'<img src="{image_url}" width="56" height="56" alt="" '
+        f'style="display:block;width:56px;height:56px;border-radius:{RADIUS};'
+        f'object-fit:cover;border:1px solid {LINE};" />'
+        if image_url
+        else f'<div style="width:56px;height:56px;border-radius:{RADIUS};background-color:{SOFT};border:1px solid {LINE};"></div>'
+    )
+
+    body_html = f"""\
+<tr>
+  <td style="padding:28px 36px 8px 36px;">
+    <h1 style="margin:0 0 18px 0;font-size:22px;line-height:1.3;font-weight:400;color:{INK};">Running low</h1>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+           style="background-color:{SOFT};border-radius:{RADIUS};margin:0 0 22px 0;">
+      <tr><td style="padding:16px 18px;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+          <tr>
+            <td width="56" style="padding:0;">{thumb}</td>
+            <td valign="top" style="padding:0 0 0 14px;">
+              <p style="margin:0;font-size:15px;color:{INK};">{name_safe}</p>
+              {category_line}
+              <p style="margin:6px 0 0 0;font-size:13px;color:{MUTED};">{current_stock} left in stock</p>
+            </td>
+          </tr>
+        </table>
+      </td></tr>
+    </table>
+    {_btn(product_link, "Update stock")}
+  </td>
+</tr>
+"""
+    html_body = _shell(f"{product_name} is running low on stock", body_html)
+    text_body = (
+        f"{product_name}"
+        + (f" ({category})" if category else "")
+        + f" is down to {current_stock} in stock.\n\n"
+        f"Update stock: {product_link}\n\n"
+        "Softune — softunebd.com"
+    )
+    return subject, html_body, text_body
+
+
+def invoice_email(
+    tenant_name: str,
+    invoice_number: str,
+    plan_name: str,
+    amount_cents: int,
+    currency: str,
+    period_label: str,
+    issued_at: str,
+) -> tuple[str, str, str]:
+    """Sent when a new invoice is issued (trial start, or a manual plan
+    change). Renders the actual invoice — line item, period, total — right
+    in the email body (receipt-style, like Stripe/Anthropic's own invoice
+    emails) instead of pointing at a link; the PDF is attached separately
+    by the caller via send_email's `attachment` argument, so this template
+    carries no download/view button at all."""
+    subject = f"Invoice {invoice_number} — Softune"
+    name_safe = html.escape(tenant_name)
+    number_safe = html.escape(invoice_number)
+    plan_safe = html.escape(plan_name)
+    period_safe = html.escape(period_label)
+    issued_safe = html.escape(issued_at)
+    amount_display = _format_money(amount_cents, currency)
+
+    body_html = f"""\
+<tr>
+  <td style="padding:28px 36px 4px 36px;">
+    <p style="margin:0 0 6px 0;font-size:12px;letter-spacing:0.04em;text-transform:uppercase;color:{MUTED};">Invoice {number_safe}</p>
+    <h1 style="margin:0 0 4px 0;font-size:32px;line-height:1.2;font-weight:600;color:{INK};">{amount_display}</h1>
+    <p style="margin:0 0 26px 0;font-size:14px;color:{MUTED};">Issued {issued_safe} to {name_safe}</p>
+  </td>
+</tr>
+<tr>
+  <td style="padding:0 36px;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+      <tr>
+        <td style="padding:12px 0;border-bottom:1px solid {LINE};font-size:11px;letter-spacing:0.04em;text-transform:uppercase;color:{MUTED};">Description</td>
+        <td style="padding:12px 0;border-bottom:1px solid {LINE};font-size:11px;letter-spacing:0.04em;text-transform:uppercase;color:{MUTED};">Period</td>
+        <td style="padding:12px 0;border-bottom:1px solid {LINE};font-size:11px;letter-spacing:0.04em;text-transform:uppercase;color:{MUTED};text-align:right;">Amount</td>
+      </tr>
+      <tr>
+        <td style="padding:14px 0;border-bottom:1px solid {LINE};font-size:14px;color:{INK};">Softune — {plan_safe} plan</td>
+        <td style="padding:14px 0;border-bottom:1px solid {LINE};font-size:14px;color:{MUTED};">{period_safe}</td>
+        <td style="padding:14px 0;border-bottom:1px solid {LINE};font-size:14px;color:{INK};text-align:right;">{amount_display}</td>
+      </tr>
+      <tr>
+        <td style="padding:14px 0;font-size:14px;font-weight:600;color:{INK};" colspan="2">Total</td>
+        <td style="padding:14px 0;font-size:14px;font-weight:600;color:{INK};text-align:right;">{amount_display}</td>
+      </tr>
+    </table>
+  </td>
+</tr>
+<tr>
+  <td style="padding:22px 36px 28px 36px;">
+    <p style="margin:0;font-size:13px;line-height:1.6;color:{MUTED};">
+      The full invoice is attached to this email as a PDF. Questions? support@softunebd.com
+    </p>
+  </td>
+</tr>
+"""
+    html_body = _shell(f"Invoice {invoice_number} — {amount_display}", body_html)
+    text_body = (
+        f"Invoice {invoice_number}\n"
+        f"Issued {issued_at} to {tenant_name}\n\n"
+        f"Softune — {plan_name} plan ({period_label}): {amount_display}\n"
+        f"Total: {amount_display}\n\n"
+        "The full invoice is attached to this email as a PDF.\n\n"
         "Softune — softunebd.com"
     )
     return subject, html_body, text_body

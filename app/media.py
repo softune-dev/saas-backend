@@ -34,7 +34,7 @@ from fastapi import HTTPException, status
 
 from app.config import settings
 
-VALID_CATEGORIES = {"hero", "products", "categories", "other"}
+VALID_CATEGORIES = {"hero", "products", "categories", "events", "other"}
 
 # Cloudinary's own account-wide ceilings (free/standard plan). Enforced two
 # ways: the cheap checks (file size, megapixels) run BEFORE we ever call
@@ -178,6 +178,67 @@ def upload_video(file_bytes: bytes, *, subdomain: str, category: str) -> dict:
         "width": result.get("width"),
         "height": result.get("height"),
     }
+
+
+def upload_invoice_pdf(file_bytes: bytes, *, invoice_number: str) -> dict:
+    """Invoices aren't scoped to a storefront subdomain (a tenant can have
+    zero or several sites) — separate folder scheme from folder_for's
+    per-site layout, resource_type="raw" since a PDF isn't an image/video."""
+    _ensure_configured()
+    root = settings.cloudinary_root_folder.strip("/")
+    try:
+        result = cloudinary.uploader.upload(
+            file_bytes,
+            folder=f"{root}/_invoices",
+            # resource_type="raw" serves the file byte-for-byte with no
+            # Cloudinary-side content sniffing, so the URL's own extension
+            # is what tells a browser/PDF viewer what it just downloaded —
+            # without ".pdf" here the file opens with no format at all.
+            public_id=f"{invoice_number}.pdf",
+            resource_type="raw",
+            unique_filename=False,
+            overwrite=True,
+            # New Cloudinary accounts default "restricted media types" to
+            # blocking unauthenticated delivery of raw/PDF assets (401 on
+            # the plain secure_url) even though images upload public by
+            # default — access_mode="public" overrides that per-asset so
+            # the invoice link actually opens without a signed URL.
+            access_mode="public",
+        )
+    except cloudinary.exceptions.Error as exc:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, f"Cloudinary rejected this file: {exc}"
+        ) from exc
+    return {"url": result["secure_url"], "public_id": result["public_id"]}
+
+
+# Screenshots are re-captured on every publish (handle_capture_screenshot),
+# not overwritten in place — upload_image's unique_filename=True gives each
+# one a fresh public_id specifically so a mid-capture failure never clobbers
+# the last good screenshot_url. Without a cap that means "_system" grows by
+# one file per publish forever, since nothing else ever reads or prunes that
+# folder. Kept small (not 1) so a brief window of concurrent captures for
+# the same site can never race a delete against a still-in-use upload.
+SITE_SCREENSHOT_KEEP = 3
+
+
+def upload_site_screenshot(file_bytes: bytes, *, subdomain: str) -> dict:
+    """Same as upload_image(..., category="_system"), but also trims the
+    folder down to the SITE_SCREENSHOT_KEEP most recent files afterward —
+    see SITE_SCREENSHOT_KEEP's docstring for why this exists."""
+    uploaded = upload_image(file_bytes, subdomain=subdomain, category="_system")
+    try:
+        existing = list_images(subdomain, "_system")
+        existing.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+        stale = existing[SITE_SCREENSHOT_KEEP:]
+        if stale:
+            cloudinary.api.delete_resources([r["public_id"] for r in stale])
+    except cloudinary.exceptions.Error as exc:
+        # Never let cleanup failure undo a screenshot that already uploaded
+        # successfully — same "log and drop" instinct as every other
+        # best-effort Cloudinary call in this module.
+        log.warning("screenshot cleanup: could not prune %s/_system (%s)", subdomain, exc)
+    return uploaded
 
 
 def list_images(subdomain: str, category: str) -> list[dict]:
