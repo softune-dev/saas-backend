@@ -26,7 +26,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import crud, invoices as invoices_module, mailer, queue
+from app import cache, crud, invoices as invoices_module, mailer, queue
 from app.db import get_db
 from app.models import (
     Category,
@@ -300,8 +300,23 @@ async def delete_tenant(tenant_id: uuid.UUID, admin: SuperAdminUser, db: DB) -> 
     tenant = (await db.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one_or_none()
     if tenant is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Tenant not found")
+
+    # Grab every site's hostnames BEFORE the cascade delete — once the row
+    # is gone there's nothing left to read them from. Without this, the
+    # storefront cache (keyed by subdomain, see cache.site_key) keeps
+    # serving the deleted tenant's theme/template to whoever's hostname
+    # this was until the TTL expires — a real bug: a new tenant reusing
+    # the exact same subdomain shortly after a delete would see the OLD
+    # tenant's site, not their own, for the whole cache window.
+    sites = (
+        await db.execute(select(Site).where(Site.tenant_id == tenant_id))
+    ).scalars().all()
+
     await db.delete(tenant)
     await db.commit()
+
+    for site in sites:
+        await cache.invalidate_site(site.subdomain, site.custom_domain)
 
 
 # =============================================================================

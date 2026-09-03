@@ -686,14 +686,38 @@ TRIAL_SWEEP_INTERVAL_SECONDS = 60 * 60  # hourly
 
 
 async def sweep_expired_trials() -> None:
+    from app import cache
+
     cutoff = datetime.now(UTC) - timedelta(days=settings.trial_grace_days)
     async with SessionLocal() as db:
-        result = await db.execute(
-            delete(Tenant).where(Tenant.plan == "trial", Tenant.trial_expires_at < cutoff)
-        )
+        expiring_tenant_ids = (
+            await db.execute(
+                select(Tenant.id).where(
+                    Tenant.plan == "trial", Tenant.trial_expires_at < cutoff
+                )
+            )
+        ).scalars().all()
+        if not expiring_tenant_ids:
+            return
+
+        # Read every affected site's hostnames BEFORE the cascade delete —
+        # once the rows are gone there's nothing left to read them from.
+        # Without this, the storefront cache (keyed by subdomain) keeps
+        # serving a deleted trial's theme/template to anyone who later
+        # reuses the same subdomain, until the cache TTL expires — a real
+        # bug (see app/api/superadmin.py::delete_tenant's own fix for the
+        # single-tenant version of this same gap).
+        sites = (
+            await db.execute(select(Site).where(Site.tenant_id.in_(expiring_tenant_ids)))
+        ).scalars().all()
+
+        result = await db.execute(delete(Tenant).where(Tenant.id.in_(expiring_tenant_ids)))
         await db.commit()
         if result.rowcount:
             log.info("trial sweep: deleted %d expired trial tenant(s)", result.rowcount)
+
+    for site in sites:
+        await cache.invalidate_site(site.subdomain, site.custom_domain)
 
 
 async def trial_sweep_loop() -> None:
