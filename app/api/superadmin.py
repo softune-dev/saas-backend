@@ -312,7 +312,14 @@ async def delete_tenant(tenant_id: uuid.UUID, admin: SuperAdminUser, db: DB) -> 
         await db.execute(select(Site).where(Site.tenant_id == tenant_id))
     ).scalars().all()
 
-    await db.delete(tenant)
+    # Raw SQL, not db.delete(tenant): Tenant.users is a relationship() with
+    # no passive_deletes, so the ORM tries to UPDATE users SET tenant_id =
+    # NULL before the DB's own ON DELETE CASCADE fires — users.tenant_id is
+    # NOT NULL, so that always raised an IntegrityError (a 500 the browser
+    # reports as a CORS failure, since the response never got that far).
+    # Same fix as this session's test-cleanup fixture hit earlier: trust
+    # the database's own cascade instead of the ORM's.
+    await db.execute(text("DELETE FROM tenants WHERE id = :id"), {"id": tenant_id})
     await db.commit()
 
     for site in sites:
