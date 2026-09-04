@@ -22,7 +22,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import bkash, cache, courier_crypto, crud, events, fraud, mailer, nagad, queue, recaptcha, sslcommerz
@@ -712,17 +712,52 @@ async def create_public_order(
     if payload.device_id:
         rules = site.fraud_rules or {}
         pending_lock_rule = rules.get("device_pending_lock") or {}
-        if pending_lock_rule.get("enabled"):
-            open_order = (
+        cooldown_rule = rules.get("device_cooldown") or {}
+        cooldown_minutes = cooldown_rule.get("value")
+        pending_enabled = bool(pending_lock_rule.get("enabled"))
+        cooldown_enabled = bool(cooldown_rule.get("enabled") and cooldown_minutes)
+
+        # ONE query covering both device rules, not two — each is a simple,
+        # cheap lookup on its own, but on a pooled connection the round trip
+        # itself dominates (measured ~700ms even for a trivial query), so the
+        # win is in the number of trips, not the per-query cost. Fetches the
+        # small set of rows either condition could match, then decides which
+        # rule (if either) actually fired in Python.
+        window_start = (
+            datetime.now(timezone.utc) - timedelta(minutes=int(cooldown_minutes))
+            if cooldown_enabled else None
+        )
+        if pending_enabled or cooldown_enabled:
+            conditions = []
+            if pending_enabled:
+                conditions.append(Order.status.in_(("pending", "paid")))
+            if cooldown_enabled:
+                conditions.append(
+                    and_(
+                        Order.created_at >= window_start,
+                        or_(Order.status == "cancelled", Order.fraud_status == "confirmed_fraud"),
+                    )
+                )
+            candidates = (
                 await db.execute(
-                    select(Order.id).where(
+                    select(Order.status, Order.fraud_status, Order.created_at).where(
                         Order.site_id == site.id,
                         Order.device_id == payload.device_id,
-                        Order.status.in_(("pending", "paid")),
-                    ).limit(1)
+                        or_(*conditions),
+                    ).limit(5)
                 )
-            ).scalar_one_or_none()
-            if open_order is not None:
+            ).all()
+
+            open_order = pending_enabled and any(
+                row.status in ("pending", "paid") for row in candidates
+            )
+            recent_bad_order = cooldown_enabled and any(
+                row.created_at >= window_start
+                and (row.status == "cancelled" or row.fraud_status == "confirmed_fraud")
+                for row in candidates
+            )
+
+            if open_order:
                 await queue.publish(
                     queue.JOB_SEND_ORDER_NOTIFICATIONS,
                     {
@@ -740,22 +775,7 @@ async def create_public_order(
                     status.HTTP_403_FORBIDDEN,
                     "You already have an order in progress with this store.",
                 )
-
-        cooldown_rule = rules.get("device_cooldown") or {}
-        cooldown_minutes = cooldown_rule.get("value")
-        if cooldown_rule.get("enabled") and cooldown_minutes:
-            window_start = datetime.now(timezone.utc) - timedelta(minutes=int(cooldown_minutes))
-            recent_bad_order = (
-                await db.execute(
-                    select(Order.id).where(
-                        Order.site_id == site.id,
-                        Order.device_id == payload.device_id,
-                        Order.created_at >= window_start,
-                        or_(Order.status == "cancelled", Order.fraud_status == "confirmed_fraud"),
-                    ).limit(1)
-                )
-            ).scalar_one_or_none()
-            if recent_bad_order is not None:
+            if recent_bad_order:
                 await queue.publish(
                     queue.JOB_SEND_ORDER_NOTIFICATIONS,
                     {
@@ -890,23 +910,32 @@ async def create_public_order(
     is_first_order = True
     prior_orders_in_window = 0
     if customer_record is not None:
-        is_first_order = (
-            await db.execute(
-                select(Order.id).where(Order.customer_id == customer_record.id).limit(1)
-            )
-        ).scalar_one_or_none() is None
+        # ONE query for both the "any prior order at all" check and the
+        # burst-window count — same round-trip-count reasoning as the device
+        # rules above. A single conditional aggregate gets both numbers.
         burst_rule = (site.fraud_rules or {}).get("flag_burst_orders") or {}
         window_minutes = burst_rule.get("value")
-        if burst_rule.get("enabled") and window_minutes:
-            window_start = datetime.now(timezone.utc) - timedelta(minutes=int(window_minutes))
-            prior_orders_in_window = (
+        use_window = bool(burst_rule.get("enabled") and window_minutes)
+        window_start = (
+            datetime.now(timezone.utc) - timedelta(minutes=int(window_minutes))
+            if use_window else None
+        )
+        if use_window:
+            total_prior, prior_orders_in_window = (
                 await db.execute(
-                    select(func.count()).select_from(Order).where(
-                        Order.customer_id == customer_record.id,
-                        Order.created_at >= window_start,
-                    )
+                    select(
+                        func.count(Order.id),
+                        func.count(Order.id).filter(Order.created_at >= window_start),
+                    ).where(Order.customer_id == customer_record.id)
+                )
+            ).one()
+        else:
+            total_prior = (
+                await db.execute(
+                    select(func.count(Order.id)).where(Order.customer_id == customer_record.id)
                 )
             ).scalar_one()
+        is_first_order = total_prior == 0
     fraud_status, fraud_reason = fraud.evaluate_soft_flags(
         is_first_order=is_first_order,
         total_cents=subtotal + shipping,
