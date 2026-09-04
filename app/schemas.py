@@ -749,6 +749,10 @@ class OrderOut(ORMModel):
     fraud_status: str
     fraud_reason: str | None
     ip_address: str | None
+    courier_provider: str | None
+    courier_consignment_id: str | None
+    courier_tracking_code: str | None
+    delivery_status: str | None
     created_at: datetime
 
     @field_validator("ip_address", mode="before")
@@ -845,6 +849,20 @@ class CourierConnectionOut(ORMModel):
     last_verified_at: datetime | None
     created_at: datetime
     updated_at: datetime
+    # Shown to the merchant once, then re-shown every time they view this
+    # connection — see migrations/058's comment for why re-displaying this
+    # (unlike api_key/secret_key) is safe. None for providers that don't
+    # support a delivery-status webhook yet.
+    webhook_secret: str | None = None
+
+    @computed_field
+    @property
+    def webhook_url(self) -> str | None:
+        if self.webhook_secret is None:
+            return None
+        from app.config import settings
+
+        return f"{settings.api_base_url}/public/webhooks/{self.provider}/{self.site_id}"
 
 
 # =============================================================================

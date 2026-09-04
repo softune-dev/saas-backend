@@ -12,9 +12,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import cache, crud, media, products
+from app import cache, courier_crypto, crud, media, products, steadfast
 from app.db import get_db
-from app.models import Category, Inquiry, Order, OrderItem, Product, Site, Tenant
+from app.models import Category, CourierConnection, Inquiry, Order, OrderItem, Product, Site, Tenant
 from app.schemas import (
     CategoryCreate,
     CategoryOut,
@@ -495,6 +495,80 @@ async def update_order(
     await _owned_site(db, user.tenant_id, site_id)
     order = await crud.get_scoped(db, Order, user.tenant_id, order_id)
     crud.apply_updates(order, payload.model_dump(exclude_unset=True))
+    order = await crud.save(db, order)
+    await cache.invalidate_dashboard(str(site_id))
+    return order
+
+
+@router.post("/sites/{site_id}/orders/{order_id}/courier/book", response_model=OrderOut)
+async def book_order_courier(
+    site_id: uuid.UUID, order_id: uuid.UUID, user: CurrentUser, db: DB
+) -> Order:
+    """Books this order with the site's connected Steadfast account and
+    records the resulting consignment on the order.
+
+    Only Steadfast has a real booking flow today (Pathao/RedX/eCourier stay
+    connect-only, same as their landing-page copy already says) — see
+    app/steadfast.py's create_consignment. Delivery status then updates
+    itself via the webhook (see app/api/public.py's steadfast_webhook) as
+    Steadfast's own system moves the parcel; this endpoint only ever sets it
+    to "in_review", the state a freshly booked parcel always starts in.
+    """
+    await _owned_site(db, user.tenant_id, site_id)
+    order = await crud.get_scoped(db, Order, user.tenant_id, order_id)
+    if order.site_id != site_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
+    if order.courier_consignment_id is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "This order is already booked with a courier.")
+
+    connections, _ = await crud.list_scoped(
+        db, CourierConnection, user.tenant_id,
+        filters=[
+            CourierConnection.site_id == site_id,
+            CourierConnection.provider == "steadfast",
+        ],
+        limit=1,
+    )
+    connection = connections[0] if connections else None
+    if connection is None or connection.status != "connected":
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Connect a working Steadfast account in Couriers before booking.",
+        )
+
+    customer = order.customer or {}
+    name = " ".join(
+        str(customer.get(k, "")).strip() for k in ("first_name", "last_name")
+    ).strip() or "Customer"
+    phone = crud.extract_customer_phone(customer)
+    if not phone:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "This order has no phone number to book a courier with."
+        )
+    address_parts = [
+        str(customer.get(k, "")).strip()
+        for k in ("address", "city")
+        if str(customer.get(k, "")).strip()
+    ]
+    address = ", ".join(address_parts) or "No address provided"
+
+    result, error = await steadfast.create_consignment(
+        api_key=courier_crypto.decrypt(connection.api_key_encrypted),
+        secret_key=courier_crypto.decrypt(connection.secret_key_encrypted),
+        invoice=order.order_number,
+        recipient_name=name,
+        recipient_phone=phone,
+        recipient_address=address,
+        cod_amount_cents=order.total_cents,
+        base_url=connection.base_url,
+    )
+    if error:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, error)
+
+    order.courier_provider = "steadfast"
+    order.courier_consignment_id = result["consignment_id"]
+    order.courier_tracking_code = result["tracking_code"]
+    order.delivery_status = result["status"]
     order = await crud.save(db, order)
     await cache.invalidate_dashboard(str(site_id))
     return order

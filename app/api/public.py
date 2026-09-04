@@ -25,12 +25,13 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import bkash, cache, courier_crypto, crud, events, fraud, mailer, nagad, queue, recaptcha, sslcommerz
+from app import bkash, cache, courier_crypto, crud, events, fraud, mailer, nagad, queue, recaptcha, sslcommerz, steadfast
 from app.ratelimit import _client_ip, demo_access_rate_limit, rate_limit
 from app.config import settings
 from app.db import get_db
 from app.models import (
     Category,
+    CourierConnection,
     DemoAccessRequest,
     Event,
     FraudBlocklistEntry,
@@ -1360,3 +1361,67 @@ async def sitemap(host: str, db: DB) -> dict:
             if not page["seo"]["noindex"]
         ]
     }
+
+
+# =============================================================================
+#  Courier delivery-status webhooks
+# =============================================================================
+# Steadfast calls this on ITS OWN schedule as a booked parcel moves — see
+# app/steadfast.py's module docstring and CourierConnectionOut.webhook_url
+# (app/schemas.py), which is what a merchant pastes into Steadfast's own
+# panel alongside the Bearer secret generated at connect time
+# (app/api/courier.py's connect_steadfast). Unauthenticated by session (no
+# merchant is present for this call) — authenticated instead by that
+# per-connection secret, checked here.
+
+
+@router.post("/webhooks/steadfast/{site_id}")
+async def steadfast_webhook(site_id: uuid.UUID, request: Request, db: DB) -> dict:
+    auth = request.headers.get("authorization", "")
+    token = auth.removeprefix("Bearer ").strip()
+    if not token:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing Bearer token")
+
+    connection = (
+        await db.execute(
+            select(CourierConnection).where(
+                CourierConnection.site_id == site_id,
+                CourierConnection.provider == "steadfast",
+            )
+        )
+    ).scalar_one_or_none()
+    # Same shape as an invalid API key elsewhere: tell the caller nothing
+    # more specific than "not authorized" — a 404 here would confirm which
+    # site_ids have a Steadfast connection at all.
+    if connection is None or connection.webhook_secret != token:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid webhook token")
+
+    body = await request.json()
+    consignment_id = str(body.get("consignment_id") or "")
+    invoice = body.get("invoice")
+    raw_status = str(body.get("status") or "")
+
+    order = None
+    if consignment_id:
+        order = (
+            await db.execute(
+                select(Order).where(
+                    Order.site_id == site_id, Order.courier_consignment_id == consignment_id
+                )
+            )
+        ).scalar_one_or_none()
+    if order is None and invoice:
+        order = (
+            await db.execute(
+                select(Order).where(Order.site_id == site_id, Order.order_number == invoice)
+            )
+        ).scalar_one_or_none()
+    if order is None:
+        # Not an error we can act on — Steadfast still expects 200, and
+        # retrying wouldn't change the outcome (no order to attach to).
+        return {"ok": False, "reason": "order not found"}
+
+    order.delivery_status = steadfast.STATUS_MAP.get(raw_status, raw_status)
+    await crud.save(db, order)
+    await cache.invalidate_dashboard(str(site_id))
+    return {"ok": True}

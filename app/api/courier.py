@@ -6,6 +6,7 @@ are reserved routes for a later wave, matching the frontend's "Coming soon"
 cards.
 """
 
+import secrets
 import uuid
 from datetime import UTC, datetime
 from typing import Annotated
@@ -77,6 +78,12 @@ async def connect_steadfast(
         api_key_hint=courier_crypto.mask(payload.api_key),
         base_url=payload.base_url,
         last_verified_at=datetime.now(UTC) if ok else None,
+        # Minted once here, never regenerated on reconnect — the merchant
+        # pastes this into Steadfast's own panel (portal.packzy.com ->
+        # Settings -> Webhook) alongside webhook_url from CourierConnectionOut.
+        # See migrations/058's comment for why this isn't Fernet-encrypted
+        # like the two credential columns above it.
+        webhook_secret=secrets.token_urlsafe(32),
     )
     connection = await crud.save(db, connection)
 

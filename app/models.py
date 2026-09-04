@@ -459,6 +459,17 @@ class Order(Base, TimestampMixin):
     # for the address. Null for POS orders and orders placed before this
     # shipped, same as device_id above.
     ip_address: Mapped[str | None] = mapped_column(INET, nullable=True)
+    # Courier booking + delivery outcome (migrations/058) — set once a
+    # merchant books this order with a connected courier (app/steadfast.py's
+    # create_consignment) and updated by that courier's webhook
+    # (app/api/public.py's steadfast_webhook) as the parcel moves. All null
+    # until booked. courier_consignment_id is the courier's own opaque id for
+    # the shipment, indexed separately (see migrations/058) since the webhook
+    # looks an order up by this alone.
+    courier_provider: Mapped[str | None] = mapped_column(Text, nullable=True)
+    courier_consignment_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    courier_tracking_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    delivery_status: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # lazy="selectin": loads all items for all orders in ONE extra query rather
     # than one query per order (the classic N+1 problem). For a list of 50
@@ -551,6 +562,12 @@ class CourierConnection(Base, TimestampMixin):
     last_verified_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Bearer token the courier's own delivery-status webhook must present
+    # (migrations/058) — generated once at connect time, shown to the
+    # merchant so they can paste it into the courier's panel alongside the
+    # webhook URL. Not Fernet-encrypted like the columns above; see that
+    # migration's comment for why this one is lower-stakes.
+    webhook_secret: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class PaymentConnection(Base, TimestampMixin):
