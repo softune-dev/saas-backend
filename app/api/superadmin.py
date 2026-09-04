@@ -50,6 +50,7 @@ from app.schemas import (
     Page,
     SuperAdminAccountCreateIn,
     SuperAdminDemoAccessOut,
+    SuperAdminSiteOut,
     SuperAdminStatsOut,
     SuperAdminTenantOut,
     SuperAdminTenantUpdate,
@@ -121,6 +122,36 @@ async def get_stats(admin: SuperAdminUser, db: DB) -> dict:
 # =============================================================================
 
 
+async def _sites_for_tenants(
+    db: AsyncSession, tenant_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, list[SuperAdminSiteOut]]:
+    """Real subdomain/custom_domain per site, batched across a whole page of
+    tenants/users in one query — same N+1-avoidance shape as
+    _tenant_aggregates below. This is the actual fix for "we can't see a
+    tenant's real domain without a DB query": template_key alone (the
+    existing aggregate) answers "which theme," not "which URL."
+    """
+    out: dict[uuid.UUID, list[SuperAdminSiteOut]] = {tid: [] for tid in tenant_ids}
+    if not tenant_ids:
+        return out
+    rows = (
+        await db.execute(
+            select(Site, Template.key)
+            .outerjoin(Template, Site.template_id == Template.id)
+            .where(Site.tenant_id.in_(tenant_ids))
+            .order_by(Site.created_at)
+        )
+    ).all()
+    for site, template_key in rows:
+        out[site.tenant_id].append(
+            SuperAdminSiteOut(
+                id=site.id, subdomain=site.subdomain, custom_domain=site.custom_domain,
+                status=site.status, template_key=template_key,
+            )
+        )
+    return out
+
+
 async def _tenant_aggregates(db: AsyncSession, tenant_ids: list[uuid.UUID]) -> dict[uuid.UUID, dict]:
     """One grouped COUNT per table, filtered to just this page's tenant ids,
     instead of a query per tenant per table (N+1) — for 50 tenants x 7
@@ -188,12 +219,13 @@ async def _tenant_aggregates(db: AsyncSession, tenant_ids: list[uuid.UUID]) -> d
     return out
 
 
-def _tenant_out(tenant: Tenant, aggregates: dict) -> dict:
+def _tenant_out(tenant: Tenant, aggregates: dict, sites: list[SuperAdminSiteOut]) -> dict:
     return {
         "id": tenant.id, "slug": tenant.slug, "name": tenant.name, "plan": tenant.plan,
         "status": tenant.status, "created_at": tenant.created_at, "business": tenant.business,
         "trial_expires_at": tenant.trial_expires_at,
         **aggregates,
+        "sites": sites,
     }
 
 
@@ -216,8 +248,10 @@ async def list_tenants(
             .limit(limit).offset(offset)
         )
     ).scalars().all()
-    aggregates = await _tenant_aggregates(db, [t.id for t in rows])
-    items = [_tenant_out(t, aggregates[t.id]) for t in rows]
+    tenant_ids = [t.id for t in rows]
+    aggregates = await _tenant_aggregates(db, tenant_ids)
+    sites = await _sites_for_tenants(db, tenant_ids)
+    items = [_tenant_out(t, aggregates[t.id], sites[t.id]) for t in rows]
     return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
@@ -227,7 +261,8 @@ async def get_tenant(tenant_id: uuid.UUID, admin: SuperAdminUser, db: DB) -> dic
     if tenant is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Tenant not found")
     aggregates = (await _tenant_aggregates(db, [tenant.id]))[tenant.id]
-    return _tenant_out(tenant, aggregates)
+    sites = (await _sites_for_tenants(db, [tenant.id]))[tenant.id]
+    return _tenant_out(tenant, aggregates, sites)
 
 
 @router.post(
@@ -497,12 +532,13 @@ async def list_users(
             .limit(limit).offset(offset)
         )
     ).all()
+    sites = await _sites_for_tenants(db, [u.tenant_id for u, _ in rows])
     items = [
         SuperAdminUserOut(
             id=u.id, tenant_id=u.tenant_id, tenant_name=tenant_name, email=u.email,
-            full_name=u.full_name, role=u.role, is_active=u.is_active,
+            full_name=u.full_name, phone=u.phone, role=u.role, is_active=u.is_active,
             is_superadmin=u.is_superadmin, last_login_at=u.last_login_at,
-            created_at=u.created_at,
+            created_at=u.created_at, sites=sites[u.tenant_id],
         )
         for u, tenant_name in rows
     ]
@@ -531,11 +567,12 @@ async def create_user(payload: SuperAdminUserCreateIn, admin: SuperAdminUser, db
         role=payload.role,
     )
     user = await crud.save(db, user)
+    sites = (await _sites_for_tenants(db, [user.tenant_id]))[user.tenant_id]
     return SuperAdminUserOut(
         id=user.id, tenant_id=user.tenant_id, tenant_name=tenant.name, email=user.email,
-        full_name=user.full_name, role=user.role, is_active=user.is_active,
+        full_name=user.full_name, phone=user.phone, role=user.role, is_active=user.is_active,
         is_superadmin=user.is_superadmin, last_login_at=user.last_login_at,
-        created_at=user.created_at,
+        created_at=user.created_at, sites=sites,
     )
 
 
@@ -565,11 +602,12 @@ async def update_user(
     # reasoning as /auth/change-password.
     await revoke_all_user_tokens(user.id)
 
+    sites = (await _sites_for_tenants(db, [user.tenant_id]))[user.tenant_id]
     return SuperAdminUserOut(
         id=user.id, tenant_id=user.tenant_id, tenant_name=tenant_name, email=user.email,
-        full_name=user.full_name, role=user.role, is_active=user.is_active,
+        full_name=user.full_name, phone=user.phone, role=user.role, is_active=user.is_active,
         is_superadmin=user.is_superadmin, last_login_at=user.last_login_at,
-        created_at=user.created_at,
+        created_at=user.created_at, sites=sites,
     )
 
 

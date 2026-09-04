@@ -958,6 +958,19 @@ class SuperAdminStatsOut(BaseModel):
     active_trials: int
 
 
+class SuperAdminSiteOut(ORMModel):
+    """One row per storefront a tenant owns — real subdomain/custom_domain,
+    not guessed from the tenant slug. A Business-plan tenant can have up to
+    3, so both SuperAdminTenantOut and SuperAdminUserOut carry a list, never
+    a single "the" site."""
+
+    id: uuid.UUID
+    subdomain: str
+    custom_domain: str | None
+    status: str
+    template_key: str | None
+
+
 class SuperAdminTenantOut(ORMModel):
     id: uuid.UUID
     slug: str
@@ -989,6 +1002,10 @@ class SuperAdminTenantOut(ORMModel):
     # Site.template_id, not a duplicate Tenant-level column (that would be
     # a second source of truth for something a real FK already answers).
     template_key: str | None
+    # Real subdomain/custom_domain per site — see SuperAdminSiteOut. This is
+    # the actual answer to "what's their live URL," which template_key alone
+    # can't tell an operator.
+    sites: list[SuperAdminSiteOut] = []
 
 
 class SuperAdminUserOut(ORMModel):
@@ -999,11 +1016,20 @@ class SuperAdminUserOut(ORMModel):
     tenant_name: str
     email: str
     full_name: str | None
+    # Real column on User (app/models.py) — was collected at signup/account
+    # settings but never surfaced here, so an operator had no way to reach a
+    # merchant by phone without a DB query.
+    phone: str | None
     role: str
     is_active: bool
     is_superadmin: bool
     last_login_at: datetime | None
     created_at: datetime
+    # Which storefront(s) this user's tenant actually runs — see
+    # SuperAdminTenantOut.sites' own comment. Duplicated onto the user here
+    # (not just the tenant) because an operator looking at a user is usually
+    # trying to answer "whose site is this," not "which tenant owns them."
+    sites: list[SuperAdminSiteOut] = []
 
 
 class SuperAdminAccountCreateIn(BaseModel):
