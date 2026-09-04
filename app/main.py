@@ -125,6 +125,92 @@ async def public_cors(request: Request, call_next):
 
 
 @app.middleware("http")
+async def ip_block(request: Request, call_next):
+    """Site-wide IP blocking — Settings -> Fraud Protection's IP blocklist
+    (app/api/fraud.py, dashboard/components/fraud/). Unlike the phone
+    blocklist (checked only at checkout submission), this blocks EVERY
+    /public/* request for a site, so a blocked visitor can't browse the
+    storefront at all, not just fail at checkout.
+
+    host is read from the URL PATH (/public/site/{host}/...), never the
+    Host header — the API is on its own domain, the storefront's own domain
+    only ever appears in the path here (see _find_published_site's identical
+    reasoning in app/api/public.py).
+
+    Sets its own CORS headers on a block response rather than relying on
+    public_cors to add them, so a blocked storefront gets a clean 403 its
+    own JS can actually read, not a CORS failure that just looks broken.
+
+    Fails OPEN on any Redis/DB error — same discipline as
+    app/ratelimit.py's rate_limit — a Redis blip must never take every
+    storefront down at once.
+    """
+    if not request.url.path.startswith("/public/"):
+        return await call_next(request)
+
+    parts = request.url.path.split("/")
+    # ["", "public", "site", "{host}", ...] — anything shorter isn't a
+    # /public/site/{host}/... request (e.g. /public/openapi.json, if any),
+    # so just let it through unchecked rather than guessing.
+    if len(parts) < 4 or parts[2] != "site" or not parts[3]:
+        return await call_next(request)
+    host = parts[3]
+
+    blocked_ip: str | None = None
+    try:
+        cached = await cache.get_json(cache.ip_block_key(host))
+        if cached is None:
+            from sqlalchemy import or_, select
+
+            from app.db import SessionLocal
+            from app.models import FraudIpBlocklistEntry, Site
+
+            async with SessionLocal() as session:
+                site_row = (
+                    await session.execute(
+                        select(Site.id).where(
+                            or_(Site.custom_domain == host, Site.subdomain == host.split(".")[0]),
+                            Site.status == "published",
+                        )
+                    )
+                ).scalar_one_or_none()
+                ips: list[str] = []
+                if site_row is not None:
+                    ips = (
+                        await session.execute(
+                            select(FraudIpBlocklistEntry.ip_address).where(
+                                FraudIpBlocklistEntry.site_id == site_row
+                            )
+                        )
+                    ).scalars().all()
+            cached = {"ips": [str(ip) for ip in ips]}
+            # Short TTL, deliberately shorter than the site-config cache — a
+            # merchant who just got attacked needs a freshly-added block to
+            # take effect fast, not wait out a longer TTL. Cached even when
+            # empty (the overwhelming default case) so a site with zero IP
+            # blocks doesn't hit Postgres on every single public request.
+            await cache.set_json(cache.ip_block_key(host), cached, ttl=60)
+
+        from app.ratelimit import _client_ip
+
+        request_ip = _client_ip(request)
+        if request_ip in set(cached.get("ips") or []):
+            blocked_ip = request_ip
+    except Exception as exc:  # noqa: BLE001 - fail open, never break a request
+        log.warning("ip_block check failed for host=%s: %s", host, exc)
+
+    if blocked_ip:
+        origin = request.headers.get("origin", "*")
+        return JSONResponse(
+            status_code=403,
+            content={"detail": "Access to this site is currently unavailable."},
+            headers={"Access-Control-Allow-Origin": origin, "Vary": "Origin"},
+        )
+
+    return await call_next(request)
+
+
+@app.middleware("http")
 async def timing_header(request: Request, call_next):
     """Add X-Response-Time-ms to every response.
 

@@ -29,7 +29,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import CITEXT, JSONB, UUID
+from sqlalchemy.dialects.postgresql import CITEXT, INET, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -441,6 +441,24 @@ class Order(Base, TimestampMixin):
     # merchant-entered walk-in sale, app/api/commerce.py) — see
     # migrations/038_order_channel.sql.
     channel: Mapped[str] = mapped_column(Text, default="storefront")
+    # Fraud-review metadata (migrations/056) — not order totals/line items,
+    # so touching these doesn't conflict with CLAUDE.md rule 8's immutable
+    # order history. device_id: client-generated token from the storefront's
+    # checkout (see templates/*/lib/device.ts), used for the pending-lock and
+    # cooldown checks in app/api/public.py — null for POS orders and for any
+    # order placed before this shipped.
+    device_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # clear | flagged | cleared | confirmed_fraud — see app/fraud.py's
+    # evaluate_soft_flags for what sets "flagged", and app/api/fraud.py's
+    # review endpoint for the merchant-driven transitions out of it.
+    fraud_status: Mapped[str] = mapped_column(Text, default="clear")
+    fraud_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Requesting IP at checkout (migrations/057) — lets a merchant actually
+    # discover which IP to add to the fraud IP blocklist from an order,
+    # instead of the blocklist being unusable without an external source
+    # for the address. Null for POS orders and orders placed before this
+    # shipped, same as device_id above.
+    ip_address: Mapped[str | None] = mapped_column(INET, nullable=True)
 
     # lazy="selectin": loads all items for all orders in ONE extra query rather
     # than one query per order (the classic N+1 problem). For a list of 50
@@ -634,6 +652,37 @@ class FraudBlocklistEntry(Base):
         UUID(as_uuid=True), ForeignKey("sites.id", ondelete="CASCADE")
     )
     phone: Mapped[str] = mapped_column(Text)
+    note: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = _created()
+
+
+class FraudIpBlocklistEntry(Base):
+    """A merchant-maintained IP blocklist — exact-match only (see
+    app/schemas.py's FraudIpBlocklistEntryCreate; CIDR ranges are
+    deliberately not supported in v1 to avoid a merchant fat-fingering a
+    whole ISP's shared/NAT pool into an unexplained outage).
+
+    Unlike the phone blocklist (checked only at checkout), this one is
+    enforced by app/main.py's ip_block middleware on EVERY /public/* request
+    for the site — blocks browsing entirely, not just order submission.
+
+    Base only, not TimestampMixin: entries are add/delete only, same as
+    FraudBlocklistEntry above.
+    """
+
+    __tablename__ = "fraud_ip_blocklist"
+    __table_args__ = (
+        UniqueConstraint("site_id", "ip_address", name="uq_fraud_ip_blocklist_site_ip"),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    site_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("sites.id", ondelete="CASCADE")
+    )
+    ip_address: Mapped[str] = mapped_column(INET)
     note: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = _created()
 

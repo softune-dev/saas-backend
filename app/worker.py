@@ -686,7 +686,7 @@ TRIAL_SWEEP_INTERVAL_SECONDS = 60 * 60  # hourly
 
 
 async def sweep_expired_trials() -> None:
-    from app import cache
+    from app import cache, vercel
 
     cutoff = datetime.now(UTC) - timedelta(days=settings.trial_grace_days)
     async with SessionLocal() as db:
@@ -718,6 +718,18 @@ async def sweep_expired_trials() -> None:
 
     for site in sites:
         await cache.invalidate_site(site.subdomain, site.custom_domain)
+        # Same reasoning as app/api/superadmin.py::delete_tenant's identical
+        # fix — without this, an expired trial's subdomain stays attached
+        # to its template's Vercel project forever, orphaned domains a
+        # later tenant reusing the same subdomain (nothing in the DB stops
+        # that) can collide with if they pick a different template.
+        project_id = site.template.vercel_project_id if site.template else None
+        if project_id and site.template.framework == "nextjs":
+            await vercel.remove_domain_from_project(
+                f"{site.subdomain}.{settings.site_base_domain}", project_id
+            )
+            if site.custom_domain:
+                await vercel.remove_domain_from_project(site.custom_domain, project_id)
 
 
 async def trial_sweep_loop() -> None:

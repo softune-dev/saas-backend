@@ -26,7 +26,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import cache, crud, invoices as invoices_module, mailer, queue
+from app import cache, crud, invoices as invoices_module, mailer, queue, vercel
+from app.config import settings
 from app.db import get_db
 from app.models import (
     Category,
@@ -57,6 +58,9 @@ from app.schemas import (
     SuperAdminUserCreateIn,
     SuperAdminUserOut,
     SuperAdminUserUpdate,
+    SuperAdminVercelDetachIn,
+    SuperAdminVercelDetachOut,
+    SuperAdminVercelOrphansOut,
 )
 from app.security import SuperAdminUser, hash_password, revoke_all_user_tokens
 
@@ -324,6 +328,21 @@ async def delete_tenant(tenant_id: uuid.UUID, admin: SuperAdminUser, db: DB) -> 
 
     for site in sites:
         await cache.invalidate_site(site.subdomain, site.custom_domain)
+        # Without this, the subdomain stays attached to this template's
+        # Vercel project forever — a new tenant that later claims the same
+        # now-free subdomain (nothing in the DB stops that) can fail to get
+        # a working URL if they pick a DIFFERENT template than this deleted
+        # tenant used, since Vercel won't let the same domain attach to two
+        # projects at once. See app/vercel.py's remove_domain_from_project
+        # (idempotent — a domain that was never attached, or already
+        # detached, still reports success).
+        project_id = site.template.vercel_project_id if site.template else None
+        if project_id and site.template.framework == "nextjs":
+            await vercel.remove_domain_from_project(
+                f"{site.subdomain}.{settings.site_base_domain}", project_id
+            )
+            if site.custom_domain:
+                await vercel.remove_domain_from_project(site.custom_domain, project_id)
 
 
 # =============================================================================
@@ -601,3 +620,46 @@ async def send_demo_marketing_email(request_id: uuid.UUID, admin: SuperAdminUser
         queue.JOB_SEND_EMAIL,
         {"to": row.email, "subject": subject, "html_body": html_body, "text_body": text_body},
     )
+
+
+# =============================================================================
+#  Vercel domain cleanup — see app/vercel.py's orphaned_domains_report and
+#  scripts/cleanup_orphaned_vercel_domains.py (the CLI equivalent of this
+#  same page, sharing the exact same matching logic).
+# =============================================================================
+
+
+@router.get("/vercel/orphaned-domains", response_model=SuperAdminVercelOrphansOut)
+async def list_orphaned_vercel_domains(admin: SuperAdminUser, db: DB) -> dict:
+    """Read-only report — never detaches anything. See vercel.py's own
+    docstring for why the wildcard (`*.SITE_BASE_DOMAIN`) and any custom
+    domain always land in `review`, never `orphaned`."""
+    templates = (
+        await db.execute(
+            select(Template).where(Template.is_active, Template.framework == "nextjs")
+        )
+    ).scalars().all()
+
+    reports = {}
+    for template in templates:
+        if not template.vercel_project_id:
+            continue
+        report = await vercel.orphaned_domains_report(db, template)
+        reports[template.key] = {"project_id": template.vercel_project_id, **report}
+
+    return {"templates": reports}
+
+
+@router.post("/vercel/orphaned-domains/detach", response_model=SuperAdminVercelDetachOut)
+async def detach_orphaned_vercel_domains(
+    payload: SuperAdminVercelDetachIn, admin: SuperAdminUser, db: DB
+) -> dict:
+    """Detaches EXACTLY the (domain, project_id) pairs the client sends —
+    does not re-run orphaned_domains_report itself and detach whatever it
+    finds now, so a page the admin loaded a minute ago (and reviewed
+    before checking boxes) can't drift from what actually gets detached."""
+    results = []
+    for item in payload.domains:
+        ok = await vercel.remove_domain_from_project(item.domain, item.project_id)
+        results.append({"domain": item.domain, "success": ok})
+    return {"results": results}

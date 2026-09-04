@@ -20,10 +20,15 @@ retried.
 """
 
 import logging
+from typing import TYPE_CHECKING
 
 import httpx
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+
+if TYPE_CHECKING:
+    from app.models import Template
 
 log = logging.getLogger(__name__)
 
@@ -118,6 +123,94 @@ async def remove_domain_from_project(domain: str, project_id: str) -> bool:
     except httpx.HTTPError as exc:
         log.warning("vercel: request failed detaching %s: %s", domain, exc)
         return False
+
+
+async def list_project_domains(project_id: str) -> list[str]:
+    """Every domain currently attached to a Vercel project, paginated.
+
+    Used by the superadmin orphaned-domains cleanup (both the one-off
+    scripts/cleanup_orphaned_vercel_domains.py script and the dashboard's
+    Superadmin -> Vercel Cleanup page) to find domains Vercel still has
+    attached with no matching live Site.
+    """
+    if not settings.vercel_api_token:
+        log.info("vercel: skipping domain list for project %s (token not configured)", project_id)
+        return []
+
+    params = {"teamId": settings.vercel_team_id} if settings.vercel_team_id else {}
+    headers = {"Authorization": f"Bearer {settings.vercel_api_token}"}
+    domains: list[str] = []
+    next_cursor: str | None = None
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as http:
+            while True:
+                query = dict(params)
+                if next_cursor:
+                    query["until"] = next_cursor
+                resp = await http.get(
+                    f"{_API_BASE}/v9/projects/{project_id}/domains",
+                    params=query,
+                    headers=headers,
+                )
+                if resp.status_code != 200:
+                    log.warning(
+                        "vercel: failed to list domains for project %s: %s",
+                        project_id, resp.status_code,
+                    )
+                    return domains
+                body = resp.json()
+                domains.extend(d["name"] for d in body.get("domains", []))
+                next_cursor = (body.get("pagination") or {}).get("next")
+                if not next_cursor:
+                    break
+    except httpx.HTTPError as exc:
+        log.warning("vercel: request failed listing domains for %s: %s", project_id, exc)
+
+    return domains
+
+
+async def orphaned_domains_report(db: AsyncSession, template: "Template") -> dict:
+    """For one Template with a vercel_project_id: which of its attached
+    `{subdomain}.SITE_BASE_DOMAIN` hosts have no matching live Site
+    (orphaned — safe to detach, see app/api/superadmin.py::delete_tenant
+    and app/worker.py::sweep_expired_trials, the two paths that leave
+    these behind), versus everything else attached (custom domains,
+    Vercel's own default *.vercel.app domain, and critically the real
+    wildcard `*.SITE_BASE_DOMAIN` itself) — the "review" list, which this
+    function NEVER classifies as orphaned no matter what.
+
+    THE WILDCARD IS THE ONE THING THIS MUST NEVER AUTO-FLAG: `*.SITE_BASE_
+    DOMAIN` is what makes every subdomain resolve at all (see this
+    module's docstring) — it ends with the same suffix a real site's host
+    does, so a naive `endswith(suffix)` check misclassifies it as an
+    orphan (this exact bug shipped once, caught only because the cleanup
+    script defaulted to a dry run first). Excluded explicitly here, in the
+    one place this logic lives, rather than being re-derived (and
+    re-risked) by every caller.
+
+    Single source of truth for both scripts/cleanup_orphaned_vercel_domains.py
+    and the superadmin dashboard's Vercel Cleanup page — do not duplicate
+    this matching logic anywhere else.
+    """
+    from sqlalchemy import select
+
+    from app.models import Site
+
+    if not template.vercel_project_id:
+        return {"orphaned": [], "review": []}
+
+    attached = await list_project_domains(template.vercel_project_id)
+    suffix = f".{settings.site_base_domain}"
+    managed = {d for d in attached if d.endswith(suffix) and not d.startswith("*.")}
+    review = [d for d in attached if not d.endswith(suffix) or d.startswith("*.")]
+
+    live_subdomains = (
+        await db.execute(select(Site.subdomain).where(Site.template_id == template.id))
+    ).scalars().all()
+    live_hosts = {f"{s}{suffix}" for s in live_subdomains}
+
+    return {"orphaned": sorted(managed - live_hosts), "review": sorted(review)}
 
 
 async def check_domain_connected(domain: str, project_id: str) -> bool | None:

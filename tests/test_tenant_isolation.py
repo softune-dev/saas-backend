@@ -270,3 +270,48 @@ async def test_refresh_token_cannot_be_used_as_access_token(client, account: Acc
 )
 async def test_protected_paths_require_auth(client, path):
     assert (await client.get(path)).status_code == 401
+
+
+async def test_other_tenant_cannot_see_ip_blocklist(two_accounts, template_id):
+    a, b = two_accounts
+    site = await _make_site(a, template_id)
+
+    created = await a.post(
+        f"/sites/{site['id']}/fraud/ip-blocklist", json={"ip_address": "203.0.113.9"}
+    )
+    assert created.status_code == 201
+    entry_id = created.json()["id"]
+
+    assert (await b.get(f"/sites/{site['id']}/fraud/ip-blocklist")).status_code == 404
+    assert (
+        await b.delete(f"/sites/{site['id']}/fraud/ip-blocklist/{entry_id}")
+    ).status_code == 404
+
+
+async def test_other_tenant_cannot_review_suspicious_order(two_accounts, template_id):
+    a, b = two_accounts
+    site = await _make_site(a, template_id)
+
+    product = (
+        await a.post(
+            f"/sites/{site['id']}/products",
+            json={"name": "Thing", "price_cents": 500, "stock": 10},
+        )
+    ).json()
+    order = (
+        await a.post(
+            f"/sites/{site['id']}/orders",
+            json={
+                "customer": {"email": "buyer@example.test"},
+                "items": [{"product_id": product["id"], "quantity": 1}],
+            },
+        )
+    ).json()
+
+    assert (await b.get(f"/sites/{site['id']}/fraud/suspicious-orders")).status_code == 404
+    assert (
+        await b.post(
+            f"/sites/{site['id']}/fraud/suspicious-orders/{order['id']}/review",
+            json={"decision": "cleared"},
+        )
+    ).status_code == 404

@@ -177,6 +177,7 @@ def _explain(exc: IntegrityError) -> str:
         "uq_courier_connections_site_provider": "This site already has a connection for that courier. Disconnect it first.",
         "uq_payment_connections_site_provider": "This site already has a connection for that payment method. Disconnect it first.",
         "uq_fraud_blocklist_site_phone": "That phone number is already on the blocklist.",
+        "uq_fraud_ip_blocklist_site_ip": "That IP address is already blocked.",
         "uq_customers_site_phone": "A customer with that phone number already exists on this site.",
         "uq_push_subscriptions_endpoint": "This browser is already subscribed.",
     }

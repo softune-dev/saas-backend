@@ -58,6 +58,14 @@ def site_key(host: str) -> str:
     return f"site:{host.lower()}"
 
 
+def ip_block_key(host: str) -> str:
+    """Cache key for one site's IP blocklist, keyed by hostname — read by
+    app/main.py's ip_block middleware on every /public/* request. Short TTL
+    (see the middleware) so a merchant's freshly-added block takes effect
+    fast, not on the longer site-config TTL."""
+    return f"ipblock:{host.lower()}"
+
+
 async def get_json(key: str) -> dict | None:
     if settings.cache_ttl_seconds <= 0:
         return None
@@ -133,4 +141,17 @@ async def invalidate_site(subdomain: str, custom_domain: str | None = None) -> N
     keys = [site_key(f"{subdomain}.{settings.site_base_domain}"), site_key(subdomain)]
     if custom_domain:
         keys.append(site_key(custom_domain))
+    await drop(*keys)
+
+
+async def invalidate_ip_blocks(subdomain: str, custom_domain: str | None = None) -> None:
+    """Call after adding/removing a fraud_ip_blocklist entry — same
+    multi-hostname reasoning as invalidate_site above, dropping the
+    middleware's cached blocklist instead of the site-config cache."""
+    keys = [
+        ip_block_key(f"{subdomain}.{settings.site_base_domain}"),
+        ip_block_key(subdomain),
+    ]
+    if custom_domain:
+        keys.append(ip_block_key(custom_domain))
     await drop(*keys)

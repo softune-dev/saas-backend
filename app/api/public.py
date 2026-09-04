@@ -17,6 +17,7 @@ import json
 import logging
 import re
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -24,7 +25,7 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import bkash, cache, courier_crypto, crud, events, mailer, nagad, queue, recaptcha, sslcommerz
+from app import bkash, cache, courier_crypto, crud, events, fraud, mailer, nagad, queue, recaptcha, sslcommerz
 from app.ratelimit import _client_ip, demo_access_rate_limit, rate_limit
 from app.config import settings
 from app.db import get_db
@@ -644,9 +645,10 @@ async def create_public_order(
     to stop a script placing hundreds of fake orders with no OTP gate.
     Also reCAPTCHA-gated — see app/recaptcha.py.
     """
+    client_ip = _client_ip(request)
     recaptcha.enforce(
         await recaptcha.verify(
-            payload.recaptcha_token, "checkout", _client_ip(request), payload.recaptcha_v2_token
+            payload.recaptcha_token, "checkout", client_ip, payload.recaptcha_v2_token
         )
     )
     site = await _find_published_site(host, db)
@@ -699,6 +701,78 @@ async def create_public_order(
                 raise HTTPException(
                     status.HTTP_403_FORBIDDEN,
                     "We couldn't process this order. Please contact us directly to complete your purchase.",
+                )
+
+    # Device pending-lock + cooldown — the small-business "Dukan-style" hard
+    # blocks (see app/fraud.py's module docstring). Both need payload.device_id,
+    # which is optional/backward-compatible (older storefront builds omit it,
+    # in which case these simply no-op — see PublicOrderCreate.device_id).
+    # Checked before product/stock lookups so a reject never speculatively
+    # decrements stock.
+    if payload.device_id:
+        rules = site.fraud_rules or {}
+        pending_lock_rule = rules.get("device_pending_lock") or {}
+        if pending_lock_rule.get("enabled"):
+            open_order = (
+                await db.execute(
+                    select(Order.id).where(
+                        Order.site_id == site.id,
+                        Order.device_id == payload.device_id,
+                        Order.status.in_(("pending", "paid")),
+                    ).limit(1)
+                )
+            ).scalar_one_or_none()
+            if open_order is not None:
+                await queue.publish(
+                    queue.JOB_SEND_ORDER_NOTIFICATIONS,
+                    {
+                        "tenant_id": str(site.tenant_id),
+                        "site_id": str(site.id),
+                        "type": "order_blocked",
+                        "title": "Blocked order attempt",
+                        "body": "A repeat checkout attempt was blocked — this device already "
+                        "has an order in progress.",
+                        "link": "/settings/fraud",
+                        "send_push": False,
+                    },
+                )
+                raise HTTPException(
+                    status.HTTP_403_FORBIDDEN,
+                    "You already have an order in progress with this store.",
+                )
+
+        cooldown_rule = rules.get("device_cooldown") or {}
+        cooldown_minutes = cooldown_rule.get("value")
+        if cooldown_rule.get("enabled") and cooldown_minutes:
+            window_start = datetime.now(timezone.utc) - timedelta(minutes=int(cooldown_minutes))
+            recent_bad_order = (
+                await db.execute(
+                    select(Order.id).where(
+                        Order.site_id == site.id,
+                        Order.device_id == payload.device_id,
+                        Order.created_at >= window_start,
+                        or_(Order.status == "cancelled", Order.fraud_status == "confirmed_fraud"),
+                    ).limit(1)
+                )
+            ).scalar_one_or_none()
+            if recent_bad_order is not None:
+                await queue.publish(
+                    queue.JOB_SEND_ORDER_NOTIFICATIONS,
+                    {
+                        "tenant_id": str(site.tenant_id),
+                        "site_id": str(site.id),
+                        "type": "order_blocked",
+                        "title": "Blocked order attempt",
+                        "body": "A repeat checkout attempt was blocked — this device is in a "
+                        "cooldown period after a cancelled or fraudulent order.",
+                        "link": "/settings/fraud",
+                        "send_push": False,
+                    },
+                )
+                raise HTTPException(
+                    status.HTTP_403_FORBIDDEN,
+                    "This store can't accept a new order from you right now. "
+                    "Please contact us directly to complete your purchase.",
                 )
 
     ids = [item.product_id for item in payload.items]
@@ -803,6 +877,43 @@ async def create_public_order(
         db, tenant_id=site.tenant_id, site_id=site.id, customer=payload.customer
     )
 
+    # _client_ip falls back to the literal string "unknown" when
+    # request.client is absent — not a valid `inet` value, so normalize
+    # (or drop to None) before it ever reaches the Order row.
+    order_ip = fraud.normalize_ip(client_ip)
+
+    # Soft-flag evaluation (hold_first_high_value / flag_burst_orders) — the
+    # order still gets created either way; a flagged one just lands in the
+    # dashboard's Suspicious Orders tab for manual review. See app/fraud.py.
+    # customer_id, not raw phone: it's already deduped/normalized by
+    # get_or_create_customer above, and it's an indexed FK — no JSONB scan.
+    is_first_order = True
+    prior_orders_in_window = 0
+    if customer_record is not None:
+        is_first_order = (
+            await db.execute(
+                select(Order.id).where(Order.customer_id == customer_record.id).limit(1)
+            )
+        ).scalar_one_or_none() is None
+        burst_rule = (site.fraud_rules or {}).get("flag_burst_orders") or {}
+        window_minutes = burst_rule.get("value")
+        if burst_rule.get("enabled") and window_minutes:
+            window_start = datetime.now(timezone.utc) - timedelta(minutes=int(window_minutes))
+            prior_orders_in_window = (
+                await db.execute(
+                    select(func.count()).select_from(Order).where(
+                        Order.customer_id == customer_record.id,
+                        Order.created_at >= window_start,
+                    )
+                )
+            ).scalar_one()
+    fraud_status, fraud_reason = fraud.evaluate_soft_flags(
+        is_first_order=is_first_order,
+        total_cents=subtotal + shipping,
+        prior_orders_in_window=prior_orders_in_window,
+        rules=site.fraud_rules or {},
+    )
+
     order = Order(
         site_id=site.id,
         tenant_id=site.tenant_id,
@@ -821,8 +932,27 @@ async def create_public_order(
             "transaction_id": payload.transaction_id,
         },
         items=items,
+        device_id=payload.device_id,
+        fraud_status=fraud_status,
+        fraud_reason=fraud_reason,
+        ip_address=order_ip,
     )
     order = await crud.save(db, order)
+    if fraud_status == "flagged":
+        await queue.publish(
+            queue.JOB_SEND_ORDER_NOTIFICATIONS,
+            {
+                "tenant_id": str(site.tenant_id),
+                "site_id": str(site.id),
+                "type": "order_flagged",
+                "title": "Order flagged for review",
+                "body": f"Order {order.order_number} was flagged as suspicious "
+                f"({'high-value first order' if fraud_reason == 'high_value_first_order' else 'burst of orders'}) "
+                "— review it in Fraud Protection.",
+                "link": "/settings/fraud",
+                "send_push": False,
+            },
+        )
     # A real storefront checkout — the merchant's dashboard (analytics,
     # orders, products' stock counts, customers) must not show stale numbers
     # after this. See app/cache.py's module docstring for why this drops the
@@ -881,7 +1011,7 @@ async def create_public_order(
             "customer_email": payload.customer.get("email")
             if isinstance(payload.customer.get("email"), str)
             else None,
-            "client_ip": _client_ip(request),
+            "client_ip": client_ip,
             "user_agent": request.headers.get("user-agent"),
             "event_source_url": f"https://{host}/checkout",
         },

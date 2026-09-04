@@ -610,6 +610,13 @@ class PublicOrderCreate(BaseModel):
     # merchant has no other way to match a submitted payment to this order.
     transaction_id: str | None = Field(default=None, max_length=100)
     notes: str | None = Field(default=None, max_length=2000)
+    # Client-generated persistent token from the storefront's own
+    # localStorage (see templates/*/lib/device.ts's getOrCreateDeviceId) —
+    # NOT the analytics-only pageview session_id, a dedicated identity for
+    # fraud checks. Optional/backward-compatible: any storefront build that
+    # predates this field simply omits it, and the pending-lock/cooldown
+    # checks in app/api/public.py no-op when it's absent.
+    device_id: str | None = Field(default=None, max_length=200)
     # Blank when RECAPTCHA_SECRET_KEY isn't configured — see app/recaptcha.py.
     recaptcha_token: str = ""
     # Present only on a retry after a "please verify" challenge (v3 scored
@@ -738,7 +745,18 @@ class OrderOut(ORMModel):
     meta: dict
     items: list[OrderItemOut]
     channel: str
+    device_id: str | None
+    fraud_status: str
+    fraud_reason: str | None
+    ip_address: str | None
     created_at: datetime
+
+    @field_validator("ip_address", mode="before")
+    @classmethod
+    def _stringify_ip(cls, value: object) -> object:
+        # Same asyncpg inet -> ipaddress.IPv4Address/IPv6Address coercion as
+        # FraudIpBlocklistEntryOut — see that schema's identical validator.
+        return str(value) if value is not None else value
 
 
 # =============================================================================
@@ -1172,6 +1190,47 @@ class FraudBlocklistEntryOut(ORMModel):
     created_at: datetime
 
 
+class FraudIpBlocklistEntryCreate(BaseModel):
+    # Exact match only, v1 — no CIDR. Validated as a real IP so a merchant
+    # can't save an unparseable string the middleware would then silently
+    # never match.
+    ip_address: str = Field(min_length=3, max_length=45)
+    note: str = Field(default="", max_length=280)
+
+    @field_validator("ip_address")
+    @classmethod
+    def _valid_ip(cls, value: str) -> str:
+        import ipaddress
+
+        raw = value.strip()
+        if "/" in raw:
+            raise ValueError("CIDR ranges aren't supported — enter a single IP address.")
+        try:
+            ipaddress.ip_address(raw)
+        except ValueError as exc:
+            raise ValueError("Enter a valid IPv4 or IPv6 address.") from exc
+        return raw
+
+
+class FraudIpBlocklistEntryOut(ORMModel):
+    id: uuid.UUID
+    site_id: uuid.UUID
+    ip_address: str
+    note: str
+    created_at: datetime
+
+    @field_validator("ip_address", mode="before")
+    @classmethod
+    def _stringify_ip(cls, value: object) -> object:
+        # asyncpg maps Postgres inet to ipaddress.IPv4Address/IPv6Address,
+        # not str — coerce here rather than at every read site.
+        return str(value) if value is not None else value
+
+
+class FraudReviewIn(BaseModel):
+    decision: Literal["cleared", "confirmed_fraud"]
+
+
 # =============================================================================
 #  Notifications
 # =============================================================================
@@ -1282,3 +1341,43 @@ class SuperAdminTicketOut(ORMModel):
 
 class SuperAdminTicketUpdate(BaseModel):
     status: str | None = Field(default=None, max_length=40)
+
+
+# =============================================================================
+#  Superadmin — Vercel domain cleanup (app/vercel.py's orphaned_domains_report)
+# =============================================================================
+
+
+class SuperAdminVercelTemplateReport(BaseModel):
+    project_id: str
+    orphaned: list[str]
+    review: list[str]
+
+
+class SuperAdminVercelOrphansOut(BaseModel):
+    # Keyed by template key ("aurora", "bazaar") — a dict, not a list, since
+    # the dashboard renders one section per template and needs to look each
+    # one up directly.
+    templates: dict[str, SuperAdminVercelTemplateReport]
+
+
+class SuperAdminVercelDetachItem(BaseModel):
+    domain: str
+    project_id: str
+
+
+class SuperAdminVercelDetachIn(BaseModel):
+    # Explicit list, not "detach everything currently flagged" — the
+    # dashboard sends exactly what the admin checked, so a stale/changed
+    # server-side re-computation between page-load and click can never
+    # detach something the admin never actually saw and approved.
+    domains: list[SuperAdminVercelDetachItem] = Field(min_length=1, max_length=200)
+
+
+class SuperAdminVercelDetachResult(BaseModel):
+    domain: str
+    success: bool
+
+
+class SuperAdminVercelDetachOut(BaseModel):
+    results: list[SuperAdminVercelDetachResult]
