@@ -137,9 +137,21 @@ async def ip_block(request: Request, call_next):
     only ever appears in the path here (see _find_published_site's identical
     reasoning in app/api/public.py).
 
-    Sets its own CORS headers on a block response rather than relying on
-    public_cors to add them, so a blocked storefront gets a clean 403 its
-    own JS can actually read, not a CORS failure that just looks broken.
+    Blocked requests get an explicit, structured 403 (code "ip_blocked") —
+    merchant's own product choice: tell a blocked visitor plainly, with a
+    way to reach support, rather than disguising it as a generic 404. Sets
+    its own CORS headers on that response rather than relying on
+    public_cors to add them, so a blocked storefront gets a clean response
+    its own JS can actually read, not a CORS failure that just looks broken.
+
+    IMPORTANT — this only sees the real visitor IP for requests that
+    actually carry it. A server-rendered page's OWN data fetch (Next.js
+    Server Component calling this API from the storefront's own backend
+    process) does NOT automatically forward the browser's IP — the
+    storefront must explicitly thread it through as X-Forwarded-For on that
+    outbound call (see templates/*/middleware.ts + lib/get-site.ts) or a
+    blocked visitor can still load pages that render server-side, even
+    though direct client-side calls (checkout, etc.) are correctly blocked.
 
     Fails OPEN on any Redis/DB error — same discipline as
     app/ratelimit.py's rate_limit — a Redis blip must never take every
@@ -200,10 +212,22 @@ async def ip_block(request: Request, call_next):
         log.warning("ip_block check failed for host=%s: %s", host, exc)
 
     if blocked_ip:
+        # Explicit, structured signal — merchant's own choice: tell a
+        # blocked visitor plainly they're blocked, with a way to reach
+        # support, rather than disguising it as a generic 404. `code` is
+        # machine-readable, same convention as recaptcha's
+        # "recaptcha_challenge_required" (see app/recaptcha.py's enforce),
+        # so the storefront can detect this specific case and render a real
+        # branded page instead of a raw error string.
         origin = request.headers.get("origin", "*")
         return JSONResponse(
             status_code=403,
-            content={"detail": "Access to this site is currently unavailable."},
+            content={
+                "detail": {
+                    "code": "ip_blocked",
+                    "message": "Your IP address has been blocked by this store.",
+                }
+            },
             headers={"Access-Control-Allow-Origin": origin, "Vary": "Origin"},
         )
 

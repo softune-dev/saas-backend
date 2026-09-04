@@ -165,11 +165,15 @@ async def test_ip_block_middleware_blocks_browsing_not_just_checkout(account, si
     )
     assert add.status_code == 201
 
-    # Page load (not just checkout) — GET /public/site/{host} — must 403 too.
+    # Page load (not just checkout) — GET /public/site/{host} — must be
+    # blocked too, with the explicit structured "ip_blocked" signal the
+    # storefront renders a real branded page for (merchant's own choice —
+    # tell blocked visitors plainly rather than disguising it as a 404).
     resp = await account.client.get(
         f"/public/site/{host}", headers={"X-Forwarded-For": blocked_ip}
     )
     assert resp.status_code == 403
+    assert resp.json()["detail"]["code"] == "ip_blocked"
 
     # A different IP is unaffected.
     resp_ok = await account.client.get(
@@ -177,13 +181,14 @@ async def test_ip_block_middleware_blocks_browsing_not_just_checkout(account, si
     )
     assert resp_ok.status_code == 200
 
-    # Checkout from the blocked IP is also rejected.
+    # Checkout from the blocked IP is also rejected, same explicit signal.
     order_resp = await account.client.post(
         f"/public/site/{host}/orders",
         json=_order_payload("01733333333", product["id"]),
         headers={"X-Forwarded-For": blocked_ip},
     )
     assert order_resp.status_code == 403
+    assert order_resp.json()["detail"]["code"] == "ip_blocked"
 
     # Removing the block clears cache and restores access.
     entry_id = add.json()["id"]
