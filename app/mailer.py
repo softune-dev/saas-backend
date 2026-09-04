@@ -379,6 +379,57 @@ def welcome_email(recipient_name: str | None = None) -> tuple[str, str, str]:
     return subject, html_body, text_body
 
 
+def trial_ended_email(recipient_name: str | None = None, grace_days: int = 4) -> tuple[str, str, str]:
+    """Sent once when a trial's trial_expires_at passes — see
+    app/worker.py's notify_ended_trials sweep, the counterpart to
+    welcome_email above (start of the same lifecycle, not the account
+    deletion itself — that's still trial_grace_days later, per
+    sweep_expired_trials). Login is already blocked at this point
+    (app/api/auth.py's _check_tenant_access), so the whole point of this
+    email is telling them why, and that the store isn't gone yet."""
+    greeting = f"Hi {html.escape(recipient_name)}," if recipient_name else "Hi,"
+    greeting_text = f"Hi {recipient_name}," if recipient_name else "Hi,"
+    subject = "Your Softunebd trial has ended"
+    pricing_url = f"{SITE}/pricing"
+
+    body_html = f"""\
+<tr>
+  <td style="padding:28px 36px 8px 36px;">
+    <p style="margin:0 0 8px 0;font-size:14px;color:{INK};">{greeting}</p>
+    <h1 style="margin:0 0 10px 0;font-size:22px;line-height:1.3;font-weight:400;color:{INK};">Your trial has ended</h1>
+    <p style="margin:0 0 16px 0;font-size:15px;line-height:1.55;color:{MUTED};">
+      Your 3-day Softunebd trial is over, so the dashboard is locked for now. Your store,
+      products, and orders are all still there — nothing is deleted.
+    </p>
+    <p style="margin:0 0 24px 0;font-size:15px;line-height:1.55;color:{MUTED};">
+      Pick a plan and you're back in immediately. If we don't hear from you, your trial
+      data stays put for {grace_days} more day{"s" if grace_days != 1 else ""} before it's removed.
+    </p>
+    {_btn(pricing_url, "See plans and upgrade")}
+  </td>
+</tr>
+<tr>
+  <td style="padding:8px 36px 32px 36px;">
+    <p style="margin:0;font-size:13px;line-height:1.55;color:{MUTED};">
+      Not ready, or have a question first? Just reply to this email — a real person reads these.
+    </p>
+  </td>
+</tr>
+"""
+    html_body = _shell("Your Softunebd trial has ended — your store is still there", body_html)
+    text_body = (
+        f"{greeting_text}\n\n"
+        "Your 3-day Softunebd trial is over, so the dashboard is locked for now. "
+        "Your store, products, and orders are all still there — nothing is deleted.\n\n"
+        f"Pick a plan and you're back in immediately: {pricing_url}\n\n"
+        f"If we don't hear from you, your trial data stays put for {grace_days} more "
+        f"day{'s' if grace_days != 1 else ''} before it's removed.\n\n"
+        "Questions? Reply to this email.\n\n"
+        "Softunebd — softunebd.com"
+    )
+    return subject, html_body, text_body
+
+
 def _format_money(cents: int, currency: str) -> str:
     symbol = "৳" if currency == "BDT" else ""
     amount = f"{cents / 100:,.2f}"

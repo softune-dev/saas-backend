@@ -85,6 +85,13 @@ class Tenant(Base, TimestampMixin):
     trial_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Set once app/worker.py's notify_ended_trials sweep actually sends the
+    # trial-ended email (migrations/060) — guards against re-sending it on
+    # every hourly sweep tick for the same still-expired, not-yet-deleted
+    # trial.
+    trial_ended_notified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     users: Mapped[list["User"]] = relationship(back_populates="tenant")
 

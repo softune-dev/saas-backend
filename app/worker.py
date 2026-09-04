@@ -19,7 +19,7 @@ from datetime import UTC, datetime, timedelta
 
 import aio_pika
 import httpx
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 
 from app.config import settings
 from app.db import SessionLocal, engine
@@ -749,6 +749,58 @@ async def notification_cleanup_loop() -> None:
 TRIAL_SWEEP_INTERVAL_SECONDS = 60 * 60  # hourly
 
 
+async def notify_ended_trials() -> None:
+    """Sends mailer.trial_ended_email once per tenant the moment
+    trial_expires_at passes — well before sweep_expired_trials' later,
+    separate hard-delete trial_grace_days after that. Same hourly cadence,
+    deliberately a different function: expiry (block access, tell the
+    owner) and deletion (actually remove the data) are different moments
+    with different consequences, and conflating them risked either sending
+    the email too late (right as data disappears, not when it's blocked)
+    or too early (before login is even affected)."""
+    from app import mailer
+
+    async with SessionLocal() as db:
+        expired = (
+            await db.execute(
+                select(Tenant).where(
+                    Tenant.plan == "trial",
+                    Tenant.trial_expires_at < func.now(),
+                    Tenant.trial_ended_notified_at.is_(None),
+                )
+            )
+        ).scalars().all()
+        if not expired:
+            return
+
+        for tenant in expired:
+            owner = (
+                await db.execute(
+                    select(User).where(User.tenant_id == tenant.id, User.role == "owner")
+                )
+            ).scalars().first()
+            tenant.trial_ended_notified_at = func.now()
+            if owner is None:
+                continue
+            subject, html_body, text_body = mailer.trial_ended_email(
+                owner.full_name, grace_days=settings.trial_grace_days
+            )
+            sent = await mailer.send_email(owner.email, subject, html_body, text_body)
+            if not sent:
+                log.warning("trial-ended email: failed to send to %s", owner.email)
+        await db.commit()
+        log.info("trial expiry: notified %d tenant(s)", len(expired))
+
+
+async def trial_end_notify_loop() -> None:
+    while True:
+        try:
+            await notify_ended_trials()
+        except Exception:  # noqa: BLE001 - a failed sweep must not kill the worker
+            log.exception("trial-ended notification sweep failed")
+        await asyncio.sleep(TRIAL_SWEEP_INTERVAL_SECONDS)
+
+
 async def sweep_expired_trials() -> None:
     from app import cache, vercel
 
@@ -849,6 +901,7 @@ async def main() -> None:
         log.info("listening on '%s'. Ctrl+C to stop.", settings.queue_name)
         await q.consume(on_message)
         asyncio.create_task(notification_cleanup_loop())
+        asyncio.create_task(trial_end_notify_loop())
         asyncio.create_task(trial_sweep_loop())
         await asyncio.Future()  # sleep forever
 
