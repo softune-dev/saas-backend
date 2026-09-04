@@ -210,6 +210,9 @@ class Site(Base, TimestampMixin):
     # history needed) — see dashboard/components/fraud/fraud-data.ts's
     # FRAUD_RULES for the exact shape: {rule_id: {enabled, value?}}.
     fraud_rules: Mapped[dict] = mapped_column(JSONB, default=dict)
+    # Courier automation, e.g. {"auto_book": {"enabled": true, "provider":
+    # "steadfast"}} — see migrations/059 and app/courier_booking.py.
+    courier_rules: Mapped[dict] = mapped_column(JSONB, default=dict)
     published_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

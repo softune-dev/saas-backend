@@ -259,6 +259,7 @@ class SiteUpdate(BaseModel):
     faqs: list[dict[str, Any]] | None = None
     legal: dict[str, Any] | None = None
     fraud_rules: dict[str, Any] | None = None
+    courier_rules: dict[str, Any] | None = None
 
 
 class SiteOut(ORMModel):
@@ -277,6 +278,7 @@ class SiteOut(ORMModel):
     faqs: list
     legal: dict
     fraud_rules: dict
+    courier_rules: dict
     screenshot_url: str | None
     published_at: datetime | None
     onboarding_completed_at: datetime | None
@@ -657,6 +659,16 @@ class PublicOrderOut(BaseModel):
     created_at: datetime
 
 
+class CourierBulkBookIn(BaseModel):
+    """Either an explicit set of orders, or a filter — never both used at
+    once (order_ids wins if present). See commerce.py's bulk_book_orders_courier."""
+
+    order_ids: list[uuid.UUID] | None = None
+    status: str | None = None
+    date_from: datetime | None = None
+    date_to: datetime | None = None
+
+
 class OrderUpdate(BaseModel):
     # Only status and notes. Totals are immutable history — see the comment in
     # migrations/003_commerce.sql about why an order must not be recomputed.
@@ -787,6 +799,28 @@ class CustomerOut(ORMModel):
     updated_at: datetime
 
 
+class RiskScoreSignalsOut(BaseModel):
+    previous_orders: int
+    delivered: int
+    cancelled: int
+    # Percent (0-100), or null when there's no resolved (delivered/
+    # cancelled) delivery history yet to compute one from.
+    delivery_success_rate: int | None
+    cod_orders: int
+    # Null when there's no current order to compare a device against.
+    device_known: bool | None
+    ip_blocklisted: bool
+    has_open_duplicate_order: bool
+    courier_history_available: bool
+    confirmed_fraud_history: bool
+
+
+class RiskScoreOut(BaseModel):
+    score: int
+    label: str
+    signals: RiskScoreSignalsOut
+
+
 class CustomerDetailOut(CustomerOut):
     # Computed from this customer's linked orders, not stored — see
     # get_customer in app/api/commerce.py. Only orders created after this
@@ -796,6 +830,9 @@ class CustomerDetailOut(CustomerOut):
     total_spent_cents: int
     last_order_at: datetime | None
     orders: list[OrderOut]
+    # See app/risk_score.py — rule-based, computed fresh on every read, not
+    # stored (the underlying signals change on every new order).
+    risk_score: RiskScoreOut
 
 
 # =============================================================================

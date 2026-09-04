@@ -13,9 +13,9 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import cache, crud
+from app import cache, crud, risk_score as risk_score_module
 from app.db import get_db
-from app.models import Customer, Order, Site
+from app.models import Customer, FraudIpBlocklistEntry, Order, Site
 from app.schemas import CustomerDetailOut, CustomerOut, CustomerUpdate, Page
 from app.security import CurrentUser
 
@@ -82,12 +82,36 @@ async def get_customer(
     ).scalar_one()
     last_order_at = orders[0].created_at if orders else None
 
+    # Risk score inputs — see app/risk_score.py's own docstring for why each
+    # of these traces back to a real column/table instead of an inference.
+    latest_ip = next((o.ip_address for o in orders if o.ip_address), None)
+    ip_blocklisted = False
+    if latest_ip:
+        ip_blocklisted = (
+            await db.execute(
+                select(FraudIpBlocklistEntry.id).where(
+                    FraudIpBlocklistEntry.site_id == site_id,
+                    FraudIpBlocklistEntry.ip_address == latest_ip,
+                ).limit(1)
+            )
+        ).scalar_one_or_none() is not None
+    open_order_count = sum(1 for o in orders if o.status in ("pending", "paid"))
+    latest_device_id = next((o.device_id for o in orders if o.device_id), None)
+
+    risk = risk_score_module.compute_risk_score(
+        orders=orders,
+        current_device_id=latest_device_id,
+        ip_blocklisted=ip_blocklisted,
+        has_open_duplicate=open_order_count > 1,
+    )
+
     return {
         **CustomerOut.model_validate(customer).model_dump(),
         "order_count": order_count,
         "total_spent_cents": total_spent,
         "last_order_at": last_order_at,
         "orders": orders,
+        "risk_score": risk,
     }
 
 

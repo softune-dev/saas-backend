@@ -12,13 +12,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import cache, courier_crypto, crud, media, products, steadfast
+from app import cache, courier_booking, courier_crypto, crud, media, products, steadfast
 from app.db import get_db
-from app.models import Category, CourierConnection, Inquiry, Order, OrderItem, Product, Site, Tenant
+from app.models import Category, Inquiry, Order, OrderItem, Product, Site, Tenant
 from app.schemas import (
     CategoryCreate,
     CategoryOut,
     CategoryUpdate,
+    CourierBulkBookIn,
     InquiryOut,
     OrderCreate,
     OrderOut,
@@ -505,73 +506,121 @@ async def book_order_courier(
     site_id: uuid.UUID, order_id: uuid.UUID, user: CurrentUser, db: DB
 ) -> Order:
     """Books this order with the site's connected Steadfast account and
-    records the resulting consignment on the order.
-
-    Only Steadfast has a real booking flow today (Pathao/RedX/eCourier stay
-    connect-only, same as their landing-page copy already says) — see
-    app/steadfast.py's create_consignment. Delivery status then updates
-    itself via the webhook (see app/api/public.py's steadfast_webhook) as
-    Steadfast's own system moves the parcel; this endpoint only ever sets it
-    to "in_review", the state a freshly booked parcel always starts in.
+    records the resulting consignment on the order. See
+    app/courier_booking.py's book_order — same helper the automatic
+    on-checkout path (app/worker.py's handle_book_courier) uses, so a
+    manual click and an auto-book never diverge in behavior.
     """
     await _owned_site(db, user.tenant_id, site_id)
     order = await crud.get_scoped(db, Order, user.tenant_id, order_id)
     if order.site_id != site_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
-    if order.courier_consignment_id is not None:
-        raise HTTPException(status.HTTP_409_CONFLICT, "This order is already booked with a courier.")
 
-    connections, _ = await crud.list_scoped(
-        db, CourierConnection, user.tenant_id,
-        filters=[
-            CourierConnection.site_id == site_id,
-            CourierConnection.provider == "steadfast",
-        ],
-        limit=1,
-    )
-    connection = connections[0] if connections else None
-    if connection is None or connection.status != "connected":
+    connection = await courier_booking.get_steadfast_connection(db, user.tenant_id, site_id)
+    if connection is None:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             "Connect a working Steadfast account in Couriers before booking.",
         )
 
-    customer = order.customer or {}
-    name = " ".join(
-        str(customer.get(k, "")).strip() for k in ("first_name", "last_name")
-    ).strip() or "Customer"
-    phone = crud.extract_customer_phone(customer)
-    if not phone:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST, "This order has no phone number to book a courier with."
+    ok, error = await courier_booking.book_order(db, order, connection)
+    if not ok:
+        code = status.HTTP_409_CONFLICT if "already booked" in (error or "") else (
+            status.HTTP_400_BAD_REQUEST if "phone number" in (error or "") else status.HTTP_502_BAD_GATEWAY
         )
-    address_parts = [
-        str(customer.get(k, "")).strip()
-        for k in ("address", "city")
-        if str(customer.get(k, "")).strip()
-    ]
-    address = ", ".join(address_parts) or "No address provided"
+        raise HTTPException(code, error)
 
-    result, error = await steadfast.create_consignment(
-        api_key=courier_crypto.decrypt(connection.api_key_encrypted),
-        secret_key=courier_crypto.decrypt(connection.secret_key_encrypted),
-        invoice=order.order_number,
-        recipient_name=name,
-        recipient_phone=phone,
-        recipient_address=address,
-        cod_amount_cents=order.total_cents,
-        base_url=connection.base_url,
-    )
-    if error:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, error)
-
-    order.courier_provider = "steadfast"
-    order.courier_consignment_id = result["consignment_id"]
-    order.courier_tracking_code = result["tracking_code"]
-    order.delivery_status = result["status"]
-    order = await crud.save(db, order)
     await cache.invalidate_dashboard(str(site_id))
     return order
+
+
+@router.post("/sites/{site_id}/orders/courier/bulk-book")
+async def bulk_book_orders_courier(
+    site_id: uuid.UUID, payload: CourierBulkBookIn, user: CurrentUser, db: DB
+) -> dict:
+    """Books many orders in one Steadfast call (their bulk endpoint, up to
+    500 at a time) instead of one HTTP round trip per order — the same
+    "industry-grade, not a toy" bar the courier/payments pages already hold
+    themselves to.
+
+    Selection is either an explicit list of order_ids, or a filter (status
+    + optional created_at range) — matching how a merchant actually thinks
+    about this ("book everything paid from this week"), not just "book
+    these specific rows I already have selected."
+    """
+    await _owned_site(db, user.tenant_id, site_id)
+    connection = await courier_booking.get_steadfast_connection(db, user.tenant_id, site_id)
+    if connection is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Connect a working Steadfast account in Couriers before booking.",
+        )
+
+    filters = [
+        Order.site_id == site_id,
+        Order.courier_consignment_id.is_(None),
+        Order.channel == "storefront",
+    ]
+    if payload.order_ids:
+        filters.append(Order.id.in_(payload.order_ids))
+    else:
+        if payload.status:
+            filters.append(Order.status == payload.status)
+        if payload.date_from:
+            filters.append(Order.created_at >= payload.date_from)
+        if payload.date_to:
+            filters.append(Order.created_at <= payload.date_to)
+
+    orders, _ = await crud.list_scoped(
+        db, Order, user.tenant_id, filters=filters, order_by=Order.created_at, limit=500,
+    )
+    if not orders:
+        return {"booked": 0, "skipped": 0, "errors": []}
+
+    bookable: list[Order] = []
+    errors: list[dict] = []
+    order_payloads: list[dict] = []
+    for order in orders:
+        fields = courier_booking.order_recipient_fields(order)
+        if fields is None:
+            errors.append({"order_number": order.order_number, "message": "No phone number on this order."})
+            continue
+        name, phone, address = fields
+        bookable.append(order)
+        order_payloads.append({
+            "invoice": order.order_number,
+            "recipient_name": name,
+            "recipient_phone": phone,
+            "recipient_address": address,
+            "cod_amount_cents": order.total_cents,
+        })
+
+    if bookable:
+        results, error = await steadfast.create_bulk_consignments(
+            api_key=courier_crypto.decrypt(connection.api_key_encrypted),
+            secret_key=courier_crypto.decrypt(connection.secret_key_encrypted),
+            orders=order_payloads,
+            base_url=connection.base_url,
+        )
+        if error:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, error)
+
+        booked = 0
+        for order, result in zip(bookable, results):
+            if "error" in result:
+                errors.append({"order_number": order.order_number, "message": result["message"]})
+                continue
+            order.courier_provider = "steadfast"
+            order.courier_consignment_id = result["consignment_id"]
+            order.courier_tracking_code = result["tracking_code"]
+            order.delivery_status = result["status"]
+            await crud.save(db, order)
+            booked += 1
+        await cache.invalidate_dashboard(str(site_id))
+    else:
+        booked = 0
+
+    return {"booked": booked, "skipped": len(errors), "errors": errors}
 
 
 # =============================================================================

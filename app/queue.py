@@ -75,6 +75,14 @@ JOB_CAPTURE_SCREENSHOT = "capture_screenshot"
 # call to a third party, and it must never slow down or fail the customer's
 # actual checkout.
 JOB_SEND_META_CAPI_EVENT = "send_meta_capi_event"
+# Auto-book a freshly placed storefront order with the site's connected
+# Steadfast account — only queued when the site's courier_rules.auto_book is
+# enabled (see app/api/public.py's create_public_order and
+# app/courier_booking.py). Queued for the same reason as
+# JOB_SEND_ORDER_NOTIFICATIONS: booking is a real network call to a third
+# party and must never slow down or fail the customer's own checkout
+# response.
+JOB_BOOK_COURIER = "book_courier"
 
 
 async def connect() -> aio_pika.abc.AbstractChannel:

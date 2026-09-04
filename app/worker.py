@@ -23,9 +23,12 @@ from sqlalchemy import delete, select
 
 from app.config import settings
 from app.db import SessionLocal, engine
-from app.models import Category, Invoice, MarketingConnection, Notification, Order, Product, Site, Tenant, User
+from app.models import (
+    Category, CourierConnection, Invoice, MarketingConnection, Notification, Order, Product, Site, Tenant, User,
+)
 from app.queue import (
     JOB_ATTACH_DOMAIN,
+    JOB_BOOK_COURIER,
     JOB_CAPTURE_SCREENSHOT,
     JOB_DETACH_DOMAIN,
     JOB_GENERATE_INVOICE_PDF,
@@ -384,6 +387,39 @@ async def handle_send_low_stock_email(payload: dict) -> None:
             log.warning("low stock email: failed to send to %s (product=%s)", owner.email, product.name)
 
 
+async def handle_book_courier(payload: dict) -> None:
+    """Auto-books a freshly placed storefront order — only ever queued when
+    the site's courier_rules.auto_book was enabled at checkout time (see
+    app/api/public.py's create_public_order). Re-checks the connection is
+    still there (it could have been disconnected in the seconds since
+    checkout) and that the order isn't already booked, same guards
+    app/courier_booking.py's book_order itself makes — belt and suspenders,
+    since this runs seconds to minutes after the request that queued it."""
+    from app import courier_booking
+
+    order_id = payload["order_id"]
+    async with SessionLocal() as db:
+        order = (await db.execute(select(Order).where(Order.id == order_id))).scalar_one_or_none()
+        if order is None or order.courier_consignment_id is not None:
+            return
+
+        connection = (
+            await db.execute(
+                select(CourierConnection).where(
+                    CourierConnection.site_id == order.site_id,
+                    CourierConnection.provider == "steadfast",
+                    CourierConnection.status == "connected",
+                )
+            )
+        ).scalar_one_or_none()
+        if connection is None:
+            return
+
+        ok, error = await courier_booking.book_order(db, order, connection)
+        if not ok:
+            log.warning("auto-book courier failed for order=%s: %s", order.order_number, error)
+
+
 async def handle_generate_invoice_pdf(payload: dict) -> None:
     """Renders app/invoices.py's HTML via headless Chromium and uploads the
     PDF to Cloudinary — same "real browser render, worker-only" reasoning
@@ -631,6 +667,7 @@ HANDLERS = {
     JOB_DETACH_DOMAIN: handle_detach_domain,
     JOB_CAPTURE_SCREENSHOT: handle_capture_screenshot,
     JOB_SEND_META_CAPI_EVENT: handle_send_meta_capi_event,
+    JOB_BOOK_COURIER: handle_book_courier,
 }
 
 

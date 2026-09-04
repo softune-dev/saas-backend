@@ -983,6 +983,18 @@ async def create_public_order(
                 "send_push": False,
             },
         )
+    # Auto-book with the connected courier, if the merchant turned this on
+    # (Settings -> Couriers) — never for a flagged order, which exists
+    # specifically to get a human's eyes before it ships. Queued, not
+    # awaited inline: booking is a real network call to Steadfast and must
+    # never slow down or fail the customer's own checkout response — same
+    # reasoning as every other JOB_* publish in this function. The worker
+    # (app/worker.py's handle_book_courier) re-checks the connection is
+    # still there before actually booking.
+    if fraud_status != "flagged":
+        auto_book = (site.courier_rules or {}).get("auto_book") or {}
+        if auto_book.get("enabled"):
+            await queue.publish(queue.JOB_BOOK_COURIER, {"order_id": str(order.id)})
     # A real storefront checkout — the merchant's dashboard (analytics,
     # orders, products' stock counts, customers) must not show stale numbers
     # after this. See app/cache.py's module docstring for why this drops the
