@@ -160,6 +160,16 @@ async def ip_block(request: Request, call_next):
     if not request.url.path.startswith("/public/"):
         return await call_next(request)
 
+    # A blocked visitor's CORS preflight (OPTIONS) must NOT be blocked here
+    # — public_cors's own OPTIONS handler is what answers it correctly.
+    # Blocking it too meant the browser's preflight check itself failed
+    # (missing Access-Control-Allow-Methods/Headers this middleware never
+    # sets), so the actual POST never even ran and the storefront saw a
+    # generic "Failed to fetch" network error instead of the real 403 body.
+    # The following actual request still gets checked and blocked normally.
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
     parts = request.url.path.split("/")
     # ["", "public", "site", "{host}", ...] — anything shorter isn't a
     # /public/site/{host}/... request (e.g. /public/openapi.json, if any),
