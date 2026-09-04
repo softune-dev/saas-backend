@@ -62,13 +62,10 @@ never render a past order by joining to live `products` — that is what the
 **9. Cache and queue failures must not fail a request.** Helpers in `cache.py`
 and `queue.py` log and swallow. Keep it that way.
 
-**10. `DATABASE_URL` must point at Supabase's session pooler** (port 5432 on
-the `*.pooler.supabase.com` host), not the transaction pooler (port 6543) or
-the direct connection (IPv6-only, unreachable from this host). The transaction
-pooler forces prepared statements off, which measured ~700ms per trivial
-query in production vs ~80ms on the session pooler — not a network latency
-problem, a pooler-choice problem. See `app/db.py`'s docstring before changing
-this.
+**10. Do not remove `statement_cache_size: 0` from `app/db.py`** while
+`DATABASE_URL` points at the port-6543 pooler. See that file's docstring —
+switching to the session pooler was tried and reverted after it degraded
+under real load; don't repeat that switch without reading why first.
 
 ## Conventions
 

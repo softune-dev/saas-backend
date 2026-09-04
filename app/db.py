@@ -1,52 +1,71 @@
 """Async database engine and session factory.
 
-READ THIS IF CONNECTIONS MISBEHAVE — which pooler, and why it matters
------------------------------------------------------------------------
-DATABASE_URL must point at Supabase's SESSION pooler (Supavisor, port 5432 on
-the `*.pooler.supabase.com` host), not the transaction pooler (port 6543) and
-not the direct connection (`db.*.supabase.co`, IPv6-only by default — dead on
-an IPv4-only host without paying for Supabase's IPv4 add-on).
+READ THIS IF CONNECTIONS MISBEHAVE — the pooler gotcha
+------------------------------------------------------
+Supabase's transaction pooler (Supavisor, port 6543) hands your query whatever
+backend connection is free at that moment. It does not guarantee the same one
+twice.
 
-The transaction pooler hands your query whatever backend connection is free
-at that moment — it does not guarantee the same one twice. asyncpg by default
-optimises by PREPARING each statement on the server and reusing it by name;
-those prepared statements live on ONE specific backend connection, so on the
-transaction pooler you'd get either `InvalidSQLStatementNameError` /
-`DuplicatePreparedStatementError`, or — if you disable prepared statements to
-avoid that — every single query paying the FULL parse/bind/describe/execute
-round trip instead of a cached one-shot bind+execute. Measured impact on this
-project's production box: ~700ms per trivial `SELECT 1` on the transaction
-pooler vs ~80ms on the session pooler, even though raw network RTT to
-Supabase was only ~90ms either way. The pooler choice IS the latency issue,
-not geography.
+asyncpg by default optimises by PREPARING each statement on the server and
+reusing it by name. Those prepared statements live on ONE specific backend
+connection. So you get:
 
-The session pooler avoids both problems: it holds ONE dedicated backend
-connection per client session (same guarantee a direct connection gives you),
-so prepared statements work normally — while still being reachable over IPv4,
-since it's proxied through the same pooler host as the transaction pooler.
-The tradeoff is fewer total concurrent connections than the transaction
-pooler allows, which is fine here: this app's own client-side pool below caps
-out at 15 connections, well under Supabase's session-pooler limit for this
-project's compute size.
+    request 1 -> backend A -> "PREPARE __asyncpg_stmt_1__"
+    request 2 -> backend B -> "EXECUTE __asyncpg_stmt_1__"  -> ERROR: does not exist
+    request 3 -> backend A again -> "PREPARE __asyncpg_stmt_1__" -> ERROR: already exists
 
-If DATABASE_URL ever needs to point at the transaction pooler again (e.g. a
-serverless/edge deployment making brief, stateless connections — the case
-Supabase actually recommends it for), reintroduce these three connect_args
-together, not separately — confirmed empirically that any one missing still
-fails on literally the first query:
+The symptom is `InvalidSQLStatementNameError` or `DuplicatePreparedStatementError`
+— genuinely nasty to diagnose if you don't know to look for it.
 
-  - "statement_cache_size": 0            (asyncpg's own native cache)
-  - "prepared_statement_cache_size": 0   (SQLAlchemy's asyncpg dialect wrapper's
-                                           separate bookkeeping — the one most
-                                           blog posts actually mean)
-  - "prepared_statement_name_func"       (unique names per statement, so two
-                                           pooled connections landing on the
-                                           same backend can't collide)
+THREE connect_args are needed together, not one — confirmed empirically (20
+concurrent connections, zero errors, after adding all three; still failing on
+literally the first query with any one of them missing):
 
-SQLAlchemy's own docs on the last two:
+  - "statement_cache_size": 0
+    asyncpg's OWN native cache. Without this, whatever internal/passthrough
+    path the dialect uses for its initial connection probe (a plain
+    `select pg_catalog.version()` run before any of our code executes) still
+    uses asyncpg's default sequential naming and collides immediately.
+
+  - "prepared_statement_cache_size": 0
+    SQLAlchemy's asyncpg dialect wraps every connection in
+    `AsyncAdapt_asyncpg_connection`, which does its OWN SEPARATE prepared-
+    statement bookkeeping for anything run through the normal DBAPI cursor
+    (i.e. everything the ORM/Core does). This is the one most blog posts
+    mean when they say "statement_cache_size" — but that's not its name here,
+    and asyncpg's native option above does not cover this path.
+
+  - "prepared_statement_name_func"
+    Even with both caches off, the wrapper's default namer still hands out
+    small sequential names ("__asyncpg_stmt_1__", ...) per connection, which
+    collide the instant two pooled connections land on the same backend.
+    Unique names make collision impossible regardless of which backend the
+    pooler hands back.
+
+SQLAlchemy's own docs on the second and third:
 https://docs.sqlalchemy.org/en/20/dialects/postgresql.html#prepared-statement-name-with-pgbouncer
+
+Do not remove any of the three while DATABASE_URL points at port 6543.
+
+TRIED AND REVERTED — the session pooler (port 5432 on the same
+`*.pooler.supabase.com` host) was tested here as a fix for transaction-pooler
+latency (see git history around this docstring): it avoids the prepared-
+statement problem above by holding one dedicated backend connection per
+client session, and an isolated benchmark measured ~80ms per query vs ~700ms
+on the transaction pooler. But under real production load (this API's pool
+PLUS app/worker.py's own separate pool, both holding session-pooler
+connections at once) it got progressively SLOWER across repeated real
+requests (837ms -> 1363ms -> 2008ms) instead of settling fast — almost
+certainly the session pooler's much lower concurrent-connection ceiling
+(unlike the transaction pooler, which multiplexes many clients over few
+backend connections) being contended by this project's Nano compute tier.
+Reverted back to the transaction pooler + these connect_args as the known-
+working baseline. If revisiting: the session pooler is worth another look
+ONLY after confirming its actual per-project connection ceiling and either
+upgrading compute or serializing api/worker to share one small pool.
 """
 
+import uuid
 from collections.abc import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -59,10 +78,14 @@ engine = create_async_engine(
     # while learning — watching the generated SQL is the fastest way to build an
     # intuition for what the ORM is actually doing.
     echo=settings.debug,
-    # Client-side pool sits in front of Supavisor's session pooler. Small on
-    # purpose: the session pooler holds one dedicated backend connection per
-    # entry in this pool for its whole lifetime, and Supabase caps total
-    # pooler connections per project.
+    # See the module docstring — all three are required together.
+    connect_args={
+        "statement_cache_size": 0,
+        "prepared_statement_cache_size": 0,
+        "prepared_statement_name_func": lambda: f"__asyncpg_{uuid.uuid4()}__",
+    },
+    # Client-side pool sits in front of Supavisor. Small on purpose: the pooler
+    # is doing the heavy lifting, and Supabase's free tier caps total connections.
     pool_size=5,
     max_overflow=10,
     # Verify a connection is alive before handing it out. Costs a trivial
