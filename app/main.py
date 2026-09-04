@@ -187,35 +187,58 @@ async def ip_block(request: Request, call_next):
             from app.db import SessionLocal
             from app.models import FraudIpBlocklistEntry, Site
 
+            # ONE query (LEFT JOIN), not two — halves the DB round trips on
+            # a cache miss. Every /public/* endpoint a single page load
+            # fires (config, categories, products, events, pageview) runs
+            # this middleware independently, so a cold cache pays this cost
+            # several times over for one visitor — worth keeping tight.
             async with SessionLocal() as session:
-                site_row = (
+                rows = (
                     await session.execute(
-                        select(Site.id).where(
+                        select(FraudIpBlocklistEntry.ip_address)
+                        .select_from(Site)
+                        .outerjoin(
+                            FraudIpBlocklistEntry, FraudIpBlocklistEntry.site_id == Site.id
+                        )
+                        .where(
                             or_(Site.custom_domain == host, Site.subdomain == host.split(".")[0]),
                             Site.status == "published",
                         )
                     )
-                ).scalar_one_or_none()
-                ips: list[str] = []
-                if site_row is not None:
-                    ips = (
-                        await session.execute(
-                            select(FraudIpBlocklistEntry.ip_address).where(
-                                FraudIpBlocklistEntry.site_id == site_row
-                            )
-                        )
-                    ).scalars().all()
+                ).scalars().all()
+            ips = [ip for ip in rows if ip is not None]
             cached = {"ips": [str(ip) for ip in ips]}
-            # Short TTL, deliberately shorter than the site-config cache — a
-            # merchant who just got attacked needs a freshly-added block to
-            # take effect fast, not wait out a longer TTL. Cached even when
-            # empty (the overwhelming default case) so a site with zero IP
-            # blocks doesn't hit Postgres on every single public request.
-            await cache.set_json(cache.ip_block_key(host), cached, ttl=60)
+            # Long TTL — this is a safety net, not the correctness
+            # mechanism: every add/remove already calls
+            # cache.invalidate_ip_blocks() (write-through), same pattern as
+            # the site-config cache's own docstring describes. A short TTL
+            # here bought nothing but a guaranteed Postgres round trip on
+            # every single /public/* request once a minute, for every
+            # active site — measurably slow (Supabase's pooler adds real
+            # cross-region latency per round trip) for zero correctness
+            # benefit. Matches site_key's own default TTL.
+            await cache.set_json(
+                cache.ip_block_key(host), cached, ttl=settings.cache_ttl_seconds
+            )
 
         from app.ratelimit import _client_ip
 
-        request_ip = _client_ip(request)
+        # X-Original-Client-IP wins over the standard X-Forwarded-For when
+        # present — set ONLY by our own trusted storefront edge middleware
+        # (templates/*/middleware.ts) for its SSR pre-check call. Caddy's
+        # reverse_proxy overwrites X-Forwarded-For with whatever it sees as
+        # the immediate connection peer (confirmed empirically: a real
+        # visitor's browser calling checkout directly gets the right value
+        # this way, but our OWN outbound call from Vercel's infrastructure
+        # to this API got overwritten with Vercel's own server IP, not the
+        # original visitor's) — Caddy has no special handling for a custom
+        # header name, so it passes through untouched. Never trust this
+        # header from an arbitrary public request; it only ever matters for
+        # /public/* routes, and any caller COULD forge it, but the worst a
+        # forged value does here is fail to match a real block entry (fail
+        # open, same as everything else in this function) — it can never
+        # grant access to anything a real request couldn't already reach.
+        request_ip = request.headers.get("x-original-client-ip") or _client_ip(request)
         if request_ip in set(cached.get("ips") or []):
             blocked_ip = request_ip
     except Exception as exc:  # noqa: BLE001 - fail open, never break a request
