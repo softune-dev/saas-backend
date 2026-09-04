@@ -83,6 +83,13 @@ JOB_SEND_META_CAPI_EVENT = "send_meta_capi_event"
 # party and must never slow down or fail the customer's own checkout
 # response.
 JOB_BOOK_COURIER = "book_courier"
+# One-time WhatsApp welcome message, sent from Softunebd's own business
+# number right after signup — see app/whatsapp.py. Queued (never awaited
+# inline) for the same reason as every email send in this file: a real
+# network call to a third party must never slow down or fail the signup
+# response itself. Silently skipped by the handler if the merchant gave no
+# phone number, or if WhatsApp isn't configured.
+JOB_SEND_WHATSAPP_WELCOME = "send_whatsapp_welcome"
 
 
 async def connect() -> aio_pika.abc.AbstractChannel:

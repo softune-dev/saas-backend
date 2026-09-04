@@ -39,6 +39,7 @@ from app.queue import (
     JOB_SEND_LOW_STOCK_EMAIL,
     JOB_SEND_ORDER_EMAIL,
     JOB_SEND_ORDER_NOTIFICATIONS,
+    JOB_SEND_WHATSAPP_WELCOME,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)-8s worker | %(message)s")
@@ -387,6 +388,31 @@ async def handle_send_low_stock_email(payload: dict) -> None:
             log.warning("low stock email: failed to send to %s (product=%s)", owner.email, product.name)
 
 
+async def handle_send_whatsapp_welcome(payload: dict) -> None:
+    """Post-signup WhatsApp welcome message — see app/whatsapp.py's module
+    docstring for why this MUST use a pre-approved template, and
+    WHATSAPP_WELCOME_TEMPLATE for its exact wording. Silently returns (not
+    an error) when there's no phone number or WhatsApp isn't configured —
+    both are expected, common states, not failures."""
+    from app import whatsapp
+
+    phone = payload.get("phone")
+    if not phone:
+        return
+    to = whatsapp.to_whatsapp_number(phone)
+    if to is None:
+        return
+
+    full_name = (payload.get("full_name") or "").strip()
+    first_name = full_name.split(" ")[0] if full_name else "there"
+
+    ok, error = await whatsapp.send_template_message(
+        to=to, template_name=whatsapp.WHATSAPP_WELCOME_TEMPLATE, body_params=[first_name],
+    )
+    if not ok:
+        log.warning("whatsapp welcome: failed to send to %s: %s", to, error)
+
+
 async def handle_book_courier(payload: dict) -> None:
     """Auto-books a freshly placed storefront order — only ever queued when
     the site's courier_rules.auto_book was enabled at checkout time (see
@@ -668,6 +694,7 @@ HANDLERS = {
     JOB_CAPTURE_SCREENSHOT: handle_capture_screenshot,
     JOB_SEND_META_CAPI_EVENT: handle_send_meta_capi_event,
     JOB_BOOK_COURIER: handle_book_courier,
+    JOB_SEND_WHATSAPP_WELCOME: handle_send_whatsapp_welcome,
 }
 
 

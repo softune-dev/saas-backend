@@ -316,6 +316,13 @@ async def complete(payload: TrialCompleteIn, db: DB) -> dict:
         queue.JOB_SEND_EMAIL,
         {"to": user.email, "subject": subject, "html_body": html_body, "text_body": text_body},
     )
+    # WhatsApp welcome — see app/whatsapp.py. Only fires if they gave a
+    # phone number during signup and WhatsApp is configured; the handler
+    # itself no-ops otherwise, so no branch is needed here.
+    await queue.publish(
+        queue.JOB_SEND_WHATSAPP_WELCOME,
+        {"phone": pending.get("phone"), "full_name": user.full_name},
+    )
 
     from app.api.auth import _tokens  # local import: avoids a circular import at module load
 

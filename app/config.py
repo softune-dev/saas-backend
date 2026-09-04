@@ -102,6 +102,17 @@ class Settings(BaseSettings):
     # browser, unlike Cloudinary's keys which the SDK needs client-adjacent.
     gemini_api_key: str = ""
 
+    # --- WhatsApp Business Platform (Meta Cloud API) ---
+    # Softunebd's OWN business number, sending FROM the platform TO a new
+    # merchant — not a per-tenant integration (contrast Site.business.whatsapp,
+    # a merchant's own contact-info field for their storefront visitors).
+    # whatsapp_access_token must be a permanent System User token, not a
+    # personal user token (those expire in ~60 days and silently break
+    # sending). Blank-able like every other integration key above: the
+    # welcome-message job just logs and skips until these are set.
+    whatsapp_phone_number_id: str = ""
+    whatsapp_access_token: str = ""
+
     # --- reCAPTCHA (login, checkout, contact form) ---
     # Same blank-able convention: unset locally, verification just skips
     # (see app/recaptcha.py) instead of failing every request until it's set.
