@@ -315,3 +315,25 @@ async def test_other_tenant_cannot_review_suspicious_order(two_accounts, templat
             json={"decision": "cleared"},
         )
     ).status_code == 404
+
+
+async def test_other_tenant_cannot_see_abandoned_checkouts(two_accounts, template_id):
+    a, b = two_accounts
+    site = await _make_site(a, template_id)
+    product = (
+        await a.post(
+            f"/sites/{site['id']}/products",
+            json={"name": "Thing", "price_cents": 500, "stock": 10},
+        )
+    ).json()
+    published = await a.post(f"/sites/{site['id']}/publish", json={})
+    assert published.status_code == 200
+    host = published.json()["subdomain"]
+
+    captured = await a.client.post(
+        f"/public/site/{host}/checkout/abandoned",
+        json={"phone": "01712345678", "items": [{"product_id": product["id"], "quantity": 1}]},
+    )
+    assert captured.status_code == 204
+
+    assert (await b.get(f"/sites/{site['id']}/abandoned-checkouts")).status_code == 404

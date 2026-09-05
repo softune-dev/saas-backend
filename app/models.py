@@ -489,6 +489,36 @@ class Order(Base, TimestampMixin):
     )
 
 
+class AbandonedCheckout(Base, TimestampMixin):
+    """Captured as soon as a shopper enters a valid phone during checkout,
+    before they submit the order — see migrations/061 and
+    app/api/public.py's capture_abandoned_checkout. Data capture only, no
+    automated follow-up message; a merchant sees these in the dashboard and
+    can reach out (e.g. WhatsApp/call) themselves."""
+
+    __tablename__ = "abandoned_checkouts"
+    __table_args__ = (
+        UniqueConstraint("site_id", "phone", name="uq_abandoned_checkouts_site_phone"),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    site_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("sites.id", ondelete="CASCADE")
+    )
+    phone: Mapped[str] = mapped_column(Text)
+    # [{product_id, quantity}, ...] — resolved against live products for
+    # display, not a name/price snapshot (this isn't immutable order
+    # history, see the migration's own comment).
+    items: Mapped[list] = mapped_column(JSONB, default=list)
+    subtotal_cents: Mapped[int] = mapped_column(Integer, default=0)
+    converted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
 class Inquiry(Base):
     __tablename__ = "inquiries"
 

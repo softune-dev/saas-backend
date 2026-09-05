@@ -586,6 +586,33 @@ class PublicOrderItemIn(BaseModel):
     quantity: int = Field(ge=1, le=100)
 
 
+class AbandonedCheckoutCapture(BaseModel):
+    """Sent once a shopper's phone passes validation during checkout, before
+    they submit the order — see app/api/public.py's
+    capture_abandoned_checkout. Same item shape as PublicOrderCreate; a
+    subset of the real cart is fine, this is best-effort visibility, not a
+    binding record."""
+
+    phone: str = Field(min_length=1, max_length=40)
+    items: list[PublicOrderItemIn] = Field(min_length=1)
+
+
+class AbandonedCheckoutItemOut(BaseModel):
+    product_id: uuid.UUID
+    name: str
+    quantity: int
+
+
+class AbandonedCheckoutOut(ORMModel):
+    id: uuid.UUID
+    phone: str
+    items: list[AbandonedCheckoutItemOut]
+    subtotal_cents: int
+    converted_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
 class PageViewIn(BaseModel):
     """One storefront page load — see app/models.py's PageView. No
     recaptcha here (unlike checkout/contact): a page view isn't a

@@ -15,8 +15,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import cache, crud, risk_score as risk_score_module
 from app.db import get_db
-from app.models import Customer, FraudIpBlocklistEntry, Order, Site
-from app.schemas import CustomerDetailOut, CustomerOut, CustomerUpdate, Page
+from app.models import AbandonedCheckout, Customer, FraudIpBlocklistEntry, Order, Product, Site
+from app.schemas import (
+    AbandonedCheckoutItemOut,
+    AbandonedCheckoutOut,
+    CustomerDetailOut,
+    CustomerOut,
+    CustomerUpdate,
+    Page,
+)
 from app.security import CurrentUser
 
 router = APIRouter(tags=["customers"])
@@ -125,3 +132,65 @@ async def update_customer(
     customer = await crud.save(db, customer)
     await cache.invalidate_dashboard(str(site_id))
     return customer
+
+
+@router.get(
+    "/sites/{site_id}/abandoned-checkouts", response_model=Page[AbandonedCheckoutOut]
+)
+async def list_abandoned_checkouts(
+    site_id: uuid.UUID,
+    user: CurrentUser,
+    db: DB,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> dict:
+    """Shoppers who entered a phone during checkout but never completed the
+    order — see AbandonedCheckout's own docstring. Excludes ones that later
+    converted (converted_at set by create_public_order). Data only, no
+    automated follow-up — a merchant reaches out themselves."""
+    await _owned_site(db, user.tenant_id, site_id)
+
+    rows, total = await crud.list_scoped(
+        db, AbandonedCheckout, user.tenant_id,
+        filters=[
+            AbandonedCheckout.site_id == site_id,
+            AbandonedCheckout.converted_at.is_(None),
+        ],
+        order_by=AbandonedCheckout.updated_at.desc(), limit=limit, offset=offset,
+    )
+
+    product_ids = {
+        item["product_id"]
+        for row in rows
+        for item in row.items
+        if item.get("product_id")
+    }
+    names: dict[str, str] = {}
+    if product_ids:
+        product_rows = (
+            await db.execute(
+                select(Product.id, Product.name).where(Product.id.in_(product_ids))
+            )
+        ).all()
+        names = {str(pid): name for pid, name in product_rows}
+
+    items_out = [
+        {
+            "id": row.id,
+            "phone": row.phone,
+            "items": [
+                {
+                    "product_id": item["product_id"],
+                    "name": names.get(str(item["product_id"]), "Removed product"),
+                    "quantity": item["quantity"],
+                }
+                for item in row.items
+            ],
+            "subtotal_cents": row.subtotal_cents,
+            "converted_at": row.converted_at,
+            "created_at": row.created_at,
+            "updated_at": row.updated_at,
+        }
+        for row in rows
+    ]
+    return {"items": items_out, "total": total, "limit": limit, "offset": offset}

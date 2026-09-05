@@ -30,6 +30,7 @@ from app.ratelimit import _client_ip, demo_access_rate_limit, rate_limit
 from app.config import settings
 from app.db import get_db
 from app.models import (
+    AbandonedCheckout,
     Category,
     CourierConnection,
     DemoAccessRequest,
@@ -46,6 +47,7 @@ from app.models import (
     User,
 )
 from app.schemas import (
+    AbandonedCheckoutCapture,
     DemoAccessIn,
     InquiryCreate,
     InquiryOut,
@@ -622,6 +624,85 @@ def _validate_bd_phone(raw: str) -> bool:
 
 
 @router.post(
+    "/site/{host}/checkout/abandoned",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(rate_limit("abandoned_checkout", limit=20, window_seconds=300))],
+)
+async def capture_abandoned_checkout(host: str, payload: AbandonedCheckoutCapture, db: DB) -> None:
+    """Fired by the storefront's checkout form once the phone field passes
+    validation, before the shopper submits the order — see
+    AbandonedCheckoutCapture. Upserts by (site_id, phone): a shopper who
+    comes back and re-enters their number refreshes the same row instead of
+    piling up duplicates.
+
+    Best-effort and silent — must never surface an error mid-checkout, and
+    a failure here has zero effect on the shopper's ability to place a real
+    order. No reCAPTCHA (unlike checkout submit): this only ever writes a
+    phone number and cart contents already visible to the shopper's own
+    browser, so the worst outcome of abuse is noise in one merchant's
+    abandoned-checkouts list, not a fake order — the request rate limit is
+    the actual guard here.
+    """
+    try:
+        site = await _find_published_site(host, db)
+    except HTTPException:
+        return
+    if not _validate_bd_phone(payload.phone):
+        return
+    normalized = crud.normalize_phone(payload.phone)
+    if not normalized:
+        return
+
+    try:
+        product_ids = [item.product_id for item in payload.items]
+        products = (
+            await db.execute(
+                select(Product).where(
+                    Product.id.in_(product_ids), Product.site_id == site.id
+                )
+            )
+        ).scalars().all()
+        by_id = {p.id: p for p in products}
+
+        subtotal = 0
+        items_json: list[dict] = []
+        for item in payload.items:
+            product = by_id.get(item.product_id)
+            if not product:
+                continue  # cross-site or deleted product id — skip silently
+            subtotal += product.price_cents * item.quantity
+            items_json.append({"product_id": str(item.product_id), "quantity": item.quantity})
+        if not items_json:
+            return
+
+        existing = (
+            await db.execute(
+                select(AbandonedCheckout).where(
+                    AbandonedCheckout.site_id == site.id,
+                    AbandonedCheckout.phone == normalized,
+                )
+            )
+        ).scalar_one_or_none()
+        if existing:
+            existing.items = items_json
+            existing.subtotal_cents = subtotal
+            existing.converted_at = None  # back mid-checkout again
+        else:
+            db.add(
+                AbandonedCheckout(
+                    tenant_id=site.tenant_id,
+                    site_id=site.id,
+                    phone=normalized,
+                    items=items_json,
+                    subtotal_cents=subtotal,
+                )
+            )
+        await db.commit()
+    except Exception:
+        log.warning("abandoned checkout: failed to capture for host %s", host, exc_info=True)
+
+
+@router.post(
     "/site/{host}/orders",
     response_model=PublicOrderOut,
     status_code=status.HTTP_201_CREATED,
@@ -968,6 +1049,31 @@ async def create_public_order(
         ip_address=order_ip,
     )
     order = await crud.save(db, order)
+
+    # This shopper finished checkout — if capture_abandoned_checkout ever
+    # saw this phone on this site, mark it converted so the dashboard's
+    # abandoned-checkouts list stops showing someone who actually bought.
+    # Best-effort: never let this block or fail a real order.
+    try:
+        normalized_checkout_phone = crud.normalize_phone(phone_for_validation)
+        if normalized_checkout_phone:
+            match = (
+                await db.execute(
+                    select(AbandonedCheckout).where(
+                        AbandonedCheckout.site_id == site.id,
+                        AbandonedCheckout.phone == normalized_checkout_phone,
+                        AbandonedCheckout.converted_at.is_(None),
+                    )
+                )
+            ).scalar_one_or_none()
+            if match:
+                match.converted_at = datetime.now(timezone.utc)
+                await db.commit()
+    except Exception:
+        log.warning(
+            "abandoned checkout: failed to mark converted for site %s", site.id, exc_info=True
+        )
+
     if fraud_status == "flagged":
         await queue.publish(
             queue.JOB_SEND_ORDER_NOTIFICATIONS,
