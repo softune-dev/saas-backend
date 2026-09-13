@@ -217,9 +217,10 @@ def upload_invoice_pdf(file_bytes: bytes, *, invoice_number: str) -> dict:
 # one a fresh public_id specifically so a mid-capture failure never clobbers
 # the last good screenshot_url. Without a cap that means "_system" grows by
 # one file per publish forever, since nothing else ever reads or prunes that
-# folder. Kept small (not 1) so a brief window of concurrent captures for
-# the same site can never race a delete against a still-in-use upload.
-SITE_SCREENSHOT_KEEP = 3
+# folder. Only one screenshot is ever shown (site.screenshot_url) or needed
+# at a time, so exactly 1 is kept — a new one replacing the old one means
+# the old one is deleted, not left behind.
+SITE_SCREENSHOT_KEEP = 1
 
 
 def upload_site_screenshot(file_bytes: bytes, *, subdomain: str) -> dict:
