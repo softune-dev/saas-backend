@@ -215,6 +215,12 @@ async def switch_theme(
         return site
 
     site.template_id = new_template.id
+    # The old screenshot was captured against the OLD theme — showing it on
+    # the Themes page card after a switch would look like the switch didn't
+    # do anything. Clear it so the card falls back to the new template's
+    # generic preview image (see dashboard's theme-card.tsx) until the
+    # capture below produces a real one.
+    site.screenshot_url = None
     await db.commit()
     await db.refresh(site)
 
