@@ -401,6 +401,7 @@ class EventCreate(BaseModel):
     product_ids: list[uuid.UUID] = Field(default_factory=list)
     is_active: bool = False
     is_popup: bool = False
+    image_only: bool = False
 
 
 class EventUpdate(BaseModel):
@@ -413,6 +414,7 @@ class EventUpdate(BaseModel):
     product_ids: list[uuid.UUID] | None = None
     is_active: bool | None = None
     is_popup: bool | None = None
+    image_only: bool | None = None
 
 
 class EventOut(BaseModel):
@@ -429,6 +431,7 @@ class EventOut(BaseModel):
     discount_percent: int
     is_active: bool
     is_popup: bool
+    image_only: bool
     product_ids: list[uuid.UUID]
     product_count: int
     created_at: datetime

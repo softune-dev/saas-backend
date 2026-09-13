@@ -406,6 +406,9 @@ async def list_public_events(host: str, db: DB) -> list[dict]:
             # Storefront popup modal — independent of the homepage Events
             # section's own curated selection, see migrations/062.
             "isPopup": e.is_popup,
+            # Render just the image wherever this event appears — no
+            # title/description/CTA. See migrations/064.
+            "imageOnly": e.image_only,
         }
         for e in rows
     ]

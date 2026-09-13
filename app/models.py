@@ -392,6 +392,12 @@ class Event(Base, TimestampMixin):
     # At most one true per site (migrations/062's partial unique index) —
     # the storefront popup modal, independent of homepage curation.
     is_popup: Mapped[bool] = mapped_column(Boolean, default=False)
+    # True = render just the image everywhere this event appears (homepage
+    # Events section card, popup modal) — no title, description, or CTA
+    # button. Lets a merchant use a pre-designed promo banner image as the
+    # whole event, text baked into the artwork instead of layered by the
+    # storefront.
+    image_only: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # lazy="selectin": listing N events must not fire N+1 queries for each
     # one's bound product ids (the dashboard list shows a product count).

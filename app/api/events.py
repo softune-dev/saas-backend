@@ -39,6 +39,7 @@ def _event_out(event: Event) -> EventOut:
         discount_percent=event.discount_percent,
         is_active=event.is_active,
         is_popup=event.is_popup,
+        image_only=event.image_only,
         product_ids=[p.id for p in event.products],
         product_count=len(event.products),
         created_at=event.created_at,
