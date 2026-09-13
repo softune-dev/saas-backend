@@ -90,6 +90,15 @@ JOB_BOOK_COURIER = "book_courier"
 # response itself. Silently skipped by the handler if the merchant gave no
 # phone number, or if WhatsApp isn't configured.
 JOB_SEND_WHATSAPP_WELCOME = "send_whatsapp_welcome"
+# Re-point a site's domain from its OLD template's Vercel project to its
+# NEW one after a theme switch (app/api/sites.py's switch_theme). Payload
+# carries old_project_id/new_project_id explicitly rather than re-deriving
+# them from the site row at job-run time — by the time this runs,
+# site.template_id already points at the NEW template, so re-fetching
+# site.template.vercel_project_id would give the same id twice and never
+# actually detach from the old project. Same "carried in payload" reasoning
+# as JOB_DETACH_DOMAIN's domain field.
+JOB_SWITCH_THEME_DOMAIN = "switch_theme_domain"
 
 
 async def connect() -> aio_pika.abc.AbstractChannel:

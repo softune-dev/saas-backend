@@ -40,6 +40,7 @@ from app.queue import (
     JOB_SEND_ORDER_EMAIL,
     JOB_SEND_ORDER_NOTIFICATIONS,
     JOB_SEND_WHATSAPP_WELCOME,
+    JOB_SWITCH_THEME_DOMAIN,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)-8s worker | %(message)s")
@@ -160,6 +161,35 @@ async def handle_detach_domain(payload: dict) -> None:
         return
 
     await vercel.remove_domain_from_project(domain, project_id)
+
+
+async def handle_switch_theme_domain(payload: dict) -> None:
+    """Re-point a site's domain from its old template's Vercel project to
+    its new one after app/api/sites.py's switch_theme changed
+    site.template_id. Both project ids are carried explicitly in the
+    payload — see queue.JOB_SWITCH_THEME_DOMAIN's own comment for why
+    re-deriving them from the site record at this point wouldn't work.
+    """
+    from app import vercel
+
+    site_id = payload.get("site_id")
+    old_project_id = payload.get("old_project_id")
+    new_project_id = payload.get("new_project_id")
+
+    async with SessionLocal() as db:
+        site = (
+            await db.execute(select(Site).where(Site.id == site_id))
+        ).scalar_one_or_none()
+
+    if site is None:
+        log.warning("switch_theme_domain: site %s no longer exists, dropping job", site_id)
+        return
+
+    host = site.custom_domain or f"{site.subdomain}.{settings.site_base_domain}"
+    if old_project_id and old_project_id != new_project_id:
+        await vercel.remove_domain_from_project(host, old_project_id)
+    if new_project_id:
+        await vercel.add_domain_to_project(host, new_project_id)
 
 
 async def handle_generate_sitemap(payload: dict) -> None:
@@ -691,6 +721,7 @@ HANDLERS = {
     JOB_GENERATE_INVOICE_PDF: handle_generate_invoice_pdf,
     JOB_ATTACH_DOMAIN: handle_attach_domain,
     JOB_DETACH_DOMAIN: handle_detach_domain,
+    JOB_SWITCH_THEME_DOMAIN: handle_switch_theme_domain,
     JOB_CAPTURE_SCREENSHOT: handle_capture_screenshot,
     JOB_SEND_META_CAPI_EVENT: handle_send_meta_capi_event,
     JOB_BOOK_COURIER: handle_book_courier,

@@ -19,6 +19,7 @@ from app.schemas import (
     ProvisionStatusOut,
     SiteCreate,
     SiteOut,
+    SiteSwitchTheme,
     SiteUpdate,
     TemplateOut,
 )
@@ -187,6 +188,57 @@ async def update_site(
         await queue.publish(
             queue.JOB_DETACH_DOMAIN, {"site_id": str(site.id), "domain": old_domain}
         )
+    return site
+
+
+@router.post("/sites/{site_id}/switch-theme", response_model=SiteOut)
+async def switch_theme(
+    site_id: uuid.UUID, payload: SiteSwitchTheme, user: CurrentUser, db: DB
+) -> Site:
+    """Point this site at a different template. Every template renders the
+    exact same SiteEditorSettings contract, so site.theme (and every
+    product/category/event) carries over completely unchanged — this is
+    purely a "which storefront deployment serves this domain" switch, not
+    a data migration.
+    """
+    site = await crud.get_scoped(db, Site, user.tenant_id, site_id)
+    old_template = site.template
+
+    new_template = (
+        await db.execute(
+            select(Template).where(Template.id == payload.template_id, Template.is_active)
+        )
+    ).scalar_one_or_none()
+    if new_template is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Template not found or inactive")
+    if new_template.id == old_template.id:
+        return site
+
+    site.template_id = new_template.id
+    await db.commit()
+    await db.refresh(site)
+
+    await cache.invalidate_site(site.subdomain, site.custom_domain)
+    await cache.invalidate_dashboard(str(site.id))
+
+    if site.status == "published":
+        # New deployment has never served this host before — get it a
+        # domain attachment and a fresh config fetch right away instead of
+        # waiting on the new template's own revalidate window.
+        await queue.publish(
+            queue.JOB_SWITCH_THEME_DOMAIN,
+            {
+                "site_id": str(site.id),
+                "old_project_id": old_template.vercel_project_id,
+                "new_project_id": new_template.vercel_project_id,
+            },
+        )
+        await queue.publish(
+            queue.JOB_REVALIDATE_SITE, {"site_id": str(site.id), "paths": ["/"]}
+        )
+        # The Themes page card's screenshot is theme-specific — refresh it
+        # so it doesn't keep showing the old template's look.
+        await queue.publish(queue.JOB_CAPTURE_SCREENSHOT, {"site_id": str(site.id)})
     return site
 
 

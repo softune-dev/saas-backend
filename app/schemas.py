@@ -262,6 +262,17 @@ class SiteUpdate(BaseModel):
     courier_rules: dict[str, Any] | None = None
 
 
+class SiteSwitchTheme(BaseModel):
+    """Change which template renders this site. Every template shares the
+    exact same SiteEditorSettings contract (theme-types.ts), so the site's
+    existing theme JSON, products, categories, and events all carry over
+    unchanged — this only changes which storefront deployment renders
+    them. See app/api/sites.py's switch_theme for the domain re-attach
+    this triggers."""
+
+    template_id: uuid.UUID
+
+
 class SiteOut(ORMModel):
     id: uuid.UUID
     tenant_id: uuid.UUID
