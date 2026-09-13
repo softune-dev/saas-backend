@@ -12,13 +12,14 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import json
 
-from app import courier_crypto, crud, pathao, redx, steadfast
+from app import courier_crypto, crud, pathao, plans, redx, steadfast
 from app.db import get_db
-from app.models import CourierConnection, Site
+from app.models import CourierConnection, Site, Tenant
 from app.schemas import (
     CourierConnectionOut,
     EcourierConnectIn,
@@ -34,6 +35,13 @@ DB = Annotated[AsyncSession, Depends(get_db)]
 
 async def _owned_site(db: AsyncSession, tenant_id: uuid.UUID, site_id: uuid.UUID) -> Site:
     return await crud.get_scoped(db, Site, tenant_id, site_id)
+
+
+async def _tenant_plan(db: AsyncSession, tenant_id: uuid.UUID) -> str:
+    """Same lookup as app/api/ai.py's _tenant_plan — duplicated locally
+    rather than shared since it's one query."""
+    tenant = (await db.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one()
+    return tenant.plan
 
 
 @router.get("", response_model=list[CourierConnectionOut])
@@ -59,6 +67,7 @@ async def connect_steadfast(
     site_id: uuid.UUID, payload: SteadfastConnectIn, user: CurrentUser, db: DB
 ) -> CourierConnection:
     site = await _owned_site(db, user.tenant_id, site_id)
+    plans.ensure_courier_allowed(await _tenant_plan(db, user.tenant_id), "steadfast")
 
     ok, error = await steadfast.verify_credentials(
         payload.api_key, payload.secret_key, payload.base_url
@@ -104,6 +113,7 @@ async def connect_redx(
     site_id: uuid.UUID, payload: RedxConnectIn, user: CurrentUser, db: DB
 ) -> CourierConnection:
     site = await _owned_site(db, user.tenant_id, site_id)
+    plans.ensure_courier_allowed(await _tenant_plan(db, user.tenant_id), "redx")
 
     ok, error = await redx.verify_credentials(payload.access_token, payload.base_url)
     connection = CourierConnection(
@@ -133,6 +143,7 @@ async def connect_pathao(
     site_id: uuid.UUID, payload: PathaoConnectIn, user: CurrentUser, db: DB
 ) -> CourierConnection:
     site = await _owned_site(db, user.tenant_id, site_id)
+    plans.ensure_courier_allowed(await _tenant_plan(db, user.tenant_id), "pathao")
 
     ok, error = await pathao.verify_credentials(
         payload.client_id, payload.client_secret, payload.username, payload.password, payload.base_url
@@ -174,6 +185,7 @@ async def connect_ecourier(
     merchant finds out for real the first time an order actually ships.
     """
     site = await _owned_site(db, user.tenant_id, site_id)
+    plans.ensure_courier_allowed(await _tenant_plan(db, user.tenant_id), "ecourier")
 
     connection = CourierConnection(
         tenant_id=site.tenant_id,

@@ -40,9 +40,9 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import bkash, cache, courier_crypto, crud
+from app import bkash, cache, courier_crypto, crud, plans
 from app.db import get_db
-from app.models import PaymentConnection, Site
+from app.models import PaymentConnection, Site, Tenant
 from app.schemas import PaymentConnectIn, PaymentConnectionOut
 from app.security import CurrentUser
 
@@ -55,6 +55,13 @@ _GATEWAY_PROVIDERS = {"bkash", "nagad", "sslcommerz", "rocket"}
 
 async def _owned_site(db: AsyncSession, tenant_id: uuid.UUID, site_id: uuid.UUID) -> Site:
     return await crud.get_scoped(db, Site, tenant_id, site_id)
+
+
+async def _tenant_plan(db: AsyncSession, tenant_id: uuid.UUID) -> str:
+    """Same lookup as app/api/ai.py's _tenant_plan — duplicated locally
+    rather than shared since it's one query."""
+    tenant = (await db.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one()
+    return tenant.plan
 
 
 @router.get("", response_model=list[PaymentConnectionOut])
@@ -91,6 +98,8 @@ async def connect_payment(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unknown payment provider '{provider}'")
 
     site = await _owned_site(db, user.tenant_id, site_id)
+    if provider in _GATEWAY_PROVIDERS:
+        plans.ensure_payment_provider_allowed(await _tenant_plan(db, user.tenant_id), provider)
 
     verified_ok: bool | None = None  # None = no live check for this provider
     extra_encrypted: str | None = None

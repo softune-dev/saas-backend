@@ -9,9 +9,9 @@ from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import cache, crud, media, notifications, queue, vercel
+from app import cache, crud, media, notifications, plans, queue, vercel
 from app.db import get_db
-from app.models import Site, SitePage, Template
+from app.models import Site, SitePage, Template, Tenant
 from app.config import settings
 from app.schemas import (
     DomainStatusOut,
@@ -202,6 +202,8 @@ async def switch_theme(
     a data migration.
     """
     site = await crud.get_scoped(db, Site, user.tenant_id, site_id)
+    tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
+    plans.ensure_theme_switch_allowed(tenant.plan)
     old_template = site.template
 
     new_template = (
