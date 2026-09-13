@@ -64,7 +64,7 @@ ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp", "image/avif"}
 ALLOWED_VIDEO_TYPES = {"video/mp4", "video/webm", "video/quicktime"}
 
 Category = Annotated[
-    str, Query(pattern="^(hero|products|categories|other)$")
+    str, Query(pattern="^(hero|products|categories|events|other)$")
 ]
 
 
