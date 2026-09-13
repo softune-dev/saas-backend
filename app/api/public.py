@@ -403,6 +403,9 @@ async def list_public_events(host: str, db: DB) -> list[dict]:
             "ctaLabel": e.cta_label,
             "discountPercent": e.discount_percent,
             "productIds": [str(p.id) for p in e.products],
+            # Storefront popup modal — independent of the homepage Events
+            # section's own curated selection, see migrations/062.
+            "isPopup": e.is_popup,
         }
         for e in rows
     ]

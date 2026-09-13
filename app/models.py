@@ -389,6 +389,9 @@ class Event(Base, TimestampMixin):
     cta_label: Mapped[str] = mapped_column(Text, default="Shop now")
     discount_percent: Mapped[int] = mapped_column(SmallInteger)
     is_active: Mapped[bool] = mapped_column(Boolean, default=False)
+    # At most one true per site (migrations/062's partial unique index) —
+    # the storefront popup modal, independent of homepage curation.
+    is_popup: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # lazy="selectin": listing N events must not fire N+1 queries for each
     # one's bound product ids (the dashboard list shows a product count).

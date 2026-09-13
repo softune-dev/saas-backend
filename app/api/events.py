@@ -10,7 +10,7 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import cache, crud, events as events_mod, media
@@ -38,6 +38,7 @@ def _event_out(event: Event) -> EventOut:
         cta_label=event.cta_label,
         discount_percent=event.discount_percent,
         is_active=event.is_active,
+        is_popup=event.is_popup,
         product_ids=[p.id for p in event.products],
         product_count=len(event.products),
         created_at=event.created_at,
@@ -98,6 +99,18 @@ async def _ensure_no_active_conflict(
         )
 
 
+async def _clear_other_popups(
+    db: AsyncSession, site_id: uuid.UUID, exclude_event_id: uuid.UUID | None
+) -> None:
+    """Radio-button behavior for the storefront popup event — the partial
+    unique index (migrations/062) is the backstop, this is what makes
+    turning one on actually unset the previous one instead of erroring."""
+    stmt = update(Event).where(Event.site_id == site_id, Event.is_popup)
+    if exclude_event_id is not None:
+        stmt = stmt.where(Event.id != exclude_event_id)
+    await db.execute(stmt.values(is_popup=False))
+
+
 @router.get("/sites/{site_id}/events", response_model=Page[EventOut])
 async def list_events(
     site_id: uuid.UUID,
@@ -138,6 +151,8 @@ async def create_event(
     products = await _resolve_products(db, user.tenant_id, site_id, payload.product_ids)
     if payload.is_active:
         await _ensure_no_active_conflict(db, site_id, products, exclude_event_id=None)
+    if payload.is_popup:
+        await _clear_other_popups(db, site_id, exclude_event_id=None)
 
     data = payload.model_dump(exclude={"product_ids"})
     data["slug"] = payload.slug or crud.slugify(payload.name, "event")
@@ -162,6 +177,8 @@ async def update_event(
     will_be_active = payload.is_active if payload.is_active is not None else event.is_active
     if will_be_active:
         await _ensure_no_active_conflict(db, site_id, new_products, exclude_event_id=event.id)
+    if payload.is_popup:
+        await _clear_other_popups(db, site_id, exclude_event_id=event.id)
 
     old_image_url = event.image_url
     data = payload.model_dump(exclude_unset=True, exclude={"product_ids"})

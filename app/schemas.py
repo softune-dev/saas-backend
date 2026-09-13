@@ -400,6 +400,7 @@ class EventCreate(BaseModel):
     discount_percent: int = Field(ge=1, le=90)
     product_ids: list[uuid.UUID] = Field(default_factory=list)
     is_active: bool = False
+    is_popup: bool = False
 
 
 class EventUpdate(BaseModel):
@@ -411,6 +412,7 @@ class EventUpdate(BaseModel):
     discount_percent: int | None = Field(default=None, ge=1, le=90)
     product_ids: list[uuid.UUID] | None = None
     is_active: bool | None = None
+    is_popup: bool | None = None
 
 
 class EventOut(BaseModel):
@@ -426,6 +428,7 @@ class EventOut(BaseModel):
     cta_label: str
     discount_percent: int
     is_active: bool
+    is_popup: bool
     product_ids: list[uuid.UUID]
     product_count: int
     created_at: datetime
