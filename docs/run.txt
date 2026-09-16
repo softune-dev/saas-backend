@@ -25,3 +25,10 @@ docker compose -f docker-compose.prod.yml ps
 
 git config --global user.name "kallolx"
 git config --global user.email "kallol.business.ds@gmail.com"
+
+Vercel deploy workflow (kallolx is a collaborator on softune, Hobby plan
+blocks collaborator-authored commits from deploying):
+git checkout -b work/some-change
+git push -u origin work/some-change
+open the PR link git prints, then merge it while logged in as softune
+git checkout master && git pull origin master
