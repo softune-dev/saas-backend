@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends
 
 from app.api import (
     ai,
+    ai_images,
     analytics,
     auth,
     billing,
@@ -61,6 +62,7 @@ api_router.include_router(ai.router, dependencies=_demo_guard)
 api_router.include_router(ai.chat_router, dependencies=_demo_guard)
 api_router.include_router(ai.actions_router, dependencies=_demo_guard)
 api_router.include_router(ai.usage_router, dependencies=_demo_guard)
+api_router.include_router(ai_images.router, dependencies=_demo_guard)
 # NOT gated by _demo_guard — a superadmin's own tenant is never "demo" plan
 # and this router's own SuperAdminUser dependency (app/security.py) is a
 # stricter gate than block_demo_writes anyway. See superadmin.py's docstring.

@@ -99,6 +99,44 @@ async def demo_access_rate_limit(request: Request) -> None:
         return
 
 
+async def forgot_password_rate_limit(request: Request) -> None:
+    """Same dual-window shape as login_rate_limit below — per-IP (a single
+    attacker scripting many emails) and per-email (many IPs targeting one
+    inbox with OTP spam, which a per-IP limit alone would let straight
+    through). Tighter than login's own limits: this sends a real email on
+    every request that matches an account, so the cost of letting it run
+    unchecked is spamming someone's inbox, not just a wasted request.
+    """
+    ip = _client_ip(request)
+    email = ""
+    try:
+        body = await request.json()
+        email = str(body.get("email", "")).strip().lower()
+    except Exception:  # noqa: BLE001 - malformed body; let the route's own validation reject it
+        pass
+
+    checks = [(f"ratelimit:forgot_password_ip:{ip}", 8, 600)]
+    if email:
+        checks.append((f"ratelimit:forgot_password_email:{email}", 4, 600))
+
+    try:
+        c = cache.client()
+        for redis_key, limit, window_seconds in checks:
+            count = await c.incr(redis_key)
+            if count == 1:
+                await c.expire(redis_key, window_seconds)
+            if count > limit:
+                raise HTTPException(
+                    status.HTTP_429_TOO_MANY_REQUESTS,
+                    "Too many requests. Please try again in a few minutes.",
+                )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - see module docstring
+        log.warning("forgot-password rate limit check failed for %s: %s (allowing request)", ip, exc)
+        return
+
+
 async def login_rate_limit(request: Request) -> None:
     """Two independent windows, both enforced: per-IP (catches a single
     attacker spraying many emails) and per-email (catches a distributed

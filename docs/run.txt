@@ -8,6 +8,7 @@ cd landing
 
 cd templates/aurora
 cd templates/bazaar
+cd templates/fashion-classic
 npx next dev -p 3050
 npx next dev -p 3052
 
@@ -17,9 +18,10 @@ kallol.business.ds@gmail.com
 randomt253@gmail.com
 t1N5CFKz1C7rShFG
 
-cd ~/saas-backend && git pull && docker compose -f docker-compose.prod.yml up -d --build api worker
+cd saas-backend
 docker compose -f docker-compose.prod.yml ps
 
-netstat -ano | findstr :PORT
-taskkill /F /PID {PORT}
 
+
+git config --global user.name "kallolx"
+git config --global user.email "kallol.business.ds@gmail.com"

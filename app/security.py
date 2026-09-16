@@ -211,6 +211,42 @@ async def get_login_otp_user_id(
 CurrentLoginOtp = Annotated[uuid.UUID, Depends(get_login_otp_user_id)]
 
 
+def create_password_reset_token(user_id: uuid.UUID) -> str:
+    """Issued by POST /auth/forgot-password/request-otp instead of ever
+    telling the caller whether that email matched a real account — the
+    ONLY signal here is whether the OTP + this token later verify
+    together at /auth/forgot-password/confirm, same "one generic outcome"
+    instinct as /login's single invalid-credentials message. Deliberately
+    a separate typ from "login_otp" even though the shape is identical:
+    presenting a login_otp token here (or vice versa) must fail as a wrong
+    token type, not accidentally authorize the other flow."""
+    now = datetime.now(UTC)
+    payload = {"sub": str(user_id), "typ": "password_reset", "iat": now, "exp": now + timedelta(minutes=10)}
+    return jwt.encode(payload, settings.secret_key, algorithm=ALGORITHM)
+
+
+async def get_password_reset_user_id(
+    creds: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+) -> uuid.UUID:
+    if creds is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing bearer token")
+    try:
+        payload = jwt.decode(creds.credentials, settings.secret_key, algorithms=[ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Code expired — please request a new one") from None
+    except jwt.InvalidTokenError:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token") from None
+    if payload.get("typ") != "password_reset":
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Wrong token type")
+    try:
+        return uuid.UUID(payload["sub"])
+    except (KeyError, ValueError):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Malformed token") from None
+
+
+CurrentPasswordReset = Annotated[uuid.UUID, Depends(get_password_reset_user_id)]
+
+
 def create_lead_token(lead_id: uuid.UUID) -> str:
     """A SEPARATE, much narrower credential from create_access_token — typ
     "lead" so it can never be presented to a normal authenticated endpoint

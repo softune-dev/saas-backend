@@ -10,14 +10,16 @@ docstring for the validation it performs before a value ever gets here.
 import uuid
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import ai, ai_actions, ai_tools, crud
+from app import ai, ai_actions, ai_forms, ai_tools, chat_credits, crud, mailer
+from app.config import settings
 from app.db import get_db
-from app.models import Site, Tenant
+from app.models import Site, Tenant, User
+from app.schemas import ChatCreditPurchaseSubmit
 from app.security import CurrentUser
 
 router = APIRouter(prefix="/sites/{site_id}/ai", tags=["ai"])
@@ -97,6 +99,13 @@ async def chat(payload: ChatIn, user: CurrentUser, db: DB) -> ChatOut:
         db,
         plan,
     )
+    if pending_action is not None:
+        # Attaches whatever the confirm card needs: the field schema + pre-
+        # filled values for the generic form types (see app/ai_forms.py's
+        # module docstring), a read-only old->new diff for update_product
+        # specifically, or nothing at all for a type with neither (e.g.
+        # create_ticket, which keeps its own bespoke summary card).
+        pending_action = await ai_forms.attach_form(pending_action, db, user.tenant_id)
     return ChatOut(reply=reply, tools_used=tools_used, pending_action=pending_action)
 
 
@@ -114,6 +123,52 @@ async def get_ai_usage(user: CurrentUser, db: DB) -> AIUsageOut:
     plan = await _tenant_plan(db, user.tenant_id)
     usage = await ai.get_usage(str(user.tenant_id), plan)
     return AIUsageOut(**usage)
+
+
+@usage_router.get("/chat-credits/balance")
+async def get_chat_credit_balance(user: CurrentUser, db: DB) -> dict:
+    """The REAL, purchased chat-credit balance — separate from the free
+    daily count get_ai_usage above shows. See app/chat_credits.py."""
+    return {"balance": await chat_credits.get_balance(db, user.tenant_id)}
+
+
+@usage_router.post("/chat-credits/purchase", status_code=status.HTTP_202_ACCEPTED)
+async def submit_chat_credit_purchase(payload: ChatCreditPurchaseSubmit, user: CurrentUser, db: DB) -> dict:
+    """Same self-serve "I already sent the money" claim as
+    app/api/ai_images.py's submit_credit_purchase — a different currency
+    (chat credits, not image credits), same boundary: nothing is stored
+    here, the email IS the record, a person verifies trx_id and grants
+    credits from Superadmin (grant_chat_credits) afterward.
+    """
+    pack = chat_credits.CHAT_CREDIT_PACKS.get(payload.pack_id)
+    if pack is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Unknown credit pack")
+
+    tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
+    owner = (
+        await db.execute(select(User).where(User.tenant_id == user.tenant_id, User.role == "owner"))
+    ).scalars().first()
+
+    subject, html_body, text_body = mailer.chat_credit_purchase_submitted_email(
+        tenant_name=tenant.name,
+        tenant_slug=tenant.slug,
+        owner_name=owner.full_name if owner else None,
+        owner_email=owner.email if owner else "—",
+        pack_name=pack["name"],
+        credits=pack["credits"],
+        amount_taka=pack["price_taka"],
+        sender_number=payload.sender_number.strip(),
+        trx_id=payload.trx_id.strip(),
+        note=payload.note.strip() if payload.note else None,
+    )
+    sent_support = await mailer.send_email(mailer.SUPPORT, subject, html_body, text_body)
+    sent_copy = await mailer.send_email(settings.billing_notify_email, subject, html_body, text_body)
+    if not sent_support and not sent_copy:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            "Couldn't send this right now — email support@softunebd.com directly with your Transaction ID.",
+        )
+    return {"received": True}
 
 
 class SuggestedPromptOut(BaseModel):
@@ -185,6 +240,30 @@ async def confirm_set_categories(
     return SetCategoriesOut(categories=categories)
 
 
+class AddCategoryActionIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=300)
+    sort_order: int | None = None
+
+
+class AddCategoryActionOut(BaseModel):
+    category: dict
+
+
+@actions_router.post("/add-category", response_model=AddCategoryActionOut)
+async def confirm_add_category(
+    payload: AddCategoryActionIn, user: CurrentUser, db: DB
+) -> AddCategoryActionOut:
+    """Additive — creates ONE category via crud.save, unlike /set-categories
+    which deletes and recreates the whole list. See app/ai_actions.py's
+    add_category docstring.
+    """
+    category = await ai_actions.add_category(
+        db, user.tenant_id, payload.name, payload.description, payload.sort_order
+    )
+    return AddCategoryActionOut(category=category)
+
+
 class CreateProductActionIn(BaseModel):
     # Deliberately loose (dict, not the full ProductCreate schema) — this is
     # a chat-gathered draft the merchant already saw and confirmed in the UI,
@@ -222,6 +301,59 @@ async def confirm_update_product(
 ) -> UpdateProductActionOut:
     product = await ai_actions.update_product(db, user.tenant_id, payload.product)
     return UpdateProductActionOut(product=product)
+
+
+class UpdateOrderStatusActionIn(BaseModel):
+    order_id: str | None = None
+    order_number: str | None = None
+    status: str | None = None
+    notes: str | None = Field(default=None, max_length=2000)
+
+
+class UpdateOrderStatusActionOut(BaseModel):
+    order: dict
+
+
+@actions_router.post("/update-order-status", response_model=UpdateOrderStatusActionOut)
+async def confirm_update_order_status(
+    payload: UpdateOrderStatusActionIn, user: CurrentUser, db: DB
+) -> UpdateOrderStatusActionOut:
+    """`status` is renamed to `new_status` only on the way into
+    ai_actions.update_order_status — see that function's docstring for why
+    (avoids shadowing fastapi's `status` module in that file)."""
+    order = await ai_actions.update_order_status(
+        db, user.tenant_id,
+        order_id=payload.order_id, order_number=payload.order_number,
+        new_status=payload.status, notes=payload.notes,
+    )
+    return UpdateOrderStatusActionOut(order=order)
+
+
+class CreateEventActionIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=2000)
+    discount_percent: int = Field(ge=1, le=90)
+    cta_label: str = Field(default="Shop now", max_length=40)
+    is_active: bool = False
+    is_popup: bool = False
+    image_only: bool = False
+
+
+class CreateEventActionOut(BaseModel):
+    event: dict
+
+
+@actions_router.post("/create-event", response_model=CreateEventActionOut)
+async def confirm_create_event(
+    payload: CreateEventActionIn, user: CurrentUser, db: DB
+) -> CreateEventActionOut:
+    event = await ai_actions.create_event(
+        db, user.tenant_id,
+        name=payload.name, description=payload.description,
+        discount_percent=payload.discount_percent, cta_label=payload.cta_label,
+        is_active=payload.is_active, is_popup=payload.is_popup, image_only=payload.image_only,
+    )
+    return CreateEventActionOut(event=event)
 
 
 class CreateTicketActionIn(BaseModel):

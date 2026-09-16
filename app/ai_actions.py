@@ -19,11 +19,11 @@ a real site_id once that's no longer true.
 import uuid
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import cache, crud, media, products
-from app.models import Category, HelpTicket, Product, Site, Tenant
+from app import cache, crud, events, media, products
+from app.models import Category, Event, HelpTicket, Order, Product, Site, Tenant
 
 
 async def _resolve_site(db: AsyncSession, tenant_id: uuid.UUID) -> Site:
@@ -93,6 +93,44 @@ async def _find_product(
     return matches[0]
 
 
+async def _find_order(
+    db: AsyncSession, site: Site, order_id: str | None, order_number: str | None
+) -> Order:
+    """Locates an existing order to update — by id when the model has a real
+    UUID, else by an EXACT order_number match scoped to this site. Unlike
+    _find_product's fuzzy ilike name search, an order number is a precise
+    identifier the merchant already has in hand (it's printed on the order
+    itself, and list_orders/get_order both return it) — a fuzzy match here
+    would risk updating the wrong order's status, a worse outcome than
+    "the order needs to be created before its status can be a name."
+    """
+    if order_id:
+        try:
+            oid = uuid.UUID(order_id)
+        except ValueError:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Invalid order id")
+        order = (
+            await db.execute(select(Order).where(Order.id == oid, Order.site_id == site.id))
+        ).scalars().first()
+        if order is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Order not found")
+        return order
+
+    number = (order_number or "").strip()
+    if not number:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, "Need an order id or order number to update"
+        )
+    order = (
+        await db.execute(
+            select(Order).where(Order.site_id == site.id, Order.order_number == number)
+        )
+    ).scalars().first()
+    if order is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f'No order matching "{number}"')
+    return order
+
+
 async def set_categories(
     db: AsyncSession, tenant_id: uuid.UUID, category_names: list[str]
 ) -> list[dict]:
@@ -135,13 +173,75 @@ async def set_categories(
     return [{"id": str(c.id), "name": c.name, "slug": c.slug} for c in created]
 
 
+async def add_category(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    name: str,
+    description: str | None = None,
+    sort_order: int | None = None,
+) -> dict:
+    """Adds ONE category without touching any existing ones — the additive
+    counterpart to set_categories' destructive full-replace. Mirrors
+    CategoryCreate's real required set (only `name`); slug is auto-derived
+    same as the manual "Add category" form does.
+    """
+    site = await _resolve_site(db, tenant_id)
+
+    name = (name or "").strip()
+    if not name:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Category needs a name")
+
+    if sort_order is None:
+        # Append after whatever already exists, same default a merchant
+        # adding one by hand from the Categories page would get.
+        sort_order = (
+            await db.execute(
+                select(func.count()).select_from(Category).where(Category.site_id == site.id)
+            )
+        ).scalar_one()
+
+    category = Category(
+        site_id=site.id,
+        tenant_id=site.tenant_id,
+        name=name,
+        slug=crud.slugify(name, "category"),
+        description=(description or "").strip() or None,
+        sort_order=sort_order,
+    )
+    category = await crud.save(db, category)
+    await cache.invalidate_site(site.subdomain, site.custom_domain)
+    await cache.invalidate_dashboard(str(site.id))
+    return {"id": str(category.id), "name": category.name, "slug": category.slug}
+
+
+def _normalize_images(images: object) -> list[dict]:
+    """Images arrive already-uploaded — ai-action-form.tsx's "images" field
+    uploads straight to Cloudinary via the real media endpoint the moment a
+    file is picked (see app/ai_forms.py's create_product field comment) and
+    only ever hands this module back {url, public_id} dicts, never raw file
+    bytes (Gemini has no way to receive those). This just guards the shape
+    before it reaches Product.images, same defensiveness as every other
+    JSONB write in this module — a malformed dict here would otherwise
+    reach a customer's live storefront.
+    """
+    if not isinstance(images, list):
+        return []
+    return [
+        {"url": img["url"], "public_id": img.get("public_id")}
+        for img in images
+        if isinstance(img, dict) and isinstance(img.get("url"), str) and img["url"].strip()
+    ]
+
+
 async def create_product(db: AsyncSession, tenant_id: uuid.UUID, product: dict) -> dict:
-    """Creates one product from the chat-gathered fields. Deliberately no
-    `images` — the merchant adds those afterward on the normal Edit Product
-    page, per the scope the user asked for. category_name is resolved to an
-    id here (case-insensitive match against this site's categories) rather
-    than trusting a client-supplied category_id, same reasoning as every
-    other tenant-scoped write in this app.
+    """Creates one product from the chat-gathered fields. `images` is never
+    something the MODEL fills in — it can't receive file bytes — it's
+    whatever the merchant uploaded directly in the confirm form's Photos
+    field before clicking Confirm (see _normalize_images above).
+    category_name is resolved to an id here (case-insensitive match against
+    this site's categories) rather than trusting a client-supplied
+    category_id, same reasoning as every other tenant-scoped write in this
+    app.
     """
     site = await _resolve_site(db, tenant_id)
 
@@ -183,9 +283,7 @@ async def create_product(db: AsyncSession, tenant_id: uuid.UUID, product: dict) 
         short_description=product.get("short_description") or None,
         price_cents=price_cents,
         category_id=category_id,
-        unit=product.get("unit") or None,
-        free_delivery=bool(product.get("free_delivery", True)),
-        delivery_charge_cents=product.get("delivery_charge_cents"),
+        images=_normalize_images(product.get("images")),
         attributes=attributes,
         features=features,
     )
@@ -202,12 +300,14 @@ async def create_product(db: AsyncSession, tenant_id: uuid.UUID, product: dict) 
 
 
 # Fields the chat assistant is allowed to change on an existing product.
-# Deliberately excludes slug/sku/images/track_stock/video_url/serial_number —
-# ones the merchant would only reasonably set from the actual edit page, not
-# by describing them in a chat message.
+# Deliberately excludes slug/sku/track_stock/video_url/serial_number — ones
+# the merchant would only reasonably set from the actual edit page, not by
+# describing them in a chat message — and unit/free_delivery/
+# delivery_charge_cents, which are configured once in Site Settings >
+# Shipping, not per product. `images` is handled separately below (needs
+# _normalize_images, not a plain setattr) rather than added here.
 _EDITABLE_PRODUCT_FIELDS = {
     "name", "price_cents", "compare_at_cents", "stock", "is_active",
-    "unit", "free_delivery", "delivery_charge_cents",
     "short_description", "description",
 }
 
@@ -240,6 +340,9 @@ async def update_product(db: AsyncSession, tenant_id: uuid.UUID, product: dict) 
             if str(f.get("title", "")).strip()
         ][:8]
 
+    if "images" in product:
+        row.images = _normalize_images(product["images"])
+
     for field in _EDITABLE_PRODUCT_FIELDS:
         if field in product:
             setattr(row, field, product[field])
@@ -255,6 +358,123 @@ async def update_product(db: AsyncSession, tenant_id: uuid.UUID, product: dict) 
         "stock": row.stock,
         "is_active": row.is_active,
         "category_id": str(row.category_id) if row.category_id else None,
+    }
+
+
+# Mirrors OrderUpdate's own validator (app/schemas.py) exactly — status is
+# the only field with a fixed vocabulary; notes is free text. Totals/line
+# items are NOT in this set on purpose (CLAUDE.md rule 8: order history is
+# immutable, and migrations/003_commerce.sql explains why a total must never
+# be recomputed after the fact).
+_ORDER_STATUSES = {"pending", "paid", "fulfilled", "cancelled", "refunded"}
+
+
+async def update_order_status(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    order_id: str | None = None,
+    order_number: str | None = None,
+    new_status: str | None = None,
+    notes: str | None = None,
+) -> dict:
+    """Edits ONLY status/notes on an existing order — the two fields
+    OrderUpdate allows. (Parameter is `new_status`, not `status`, purely to
+    avoid shadowing the `status` module imported at the top of this file for
+    HTTPException codes; the confirm endpoint's JSON field is still plain
+    "status", matching OrderUpdate.) No cache.invalidate_site — order status
+    doesn't render on the live storefront the way a product/category edit
+    does, only the dashboard needs to know, same as commerce.py's own
+    update_order route.
+    """
+    site = await _resolve_site(db, tenant_id)
+    row = await _find_order(db, site, order_id, order_number)
+
+    if new_status is not None:
+        if new_status not in _ORDER_STATUSES:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"status must be one of: {', '.join(sorted(_ORDER_STATUSES))}",
+            )
+        row.status = new_status
+    if notes is not None:
+        row.notes = notes
+
+    row = await crud.save(db, row)
+    await cache.invalidate_dashboard(str(site.id))
+    return {
+        "id": str(row.id),
+        "order_number": row.order_number,
+        "status": row.status,
+        "notes": row.notes,
+    }
+
+
+async def create_event(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    name: str,
+    description: str | None = None,
+    discount_percent: int | None = None,
+    cta_label: str = "Shop now",
+    is_active: bool = False,
+    is_popup: bool = False,
+    image_only: bool = False,
+) -> dict:
+    """Creates one promo/coupon Event — "coupons/events" maps entirely onto
+    this model, there's no separate Coupon table (see app/ai_forms.py's
+    create_event schema comment). Deliberately no product_ids: binding
+    specific products needs a name/id picker the chat form doesn't have this
+    pass, same reasoning as create_product leaving out images — the merchant
+    attaches products from the real Events page afterward.
+    """
+    site = await _resolve_site(db, tenant_id)
+
+    # Same per-plan cap the manual "Create event" endpoint enforces
+    # (app/api/events.py) — this path writes an Event row directly via
+    # crud.save, not through that endpoint, so it needs its own check.
+    tenant = (await db.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one()
+    existing_count = await crud.count_scoped(db, Event, tenant_id)
+    events.ensure_within_event_limit(existing_count, tenant.plan)
+
+    name = (name or "").strip()
+    if not name:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Event needs a name")
+    if discount_percent is None or not (1 <= int(discount_percent) <= 90):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, "Discount percent must be between 1 and 90"
+        )
+
+    if is_popup:
+        # Same DB-level backstop as app/api/events.py's _clear_other_popups —
+        # at most one popup event per site (migrations/062's partial unique
+        # index). Cleared here first so turning one event's popup on doesn't
+        # 409 against whichever event already had it.
+        await db.execute(
+            update(Event).where(Event.site_id == site.id, Event.is_popup).values(is_popup=False)
+        )
+
+    event = Event(
+        site_id=site.id,
+        tenant_id=site.tenant_id,
+        name=name,
+        slug=crud.slugify(name, "event"),
+        description=(description or "").strip() or None,
+        cta_label=(cta_label or "Shop now").strip()[:40] or "Shop now",
+        discount_percent=int(discount_percent),
+        is_active=bool(is_active),
+        is_popup=bool(is_popup),
+        image_only=bool(image_only),
+    )
+    event = await crud.save(db, event)
+    await cache.invalidate_site(site.subdomain, site.custom_domain)
+    await cache.invalidate_dashboard(str(site.id))
+    return {
+        "id": str(event.id),
+        "name": event.name,
+        "slug": event.slug,
+        "discount_percent": event.discount_percent,
+        "is_active": event.is_active,
+        "is_popup": event.is_popup,
     }
 
 

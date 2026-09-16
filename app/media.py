@@ -325,6 +325,49 @@ def theme_image_urls(theme: dict) -> set[str]:
     return urls
 
 
+def delete_site_folder(subdomain: str) -> None:
+    """Permanently deletes EVERYTHING Cloudinary holds for one site — every
+    category's images/videos plus the folder tree itself ({root}/{subdomain}
+    and every subfolder under it, screenshots included since those live
+    under category "_system", outside VALID_CATEGORIES but still under this
+    same prefix).
+
+    Nothing in this codebase called this before it existed — a deleted
+    tenant/expired trial left its Cloudinary folder behind forever, cleaned
+    up by hand. Called from app/worker.py's sweep_expired_trials (trial hard
+    delete, trial_grace_days after expiry) and app/api/superadmin.py's
+    delete_tenant. Best-effort like delete_by_url below: a Cloudinary
+    hiccup here must never block the tenant row from actually being
+    deleted — the DB delete is the real boundary for "the account is gone";
+    an orphaned Cloudinary folder afterward is a cheap, recoverable problem,
+    a tenant stuck undeletable because of a Cloudinary 500 is not.
+    """
+    try:
+        _ensure_configured()
+    except HTTPException:
+        return  # Cloudinary not configured at all (e.g. local dev) — nothing to clean up.
+
+    root = settings.cloudinary_root_folder.strip("/")
+    prefix = f"{root}/{subdomain}/"
+    try:
+        for resource_type in ("image", "video"):
+            cloudinary.api.delete_resources_by_prefix(prefix, resource_type=resource_type)
+        # delete_folder refuses a folder that still has subfolders in it —
+        # Cloudinary's admin API isn't recursive — so the per-category
+        # subfolders (hero/products/categories/events/other/_system) have to
+        # go first, then the now-empty site folder itself.
+        try:
+            for sub in cloudinary.api.subfolders(f"{root}/{subdomain}").get("folders", []):
+                cloudinary.api.delete_folder(sub["path"])
+        except cloudinary.exceptions.NotFound:
+            pass
+        cloudinary.api.delete_folder(f"{root}/{subdomain}")
+    except cloudinary.exceptions.NotFound:
+        pass  # Nothing was ever uploaded for this site — already "clean".
+    except Exception as exc:  # noqa: BLE001 - cleanup is best-effort, never fatal
+        log.warning("Failed to clean up Cloudinary folder for site %s: %s", subdomain, exc)
+
+
 def delete_by_url(url: str, subdomain: str) -> None:
     """Best-effort cleanup for one URL that a save/delete just stopped
     referencing. Never raises — a cleanup failure (Cloudinary hiccup, an

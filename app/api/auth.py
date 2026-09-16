@@ -14,10 +14,13 @@ from app import crud, mailer, queue, recaptcha
 from app.config import settings
 from app.db import get_db
 from app.models import Tenant, TrustedDevice, User
-from app.ratelimit import _client_ip, login_rate_limit, rate_limit
+from app.ratelimit import _client_ip, forgot_password_rate_limit, login_rate_limit, rate_limit
 from app.schemas import (
     ChangePasswordConfirmIn,
     ChangePasswordRequestOtpIn,
+    ForgotPasswordConfirmIn,
+    ForgotPasswordRequestOtpIn,
+    ForgotPasswordRequestOtpOut,
     LoginIn,
     LoginResultOut,
     MeOut,
@@ -32,10 +35,12 @@ from app.schemas import (
 )
 from app.security import (
     CurrentLoginOtp,
+    CurrentPasswordReset,
     CurrentUser,
     block_demo_writes,
     create_access_token,
     create_login_otp_token,
+    create_password_reset_token,
     create_refresh_token,
     decode_token,
     generate_otp,
@@ -74,6 +79,13 @@ async def _check_tenant_access(db: AsyncSession, tenant_id: uuid.UUID) -> None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Account unavailable")
     if tenant.status == "suspended":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "This account has been suspended.")
+    if tenant.status == "payment_overdue":
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Access is paused until your plan payment is confirmed. Contact us on "
+            "WhatsApp or email support@softunebd.com with your Transaction ID to "
+            "restore access — your data is untouched and waiting.",
+        )
     if tenant.plan == "trial" and tenant.trial_expires_at and datetime.now(UTC) > tenant.trial_expires_at:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
@@ -224,6 +236,89 @@ async def verify_login_otp(payload: VerifyLoginOtpIn, user_id: CurrentLoginOtp, 
     await db.refresh(user)
     tokens = _tokens(user)
     return LoginResultOut(otp_required=False, **tokens.model_dump())
+
+
+@router.post(
+    "/forgot-password/request-otp",
+    response_model=ForgotPasswordRequestOtpOut,
+    dependencies=[Depends(forgot_password_rate_limit)],
+)
+async def request_forgot_password_otp(
+    payload: ForgotPasswordRequestOtpIn, request: Request, db: DB
+) -> ForgotPasswordRequestOtpOut:
+    """Public — no auth, this IS how you get back in when the password is
+    the thing you lost. Always returns a real reset_token, even for an
+    email that matches no account, so the response itself can never be
+    used to check whether an address is registered — see
+    create_password_reset_token's own docstring. confirm_forgot_password
+    below then fails with the exact same generic error for a fabricated
+    token as it would for a genuinely wrong code, so there's no second
+    signal at that step either.
+    """
+    recaptcha.enforce(
+        await recaptcha.verify(
+            payload.recaptcha_token, "forgot_password", _client_ip(request), payload.recaptcha_v2_token
+        )
+    )
+
+    user = (
+        await db.execute(select(User).where(User.email == payload.email))
+    ).scalar_one_or_none()
+    if user is not None and user.is_active:
+        otp = generate_otp()
+        user.password_otp_hash = hash_otp(otp)
+        user.password_otp_expires_at = datetime.now(UTC) + timedelta(minutes=_LOGIN_OTP_TTL_MINUTES)
+        user.password_otp_attempts = 0
+        await db.commit()
+        await _queue_otp_email(user.email, otp, user.full_name)
+        return ForgotPasswordRequestOtpOut(reset_token=create_password_reset_token(user.id))
+
+    return ForgotPasswordRequestOtpOut(reset_token=create_password_reset_token(uuid.uuid4()))
+
+
+@router.post(
+    "/forgot-password/confirm",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(rate_limit("forgot-password-confirm", limit=10, window_seconds=600))],
+)
+async def confirm_forgot_password(
+    payload: ForgotPasswordConfirmIn, user_id: CurrentPasswordReset, db: DB
+) -> None:
+    db_user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    invalid = HTTPException(status.HTTP_400_BAD_REQUEST, "Incorrect or expired code.")
+    if db_user is None:
+        # A fabricated reset_token from request-otp's no-such-account path —
+        # same outcome as a genuinely wrong code, on purpose.
+        raise invalid
+
+    if db_user.password_otp_attempts >= _LOGIN_OTP_MAX_ATTEMPTS:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Too many attempts — request a new code.")
+    db_user.password_otp_attempts += 1
+
+    if (
+        not db_user.password_otp_hash
+        or not db_user.password_otp_expires_at
+        or datetime.now(UTC) > db_user.password_otp_expires_at
+        or not secrets.compare_digest(db_user.password_otp_hash, hash_otp(payload.otp))
+    ):
+        await db.commit()
+        raise invalid
+
+    db_user.password_otp_hash = None
+    db_user.password_otp_expires_at = None
+    db_user.password_otp_attempts = 0
+    db_user.password_hash = hash_password(payload.new_password)
+    await crud.save(db, db_user)
+    # Same reasoning as confirm_change_password's identical call — kill
+    # every other device/tab's still-valid tokens now that the password
+    # that authorized them is gone.
+    await revoke_all_user_tokens(db_user.id)
+
+    subject, html_body, text_body = mailer.password_changed_email(db_user.full_name)
+    await queue.publish(
+        queue.JOB_SEND_EMAIL,
+        {"to": db_user.email, "subject": subject, "html_body": html_body, "text_body": text_body},
+    )
 
 
 @router.post("/refresh", response_model=TokenOut)

@@ -92,6 +92,52 @@ class Tenant(Base, TimestampMixin):
     trial_ended_notified_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Only meaningful for a paid plan (starter/growth/business) — the next
+    # date the merchant owes payment. Anchored to the ORIGINAL purchase
+    # date: app/api/superadmin.py's confirm_plan_renewal always advances
+    # this by exactly one calendar month from its own previous value, never
+    # from whenever a late payment actually lands, so the due date never
+    # drifts (migrations/065). Null for trial/demo.
+    plan_renews_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Same one-guard-per-reminder pattern as trial_ended_notified_at above —
+    # both cleared back to NULL every time plan_renews_at advances, so a new
+    # cycle gets fresh reminders. See app/worker.py's notify_upcoming_renewals
+    # / notify_plan_overdue.
+    plan_renewal_reminded_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    plan_overdue_notified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # When app/worker.py's sweep_overdue_plans actually set status =
+    # "payment_overdue" — the anchor the 1-month abandoned-account deletion
+    # sweep counts from, deliberately NOT plan_renews_at itself (that would
+    # silently shrink the deletion window by however many grace days
+    # already elapsed reaching suspension). A paying customer's data gets a
+    # full extra month here, never the trial's 7 days.
+    plan_overdue_since: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    plan_deletion_warned_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Real purchasable balance for AI image generation (app/ai_images.py) —
+    # deliberately separate from the daily-reset text-chat counter
+    # (PLAN_AI_DAILY_CAP, Redis-only, no column at all). Every change also
+    # writes an AiImageCreditTransaction row (migrations/066) so the
+    # balance is always auditable, never just trusted.
+    ai_image_credits: Mapped[int] = mapped_column(Integer, default=0)
+    # Real purchasable balance for TEXT chat requests beyond the free daily
+    # cap (see app/chat_credits.py and app/ai.py's _check_ai_access, which
+    # falls back to spending from this — one credit per request — instead
+    # of a hard 429 once the daily counter is exhausted). Same "separate
+    # table, always auditable" shape as ai_image_credits above; kept as its
+    # own column/ledger (migrations/067) rather than sharing one, since a
+    # text request and an image generation are priced on wildly different
+    # scales.
+    chat_credits: Mapped[int] = mapped_column(Integer, default=0)
 
     users: Mapped[list["User"]] = relationship(back_populates="tenant")
 
@@ -936,6 +982,51 @@ class Invoice(Base):
     # created and that job draining.
     pdf_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     issued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+
+class AiImageCreditTransaction(Base):
+    """One row per change to Tenant.ai_image_credits — purchase, manual
+    grant, a generate/edit spend, or a refund when a generate call failed
+    after credits were already deducted. See migrations/066's own
+    docstring for why this exists instead of just trusting the column.
+    No TimestampMixin: this row is never edited after creation, an
+    updated_at would be meaningless."""
+
+    __tablename__ = "ai_image_credit_transactions"
+
+    id: Mapped[uuid.UUID] = _pk()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    delta: Mapped[int] = mapped_column(Integer)
+    reason: Mapped[str] = mapped_column(Text)
+    balance_after: Mapped[int] = mapped_column(Integer)
+    reference: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+
+class ChatCreditTransaction(Base):
+    """One row per change to Tenant.chat_credits — purchase, manual grant,
+    a spend (one request past the free daily cap), or a refund. Same
+    "separate table, always auditable" shape as AiImageCreditTransaction
+    above (migrations/067). No TimestampMixin, same reasoning as that
+    class."""
+
+    __tablename__ = "chat_credit_transactions"
+
+    id: Mapped[uuid.UUID] = _pk()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    delta: Mapped[int] = mapped_column(Integer)
+    reason: Mapped[str] = mapped_column(Text)
+    balance_after: Mapped[int] = mapped_column(Integer)
+    reference: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")
     )
 

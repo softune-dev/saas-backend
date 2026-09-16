@@ -121,6 +121,26 @@ class ChangePasswordConfirmIn(BaseModel):
     new_password: str = Field(min_length=8, max_length=72)
 
 
+class ForgotPasswordRequestOtpIn(BaseModel):
+    email: EmailStr
+    recaptcha_token: str = ""
+    recaptcha_v2_token: str = ""
+
+
+class ForgotPasswordRequestOtpOut(BaseModel):
+    # ALWAYS present, even when the email matches no account — see
+    # app/security.py's create_password_reset_token docstring. The
+    # frontend always moves to the "enter your code" step; only
+    # /forgot-password/confirm's generic error distinguishes a real vs
+    # fabricated code, exactly like a genuinely wrong one would.
+    reset_token: str
+
+
+class ForgotPasswordConfirmIn(BaseModel):
+    otp: str = Field(min_length=6, max_length=6)
+    new_password: str = Field(min_length=8, max_length=72)
+
+
 class TenantBusinessOut(BaseModel):
     legal_name: str | None = None
     trade_name: str | None = None
@@ -164,6 +184,92 @@ class InvoiceOut(ORMModel):
     issued_at: datetime
 
 
+class ManualPaymentSubmit(BaseModel):
+    """The self-serve "I sent the money" form on the dashboard's Billing
+    page — see app/api/billing.py's submit_manual_payment. Only the plans a
+    merchant can actually self-serve upgrade into; "trial"/"demo" aren't
+    purchasable and a downgrade isn't something this flow handles."""
+
+    plan: Literal["starter", "growth", "business"]
+    sender_number: str = Field(min_length=6, max_length=20)
+    trx_id: str = Field(min_length=3, max_length=40)
+    note: str | None = Field(default=None, max_length=500)
+
+
+class CreditPurchaseSubmit(BaseModel):
+    """The self-serve "I sent the money" form for an AI-image credit pack
+    — same shape and same reasoning as ManualPaymentSubmit above, just a
+    different SKU (credits, not a plan). See app/api/ai_images.py's
+    submit_credit_purchase and app/ai_images.py's CREDIT_PACKS for the
+    real pack -> credits/price mapping (never trust a client-supplied
+    amount)."""
+
+    pack_id: Literal["starter", "popular", "pro"]
+    sender_number: str = Field(min_length=6, max_length=20)
+    trx_id: str = Field(min_length=3, max_length=40)
+    note: str | None = Field(default=None, max_length=500)
+
+
+class ChatCreditPurchaseSubmit(BaseModel):
+    """Same self-serve claim shape as CreditPurchaseSubmit above, for the
+    OTHER currency — chat credits (app/chat_credits.py's CHAT_CREDIT_PACKS),
+    not image credits. Kept as its own schema rather than a shared one so
+    the two can never be confused for each other at the type level."""
+
+    pack_id: Literal["starter", "popular", "pro"]
+    sender_number: str = Field(min_length=6, max_length=20)
+    trx_id: str = Field(min_length=3, max_length=40)
+    note: str | None = Field(default=None, max_length=500)
+
+
+class ImageDataIn(BaseModel):
+    data_base64: str
+    mime_type: str = Field(default="image/jpeg", max_length=40)
+
+
+# Confirmed live against the real API (generationConfig.imageConfig.aspectRatio)
+# before this list was written — Gemini rounds to the nearest dimensions it
+# actually supports, these five cover square/portrait/landscape/story/wide
+# without overwhelming the picker with options nobody needs.
+ImageAspectRatio = Literal["1:1", "3:4", "4:3", "9:16", "16:9"]
+
+
+class GenerateImageIn(BaseModel):
+    """POST /ai/images/generate — either preset_id (a canned prompt from
+    app/ai_image_presets.py) or a free-form prompt, not both required but
+    at least one must resolve to real text (checked in the route). subject
+    fills the preset's one {subject} substitution point — e.g. the product
+    name, store name, or category name the merchant is generating for.
+    reference_images lets a "make a cover photo from my product photo"
+    generation ground itself in a real uploaded image, same as an edit."""
+
+    preset_id: str | None = None
+    prompt: str | None = Field(default=None, max_length=2000)
+    subject: str | None = Field(default=None, max_length=200)
+    tier: Literal["standard", "high_res", "premium"] = "standard"
+    aspect_ratio: ImageAspectRatio = "1:1"
+    reference_images: list[ImageDataIn] = Field(default_factory=list, max_length=3)
+
+
+class EditImageIn(BaseModel):
+    prompt: str = Field(min_length=1, max_length=2000)
+    tier: Literal["standard", "high_res", "premium"] = "standard"
+    aspect_ratio: ImageAspectRatio = "1:1"
+    source_image: ImageDataIn
+
+
+class SaveImageToGalleryIn(BaseModel):
+    image: ImageDataIn
+    category: Literal["hero", "products", "categories", "events", "other"] = "other"
+
+
+class GeneratedImageOut(BaseModel):
+    image_base64: str
+    mime_type: str
+    credits_charged: int
+    balance: int
+
+
 class TokenOut(BaseModel):
     access_token: str
     refresh_token: str
@@ -195,6 +301,10 @@ class TenantOut(ORMModel):
     # Only meaningful when plan == "trial" — the dashboard's trial badge
     # reads this to show a countdown; null for every other plan.
     trial_expires_at: datetime | None
+    # Only meaningful for a paid plan — the Billing page's renewal-due
+    # banner reads this the same way TrialBadge reads trial_expires_at.
+    # Null for trial/demo.
+    plan_renews_at: datetime | None
     created_at: datetime
 
 
@@ -1026,7 +1136,7 @@ class MarketingConnectionOut(ORMModel):
 # =============================================================================
 
 TenantPlan = Literal["trial", "demo", "starter", "growth", "business"]
-TenantStatus = Literal["active", "suspended", "cancelled"]
+TenantStatus = Literal["active", "suspended", "cancelled", "payment_overdue"]
 
 
 class SuperAdminStatsOut(BaseModel):
@@ -1075,6 +1185,17 @@ class SuperAdminTenantOut(ORMModel):
     courier_providers: list[str]
     # Only meaningful when plan == "trial" — null for every other plan.
     trial_expires_at: datetime | None
+    # Only meaningful for a paid plan — null for trial/demo. See
+    # app/api/superadmin.py's confirm_plan_renewal for how this advances.
+    plan_renews_at: datetime | None
+    # Real spendable AI-image-generation balance — see app/ai_images.py.
+    # Advances only via a confirmed credit-pack purchase or this router's
+    # own grant_image_credits, never automatically.
+    ai_image_credits: int
+    # Real spendable chat-credit balance (spent only once the free daily
+    # cap runs out) — see app/chat_credits.py and this router's own
+    # grant_chat_credits.
+    chat_credits: int
     # The owner User's own last_login_at — "check their activity" without a
     # separate activity-log system; joined in by the router, not a Tenant
     # column.
@@ -1151,6 +1272,24 @@ class SuperAdminUserUpdate(BaseModel):
 class SuperAdminTenantUpdate(BaseModel):
     plan: TenantPlan | None = None
     status: TenantStatus | None = None
+
+
+class GrantImageCreditsIn(BaseModel):
+    """Superadmin's manual "credits verified, grant them" action — see
+    app/api/superadmin.py's grant_image_credits. amount is always positive;
+    there's no negative-grant path here on purpose, a correction to an
+    over-grant is a support-tracked exception, not a routine action."""
+
+    amount: int = Field(gt=0, le=10000)
+    note: str | None = Field(default=None, max_length=200)
+
+
+class GrantChatCreditsIn(BaseModel):
+    """Same shape as GrantImageCreditsIn above, for chat_credits instead —
+    see app/api/superadmin.py's grant_chat_credits."""
+
+    amount: int = Field(gt=0, le=100000)
+    note: str | None = Field(default=None, max_length=200)
 
 
 # =============================================================================

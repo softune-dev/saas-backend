@@ -326,6 +326,180 @@ def contact_email(
     return subject, html_body, text_body
 
 
+def manual_payment_submitted_email(
+    *,
+    tenant_name: str,
+    tenant_slug: str,
+    current_plan: str,
+    trial_expires_at: str | None,
+    owner_name: str | None,
+    owner_email: str,
+    site_subdomain: str | None,
+    requested_plan_name: str,
+    amount_taka: int,
+    sender_number: str,
+    trx_id: str,
+    note: str | None,
+) -> tuple[str, str, str]:
+    """Internal — the dashboard Billing page's self-serve "I already sent
+    the money" step (app/api/billing.py's submit_manual_payment). There's
+    no payment gateway (see dashboard/components/billing/billing-data.ts's
+    own docstring) and this deliberately doesn't create an Invoice or store
+    the trx_id anywhere — this email IS the record. Sent once to SUPPORT
+    (a real inbox someone checks and can reply to) and once more, separately,
+    to settings.billing_notify_email so it's never only sitting in a shared
+    inbox. Same plain, skip-the-branded-shell style as contact_email above —
+    an internal ops notification, not something the merchant ever sees.
+    """
+    subject = f"Manual payment claim — {tenant_name} ({requested_plan_name}, ৳{amount_taka:,})"
+    rows = [
+        ("Tenant", f"{tenant_name} ({tenant_slug})"),
+        ("Owner", f"{owner_name or '—'} <{owner_email}>"),
+        ("Store", site_subdomain or "—"),
+        ("Current plan", current_plan),
+        ("Trial ends", trial_expires_at or "—"),
+        ("Requesting plan", f"{requested_plan_name} (৳{amount_taka:,}/mo)"),
+        ("Sent from (bKash number)", sender_number),
+        ("Transaction ID", trx_id),
+        ("Note", note or "—"),
+    ]
+    text_body = (
+        "New manual payment claim — verify the trx_id against the bKash "
+        f"merchant statement, then apply the plan change from Superadmin.\n\n"
+        + "\n".join(f"{k}: {v}" for k, v in rows)
+    )
+    html_rows = "".join(
+        f'<tr><td style="padding:8px 0;color:{MUTED};font-size:12px;'
+        f'width:150px;vertical-align:top;">{html.escape(k)}</td>'
+        f'<td style="padding:8px 0;color:{INK};font-size:14px;white-space:pre-wrap;">{html.escape(str(v))}</td></tr>'
+        for k, v in rows
+    )
+    html_body = f"""\
+<!DOCTYPE html>
+<html><body style="margin:0;padding:24px;background:{CANVAS};font-family:{FONT_STACK};">
+<table role="presentation" width="560" cellpadding="0" cellspacing="0" style="max-width:100%;background:{SURFACE};border-radius:{RADIUS};padding:8px 24px;">
+<tr><td style="padding:20px 0 8px 0;">
+<p style="margin:0;font-size:12px;font-weight:400;color:{BRAND};">Manual payment claim</p>
+<h2 style="margin:6px 0 0 0;font-size:20px;color:{INK};">{html.escape(tenant_name)} → {html.escape(requested_plan_name)}</h2>
+<p style="margin:8px 0 0 0;font-size:13px;color:{MUTED};">Verify the trx_id against the bKash merchant statement, then apply the plan change from Superadmin.</p>
+</td></tr>
+{html_rows}
+</table>
+</body></html>
+"""
+    return subject, html_body, text_body
+
+
+def credit_purchase_submitted_email(
+    *,
+    tenant_name: str,
+    tenant_slug: str,
+    owner_name: str | None,
+    owner_email: str,
+    pack_name: str,
+    credits: int,
+    amount_taka: int,
+    sender_number: str,
+    trx_id: str,
+    note: str | None,
+) -> tuple[str, str, str]:
+    """Internal — the AI image credits "I already sent the money" step
+    (app/api/ai_images.py's submit_credit_purchase). Same reasoning as
+    manual_payment_submitted_email above (different SKU, identical
+    boundary): no gateway, nothing stored, this email IS the record, sent
+    to SUPPORT and settings.billing_notify_email separately. A person
+    verifies trx_id, then grants credits from Superadmin
+    (app/api/superadmin.py's grant_image_credits) — never automatic.
+    """
+    subject = f"Credit purchase claim — {tenant_name} ({pack_name}, {credits} credits, ৳{amount_taka:,})"
+    rows = [
+        ("Tenant", f"{tenant_name} ({tenant_slug})"),
+        ("Owner", f"{owner_name or '—'} <{owner_email}>"),
+        ("Pack", f"{pack_name} — {credits} credits (৳{amount_taka:,})"),
+        ("Sent from (bKash number)", sender_number),
+        ("Transaction ID", trx_id),
+        ("Note", note or "—"),
+    ]
+    text_body = (
+        "New AI image credit purchase claim — verify the trx_id against the "
+        f"bKash merchant statement, then grant {credits} credits from Superadmin.\n\n"
+        + "\n".join(f"{k}: {v}" for k, v in rows)
+    )
+    html_rows = "".join(
+        f'<tr><td style="padding:8px 0;color:{MUTED};font-size:12px;'
+        f'width:150px;vertical-align:top;">{html.escape(k)}</td>'
+        f'<td style="padding:8px 0;color:{INK};font-size:14px;white-space:pre-wrap;">{html.escape(str(v))}</td></tr>'
+        for k, v in rows
+    )
+    html_body = f"""\
+<!DOCTYPE html>
+<html><body style="margin:0;padding:24px;background:{CANVAS};font-family:{FONT_STACK};">
+<table role="presentation" width="560" cellpadding="0" cellspacing="0" style="max-width:100%;background:{SURFACE};border-radius:{RADIUS};padding:8px 24px;">
+<tr><td style="padding:20px 0 8px 0;">
+<p style="margin:0;font-size:12px;font-weight:400;color:{BRAND};">Credit purchase claim</p>
+<h2 style="margin:6px 0 0 0;font-size:20px;color:{INK};">{html.escape(tenant_name)} → {html.escape(pack_name)} ({credits} credits)</h2>
+<p style="margin:8px 0 0 0;font-size:13px;color:{MUTED};">Verify the trx_id against the bKash merchant statement, then grant credits from Superadmin.</p>
+</td></tr>
+{html_rows}
+</table>
+</body></html>
+"""
+    return subject, html_body, text_body
+
+
+def chat_credit_purchase_submitted_email(
+    *,
+    tenant_name: str,
+    tenant_slug: str,
+    owner_name: str | None,
+    owner_email: str,
+    pack_name: str,
+    credits: int,
+    amount_taka: int,
+    sender_number: str,
+    trx_id: str,
+    note: str | None,
+) -> tuple[str, str, str]:
+    """Same shape and boundary as credit_purchase_submitted_email above —
+    the OTHER currency (chat credits, app/chat_credits.py), a completely
+    separate claim/grant flow so the two are never confused in an ops
+    inbox either."""
+    subject = f"Chat credit purchase claim — {tenant_name} ({pack_name}, {credits} credits, ৳{amount_taka:,})"
+    rows = [
+        ("Tenant", f"{tenant_name} ({tenant_slug})"),
+        ("Owner", f"{owner_name or '—'} <{owner_email}>"),
+        ("Pack", f"{pack_name} — {credits} chat credits (৳{amount_taka:,})"),
+        ("Sent from (bKash number)", sender_number),
+        ("Transaction ID", trx_id),
+        ("Note", note or "—"),
+    ]
+    text_body = (
+        "New chat credit purchase claim — verify the trx_id against the "
+        f"bKash merchant statement, then grant {credits} chat credits from Superadmin.\n\n"
+        + "\n".join(f"{k}: {v}" for k, v in rows)
+    )
+    html_rows = "".join(
+        f'<tr><td style="padding:8px 0;color:{MUTED};font-size:12px;'
+        f'width:150px;vertical-align:top;">{html.escape(k)}</td>'
+        f'<td style="padding:8px 0;color:{INK};font-size:14px;white-space:pre-wrap;">{html.escape(str(v))}</td></tr>'
+        for k, v in rows
+    )
+    html_body = f"""\
+<!DOCTYPE html>
+<html><body style="margin:0;padding:24px;background:{CANVAS};font-family:{FONT_STACK};">
+<table role="presentation" width="560" cellpadding="0" cellspacing="0" style="max-width:100%;background:{SURFACE};border-radius:{RADIUS};padding:8px 24px;">
+<tr><td style="padding:20px 0 8px 0;">
+<p style="margin:0;font-size:12px;font-weight:400;color:{BRAND};">Chat credit purchase claim</p>
+<h2 style="margin:6px 0 0 0;font-size:20px;color:{INK};">{html.escape(tenant_name)} → {html.escape(pack_name)} ({credits} chat credits)</h2>
+<p style="margin:8px 0 0 0;font-size:13px;color:{MUTED};">Verify the trx_id against the bKash merchant statement, then grant chat credits from Superadmin.</p>
+</td></tr>
+{html_rows}
+</table>
+</body></html>
+"""
+    return subject, html_body, text_body
+
+
 def welcome_email(recipient_name: str | None = None) -> tuple[str, str, str]:
     """Sent once after POST /trial/complete — the store already exists."""
     greeting = f"Hi {html.escape(recipient_name)}," if recipient_name else "Hi,"
@@ -425,6 +599,204 @@ def trial_ended_email(recipient_name: str | None = None, grace_days: int = 4) ->
         f"If we don't hear from you, your trial data stays put for {grace_days} more "
         f"day{'s' if grace_days != 1 else ''} before it's removed.\n\n"
         "Questions? Reply to this email.\n\n"
+        "Softunebd — softunebd.com"
+    )
+    return subject, html_body, text_body
+
+
+def _renewal_contact_line() -> str:
+    """Shared by all three plan-renewal emails below — bKash number to pay
+    to, WhatsApp to confirm with, support email as a fallback. Centralized
+    so the three templates can't drift on which contact channel they show
+    (already happened once with app/api/auth.py's lockout message using the
+    wrong number — see settings.support_whatsapp_number's own docstring)."""
+    return (
+        f"Pay via bKash ({settings.platform_bkash_number}), then send your "
+        f"Transaction ID on WhatsApp ({settings.support_whatsapp_number}) or "
+        f"reply to this email."
+    )
+
+
+def plan_renewal_upcoming_email(
+    recipient_name: str | None, plan_name: str, amount_taka: int, renews_on: str, days_left: int,
+) -> tuple[str, str, str]:
+    """Sent once, `days_left` days before Tenant.plan_renews_at — see
+    app/worker.py's notify_upcoming_renewals. First of three escalating
+    reminders (this one, plan_payment_due_email, plan_access_paused_email);
+    this is the only one sent BEFORE the due date, so it's the calmest —
+    just the date and a link, no warning language yet.
+    """
+    greeting = f"Hi {html.escape(recipient_name)}," if recipient_name else "Hi,"
+    greeting_text = f"Hi {recipient_name}," if recipient_name else "Hi,"
+    subject = f"Your {plan_name} plan renews in {days_left} day{'s' if days_left != 1 else ''}"
+    billing_url = f"{DASHBOARD}/settings/billing"
+
+    body_html = f"""\
+<tr>
+  <td style="padding:28px 36px 8px 36px;">
+    <p style="margin:0 0 8px 0;font-size:14px;color:{INK};">{greeting}</p>
+    <h1 style="margin:0 0 10px 0;font-size:22px;line-height:1.3;font-weight:400;color:{INK};">Renewal coming up</h1>
+    <p style="margin:0 0 16px 0;font-size:15px;line-height:1.55;color:{MUTED};">
+      Your {html.escape(plan_name)} plan (৳{amount_taka:,}/mo) renews on {html.escape(renews_on)}
+      — {days_left} day{"s" if days_left != 1 else ""} from now.
+    </p>
+    <p style="margin:0 0 24px 0;font-size:15px;line-height:1.55;color:{MUTED};">
+      {_renewal_contact_line()}
+    </p>
+    {_btn(billing_url, "Open Billing")}
+  </td>
+</tr>
+"""
+    html_body = _shell(f"{plan_name} renews in {days_left} day(s)", body_html)
+    text_body = (
+        f"{greeting_text}\n\n"
+        f"Your {plan_name} plan (৳{amount_taka:,}/mo) renews on {renews_on} — "
+        f"{days_left} day{'s' if days_left != 1 else ''} from now.\n\n"
+        f"{_renewal_contact_line()}\n\n"
+        f"Billing: {billing_url}\n\n"
+        "Softunebd — softunebd.com"
+    )
+    return subject, html_body, text_body
+
+
+def plan_payment_due_email(
+    recipient_name: str | None, plan_name: str, amount_taka: int, grace_days: int,
+) -> tuple[str, str, str]:
+    """Sent once, the moment Tenant.plan_renews_at passes with no renewal
+    confirmed — see app/worker.py's notify_plan_overdue. Access is still
+    fully open at this point (that only changes at grace_days, per
+    plan_access_paused_email below) — this is the "please pay now" nudge,
+    not a lockout notice.
+    """
+    greeting = f"Hi {html.escape(recipient_name)}," if recipient_name else "Hi,"
+    greeting_text = f"Hi {recipient_name}," if recipient_name else "Hi,"
+    subject = f"Payment due — your {plan_name} plan"
+    billing_url = f"{DASHBOARD}/settings/billing"
+
+    body_html = f"""\
+<tr>
+  <td style="padding:28px 36px 8px 36px;">
+    <p style="margin:0 0 8px 0;font-size:14px;color:{INK};">{greeting}</p>
+    <h1 style="margin:0 0 10px 0;font-size:22px;line-height:1.3;font-weight:400;color:{INK};">Payment due today</h1>
+    <p style="margin:0 0 16px 0;font-size:15px;line-height:1.55;color:{MUTED};">
+      Your {html.escape(plan_name)} plan (৳{amount_taka:,}/mo) was due today. Your dashboard
+      is still fully open — nothing is paused yet — but access will pause in
+      {grace_days} day{"s" if grace_days != 1 else ""} if we don't hear from you. Nothing is
+      ever deleted either way.
+    </p>
+    <p style="margin:0 0 24px 0;font-size:15px;line-height:1.55;color:{MUTED};">
+      {_renewal_contact_line()}
+    </p>
+    {_btn(billing_url, "Open Billing")}
+  </td>
+</tr>
+"""
+    html_body = _shell(f"{plan_name} payment due today", body_html)
+    text_body = (
+        f"{greeting_text}\n\n"
+        f"Your {plan_name} plan (৳{amount_taka:,}/mo) was due today. Your dashboard is "
+        f"still fully open, but access will pause in {grace_days} "
+        f"day{'s' if grace_days != 1 else ''} if we don't hear from you. Nothing is ever "
+        "deleted either way.\n\n"
+        f"{_renewal_contact_line()}\n\n"
+        f"Billing: {billing_url}\n\n"
+        "Softunebd — softunebd.com"
+    )
+    return subject, html_body, text_body
+
+
+def plan_access_paused_email(
+    recipient_name: str | None, plan_name: str, amount_taka: int,
+) -> tuple[str, str, str]:
+    """Sent once, the moment app/worker.py's sweep_overdue_plans actually
+    flips Tenant.status to "payment_overdue" (grace_days after the due
+    date) — third of four escalating emails (upcoming, due, this one,
+    plan_deletion_warning_email below), and the only one that coincides
+    with login actually being blocked (see app/api/auth.py's
+    _check_tenant_access). The reassurance that data is untouched matters
+    most here, not less — this is the email someone reads right after
+    they've just been locked out.
+    """
+    greeting = f"Hi {html.escape(recipient_name)}," if recipient_name else "Hi,"
+    greeting_text = f"Hi {recipient_name}," if recipient_name else "Hi,"
+    subject = f"Access paused — your {plan_name} plan"
+    billing_url = f"{DASHBOARD}/settings/billing"
+
+    body_html = f"""\
+<tr>
+  <td style="padding:28px 36px 8px 36px;">
+    <p style="margin:0 0 8px 0;font-size:14px;color:{INK};">{greeting}</p>
+    <h1 style="margin:0 0 10px 0;font-size:22px;line-height:1.3;font-weight:400;color:{INK};">Dashboard access is paused</h1>
+    <p style="margin:0 0 16px 0;font-size:15px;line-height:1.55;color:{MUTED};">
+      Your {html.escape(plan_name)} plan (৳{amount_taka:,}/mo) is still unpaid, so login is
+      paused for now. Nothing is deleted or at risk — your store, products, orders, and
+      every setting are exactly as you left them, waiting for you.
+    </p>
+    <p style="margin:0 0 24px 0;font-size:15px;line-height:1.55;color:{MUTED};">
+      {_renewal_contact_line()} We'll restore access as soon as it's confirmed —
+      usually within a few hours.
+    </p>
+    {_btn(billing_url, "Open Billing")}
+  </td>
+</tr>
+"""
+    html_body = _shell(f"{plan_name} access paused — your data is safe", body_html)
+    text_body = (
+        f"{greeting_text}\n\n"
+        f"Your {plan_name} plan (৳{amount_taka:,}/mo) is still unpaid, so login is paused "
+        "for now. Nothing is deleted or at risk — your store, products, orders, and every "
+        "setting are exactly as you left them, waiting for you.\n\n"
+        f"{_renewal_contact_line()} We'll restore access as soon as it's confirmed — "
+        "usually within a few hours.\n\n"
+        f"Billing: {billing_url}\n\n"
+        "Softunebd — softunebd.com"
+    )
+    return subject, html_body, text_body
+
+
+def plan_deletion_warning_email(
+    recipient_name: str | None, plan_name: str, days_left: int,
+) -> tuple[str, str, str]:
+    """Sent once, PLAN_DELETION_WARNING_LEAD_DAYS before
+    app/worker.py's sweep_abandoned_paid_accounts would actually delete the
+    tenant — the last of four escalating emails in this whole lifecycle,
+    and the only one in it that mentions deletion at all. Everything before
+    this point (payment due, access paused) was explicit that nothing was
+    at risk; this is the one genuine "this is really happening" notice, so
+    it says so plainly instead of softening it.
+    """
+    greeting = f"Hi {html.escape(recipient_name)}," if recipient_name else "Hi,"
+    greeting_text = f"Hi {recipient_name}," if recipient_name else "Hi,"
+    subject = f"Final notice — your {plan_name} account will be deleted in {days_left} days"
+    billing_url = f"{DASHBOARD}/settings/billing"
+
+    body_html = f"""\
+<tr>
+  <td style="padding:28px 36px 8px 36px;">
+    <p style="margin:0 0 8px 0;font-size:14px;color:{INK};">{greeting}</p>
+    <h1 style="margin:0 0 10px 0;font-size:22px;line-height:1.3;font-weight:400;color:{INK};">Your account will be permanently deleted</h1>
+    <p style="margin:0 0 16px 0;font-size:15px;line-height:1.55;color:{MUTED};">
+      Your {html.escape(plan_name)} plan has been unpaid for almost a month now. In
+      {days_left} day{"s" if days_left != 1 else ""}, your store, products, orders, and every
+      uploaded file will be permanently deleted — this cannot be undone once it happens.
+    </p>
+    <p style="margin:0 0 24px 0;font-size:15px;line-height:1.55;color:{MUTED};">
+      {_renewal_contact_line()} Paying now stops the deletion and restores access immediately.
+    </p>
+    {_btn(billing_url, "Open Billing")}
+  </td>
+</tr>
+"""
+    html_body = _shell(f"Final notice — {plan_name} account deletes in {days_left} days", body_html)
+    text_body = (
+        f"{greeting_text}\n\n"
+        f"Your {plan_name} plan has been unpaid for almost a month now. In "
+        f"{days_left} day{'s' if days_left != 1 else ''}, your store, products, orders, "
+        "and every uploaded file will be permanently deleted — this cannot be undone once "
+        "it happens.\n\n"
+        f"{_renewal_contact_line()} Paying now stops the deletion and restores access "
+        "immediately.\n\n"
+        f"Billing: {billing_url}\n\n"
         "Softunebd — softunebd.com"
     )
     return subject, html_body, text_body

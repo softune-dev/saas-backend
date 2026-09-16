@@ -18,12 +18,24 @@ import uuid
 from datetime import UTC, date, datetime, timedelta
 
 from fastapi.concurrency import run_in_threadpool
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import cache, media
+from app import cache, crud, media, risk_score as risk_score_module
 from app.config import settings
-from app.models import Order, OrderItem, Product, Site, Tenant
+from app.models import (
+    Category,
+    CourierConnection,
+    Customer,
+    Event,
+    FraudBlocklistEntry,
+    FraudIpBlocklistEntry,
+    Order,
+    OrderItem,
+    Product,
+    Site,
+    Tenant,
+)
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +61,21 @@ TOOL_DECLARATIONS = [
                 "query": {"type": "STRING", "description": "Optional name search, e.g. 'honey'."},
                 "low_stock_only": {"type": "BOOLEAN", "description": "Only products at or below 5 units in stock."},
                 "limit": {"type": "INTEGER", "description": "Max results, default 10, max 25."},
+            },
+        },
+    },
+    {
+        "name": "get_product",
+        "description": (
+            "Full detail on ONE product — every field, not the short summary list_products "
+            "gives you. Always call this before proposing an update_product edit, so you can "
+            "show the merchant everything currently on the product before asking what to change."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "product_id": {"type": "STRING", "description": "Exact id, e.g. from an earlier list_products result."},
+                "product_name": {"type": "STRING", "description": "Name or partial name, if you don't have an id yet."},
             },
         },
     },
@@ -120,6 +147,87 @@ TOOL_DECLARATIONS = [
             "usage limits. No pricing figures are available here — if asked "
             "about upgrade cost, say you don't have real pricing to quote and "
             "point them to the Billing page or support."
+        ),
+        "parameters": {"type": "OBJECT", "properties": {}},
+    },
+    {
+        "name": "list_categories",
+        "description": (
+            "The merchant's current category list — name and how many active "
+            "products are in each. Call this BEFORE proposing set_categories "
+            "or add_category so you know what already exists, instead of "
+            "asking the merchant to recite their own category list."
+        ),
+        "parameters": {"type": "OBJECT", "properties": {}},
+    },
+    {
+        "name": "get_fraud_status",
+        "description": (
+            "The merchant's actual configured fraud-protection setup: which "
+            "of the checkout-time rules (hold first-time high-value orders, "
+            "flag burst orders from one phone, block blocklisted numbers, one "
+            "open order per device, cooldown after a cancelled order) are "
+            "enabled and their thresholds, plus how many phone numbers and IP "
+            "addresses are on the blocklists. Call this for any question "
+            "about their fraud rules, blocklist, or 'is X protection on' — "
+            "never guess whether a rule is enabled."
+        ),
+        "parameters": {"type": "OBJECT", "properties": {}},
+    },
+    {
+        "name": "list_events",
+        "description": (
+            "The merchant's promo/coupon events (there is no separate "
+            "'coupon' concept — a discount campaign IS an Event): name, "
+            "discount percent, whether it's currently active, whether it's "
+            "the storefront popup, and how many products are bound to it. "
+            "Call this BEFORE proposing create_event so you know what "
+            "already exists, same reasoning as list_categories."
+        ),
+        "parameters": {"type": "OBJECT", "properties": {}},
+    },
+    {
+        "name": "search_customers",
+        "description": (
+            "Search the merchant's customers by phone number or name. "
+            "Returns lightweight results (id, phone, name, email) — call "
+            "get_customer with the id or phone for full detail (order "
+            "history, total spent, risk score)."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "query": {"type": "STRING", "description": "Phone number or name, partial match ok."},
+                "limit": {"type": "INTEGER", "description": "Max results, default 10, max 25."},
+            },
+        },
+    },
+    {
+        "name": "get_customer",
+        "description": (
+            "Full detail on one customer: how many orders they've placed, "
+            "total spent, last order date, and their computed risk score "
+            "(Low/Medium/High, with the real signals behind it — delivery "
+            "success rate, confirmed fraud history, blocklisted IP). "
+            "Provide EITHER phone or customer_id (customer_id from a prior "
+            "search_customers call)."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "phone": {"type": "STRING", "description": "The customer's exact phone number."},
+                "customer_id": {"type": "STRING", "description": "A customer id from a prior search_customers call."},
+            },
+        },
+    },
+    {
+        "name": "list_courier_connections",
+        "description": (
+            "Which courier accounts (Steadfast, Pathao, RedX, eCourier) this "
+            "site has connected: provider, connection status, and label. "
+            "Never returns API keys or webhook secrets — call this for any "
+            "question about courier connection status, not to check "
+            "credentials."
         ),
         "parameters": {"type": "OBJECT", "properties": {}},
     },
@@ -388,6 +496,75 @@ async def _list_products(
     }
 
 
+async def _get_product(
+    db: AsyncSession, tenant_id: uuid.UUID, product_id: str | None = None, product_name: str | None = None,
+) -> dict:
+    """Every field on one product — the read side of the "show the merchant
+    everything, then ask what to change" edit flow (see app/ai.py's system
+    prompt and app/ai_forms.py's update_product diff, which resolves the
+    SAME product by the same id-or-name rule right before a confirm so the
+    two never disagree about which row is being discussed).
+    """
+    product = None
+    if product_id:
+        try:
+            pid = uuid.UUID(product_id)
+        except ValueError:
+            return {"error": "That doesn't look like a valid product id."}
+        product = (
+            await db.execute(
+                select(Product).where(Product.id == pid, Product.tenant_id == tenant_id)
+            )
+        ).scalars().first()
+        if product is None:
+            return {"error": "No product found with that id."}
+    else:
+        name = (product_name or "").strip()
+        if not name:
+            return {"error": "Need a product id or name to look up."}
+        matches = (
+            await db.execute(
+                select(Product).where(Product.tenant_id == tenant_id, Product.name.ilike(f"%{name}%"))
+            )
+        ).scalars().all()
+        if not matches:
+            return {"error": f'No product matching "{name}".'}
+        if len(matches) > 1:
+            return {
+                "error": "ambiguous",
+                "matches": [{"id": str(p.id), "name": p.name} for p in matches[:10]],
+            }
+        product = matches[0]
+
+    category_name = None
+    if product.category_id:
+        category = (
+            await db.execute(select(Category).where(Category.id == product.category_id))
+        ).scalars().first()
+        category_name = category.name if category else None
+
+    attrs = product.attributes or {}
+    return {
+        "id": str(product.id),
+        "name": product.name,
+        "sku": product.sku,
+        "category_name": category_name,
+        "price": _money(product.price_cents, product.currency),
+        "compare_at": _money(product.compare_at_cents, product.currency) if product.compare_at_cents else None,
+        "stock": product.stock,
+        "track_stock": product.track_stock,
+        "is_active": product.is_active,
+        "unit": product.unit,
+        "free_delivery": product.free_delivery,
+        "delivery_charge": _money(product.delivery_charge_cents, product.currency) if product.delivery_charge_cents else None,
+        "short_description": product.short_description,
+        "description": product.description,
+        "features": product.features or [],
+        "variants": attrs.get("variants") or [],
+        "photo_count": len(product.images or []),
+    }
+
+
 async def _list_orders(
     db: AsyncSession, tenant_id: uuid.UUID, status: str | None = None, limit: int = 10
 ) -> dict:
@@ -561,15 +738,280 @@ async def get_suggested_prompts(
     return candidates[:4]
 
 
+async def _list_categories(db: AsyncSession, tenant_id: uuid.UUID) -> dict:
+    """Name + active product count per category — same shape convention as
+    _list_products (id included so a follow-up add_category/set_categories
+    proposal can reference what's real instead of the model guessing).
+    """
+    site = (
+        await db.execute(select(Site).where(Site.tenant_id == tenant_id).limit(1))
+    ).scalars().first()
+    if site is None:
+        return {"error": "No site found for this account"}
+
+    rows = (
+        await db.execute(
+            select(Category.id, Category.name, func.count(Product.id))
+            .outerjoin(
+                Product,
+                (Product.category_id == Category.id) & (Product.is_active.is_(True)),
+            )
+            .where(Category.site_id == site.id)
+            .group_by(Category.id, Category.name, Category.sort_order)
+            .order_by(Category.sort_order)
+        )
+    ).all()
+    return {
+        "categories": [
+            {"id": str(cid), "name": name, "product_count": int(count)}
+            for cid, name, count in rows
+        ]
+    }
+
+
+async def _get_fraud_status(db: AsyncSession, tenant_id: uuid.UUID) -> dict:
+    """Live read of Settings -> Fraud Protection: which checkout-time rules
+    (see app/models.py's Site.fraud_rules, shape mirrored from
+    dashboard/components/fraud/fraud-data.ts's FRAUD_RULES) are actually on,
+    plus real blocklist sizes. Previously the system prompt only had static
+    text describing the feature conceptually — this is the first live lookup
+    of a merchant's OWN configured rules.
+    """
+    site = (
+        await db.execute(select(Site).where(Site.tenant_id == tenant_id).limit(1))
+    ).scalars().first()
+    if site is None:
+        return {"error": "No site found for this account"}
+
+    rules = site.fraud_rules or {}
+
+    def rule(rule_id: str) -> dict:
+        r = rules.get(rule_id) or {}
+        return {"enabled": bool(r.get("enabled")), "threshold": r.get("value")}
+
+    phone_count = (
+        await db.execute(
+            select(func.count()).select_from(FraudBlocklistEntry).where(
+                FraudBlocklistEntry.site_id == site.id
+            )
+        )
+    ).scalar_one()
+    ip_count = (
+        await db.execute(
+            select(func.count()).select_from(FraudIpBlocklistEntry).where(
+                FraudIpBlocklistEntry.site_id == site.id
+            )
+        )
+    ).scalar_one()
+
+    return {
+        "hold_first_high_value": rule("hold_first_high_value"),
+        "flag_burst_orders": rule("flag_burst_orders"),
+        "block_blocklist": rule("block_blocklist"),
+        "device_pending_lock": rule("device_pending_lock"),
+        "device_cooldown": rule("device_cooldown"),
+        "phone_blocklist_count": phone_count,
+        "ip_blocklist_count": ip_count,
+    }
+
+
+async def _list_events(db: AsyncSession, tenant_id: uuid.UUID) -> dict:
+    """Name + discount + status per event — same shape convention as
+    _list_categories (this is the read side create_event's confirm card
+    depends on the model having called first)."""
+    site = (
+        await db.execute(select(Site).where(Site.tenant_id == tenant_id).limit(1))
+    ).scalars().first()
+    if site is None:
+        return {"error": "No site found for this account"}
+
+    rows = (
+        await db.execute(
+            select(Event).where(Event.site_id == site.id).order_by(Event.created_at.desc())
+        )
+    ).scalars().all()
+    # Event.products is lazy="selectin" (see app/models.py) — len() here is
+    # free, not an extra query per row.
+    return {
+        "events": [
+            {
+                "id": str(e.id),
+                "name": e.name,
+                "discount_percent": e.discount_percent,
+                "is_active": e.is_active,
+                "is_popup": e.is_popup,
+                "image_only": e.image_only,
+                "product_count": len(e.products),
+            }
+            for e in rows
+        ]
+    }
+
+
+async def _search_customers(
+    db: AsyncSession, tenant_id: uuid.UUID, query: str | None = None, limit: int = 10
+) -> dict:
+    site = (
+        await db.execute(select(Site).where(Site.tenant_id == tenant_id).limit(1))
+    ).scalars().first()
+    if site is None:
+        return {"error": "No site found for this account"}
+
+    limit = min(max(limit or 10, 1), 25)
+    stmt = select(Customer).where(Customer.site_id == site.id)
+    if query:
+        q = f"%{query.strip()}%"
+        stmt = stmt.where(or_(Customer.phone.ilike(q), Customer.name.ilike(q)))
+    stmt = stmt.order_by(Customer.created_at.desc()).limit(limit)
+    rows = (await db.execute(stmt)).scalars().all()
+    return {
+        "customers": [
+            {"id": str(c.id), "phone": c.phone, "name": c.name, "email": c.email}
+            for c in rows
+        ]
+    }
+
+
+async def _get_customer(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    phone: str | None = None,
+    customer_id: str | None = None,
+) -> dict:
+    """Same order_count/total_spent_cents/last_order_at/risk_score
+    computation as app/api/customers.py's get_customer — reusing
+    risk_score.compute_risk_score rather than a second implementation, same
+    "one real source of truth" reasoning as everything else in this module.
+    Only linked orders count (Order.customer_id), same caveat as that route:
+    orders placed before customer-linking shipped aren't included.
+    """
+    site = (
+        await db.execute(select(Site).where(Site.tenant_id == tenant_id).limit(1))
+    ).scalars().first()
+    if site is None:
+        return {"error": "No site found for this account"}
+
+    customer = None
+    if customer_id:
+        try:
+            cid = uuid.UUID(customer_id)
+        except ValueError:
+            return {"error": "Invalid customer id."}
+        customer = (
+            await db.execute(
+                select(Customer).where(Customer.id == cid, Customer.site_id == site.id)
+            )
+        ).scalars().first()
+    elif phone:
+        customer = (
+            await db.execute(
+                select(Customer).where(
+                    Customer.site_id == site.id, Customer.phone == phone.strip()
+                )
+            )
+        ).scalars().first()
+    else:
+        return {"error": "Need a phone number or customer id to look up."}
+
+    if customer is None:
+        return {"error": "No customer found."}
+
+    orders, order_count = await crud.list_scoped(
+        db, Order, tenant_id,
+        filters=[Order.customer_id == customer.id],
+        order_by=Order.created_at.desc(), limit=100, offset=0,
+    )
+    total_spent = (
+        await db.execute(
+            select(func.coalesce(func.sum(Order.total_cents), 0)).where(
+                Order.customer_id == customer.id, Order.tenant_id == tenant_id
+            )
+        )
+    ).scalar_one()
+    last_order_at = orders[0].created_at if orders else None
+
+    latest_ip = next((o.ip_address for o in orders if o.ip_address), None)
+    ip_blocklisted = False
+    if latest_ip:
+        ip_blocklisted = (
+            await db.execute(
+                select(FraudIpBlocklistEntry.id).where(
+                    FraudIpBlocklistEntry.site_id == site.id,
+                    FraudIpBlocklistEntry.ip_address == latest_ip,
+                ).limit(1)
+            )
+        ).scalar_one_or_none() is not None
+    open_order_count = sum(1 for o in orders if o.status in ("pending", "paid"))
+    latest_device_id = next((o.device_id for o in orders if o.device_id), None)
+
+    risk = risk_score_module.compute_risk_score(
+        orders=orders,
+        current_device_id=latest_device_id,
+        ip_blocklisted=ip_blocklisted,
+        has_open_duplicate=open_order_count > 1,
+    )
+    currency = await _tenant_currency(db, tenant_id)
+
+    return {
+        "id": str(customer.id),
+        "phone": customer.phone,
+        "name": customer.name,
+        "email": customer.email,
+        "order_count": order_count,
+        "total_spent": _money(total_spent, currency),
+        "last_order_at": last_order_at.isoformat() if last_order_at else None,
+        "risk_score": risk["score"],
+        "risk_label": risk["label"],
+    }
+
+
+async def _list_courier_connections(db: AsyncSession, tenant_id: uuid.UUID) -> dict:
+    """provider/status/label/last_verified_at only — deliberately never
+    api_key_hint or webhook_secret/webhook_url, even though the real
+    dashboard API returns those to an authenticated session. A chat tool
+    result can end up quoted back in plain text, and there's no reason it
+    should ever handle those fields (see this tool's TOOL_DECLARATIONS
+    description for the same point)."""
+    site = (
+        await db.execute(select(Site).where(Site.tenant_id == tenant_id).limit(1))
+    ).scalars().first()
+    if site is None:
+        return {"error": "No site found for this account"}
+
+    rows = (
+        await db.execute(
+            select(CourierConnection).where(CourierConnection.site_id == site.id)
+        )
+    ).scalars().all()
+    return {
+        "connections": [
+            {
+                "provider": c.provider,
+                "status": c.status,
+                "label": c.label,
+                "last_verified_at": c.last_verified_at.isoformat() if c.last_verified_at else None,
+            }
+            for c in rows
+        ]
+    }
+
+
 _HANDLERS = {
     "get_business_overview": _get_business_overview,
     "list_products": _list_products,
+    "get_product": _get_product,
     "list_orders": _list_orders,
     "get_order": _get_order,
     "get_sales_summary": _get_sales_summary,
     "get_site_info": _get_site_info,
     "get_media_stats": _get_media_stats,
     "get_billing_status": _get_billing_status,
+    "list_categories": _list_categories,
+    "get_fraud_status": _get_fraud_status,
+    "list_events": _list_events,
+    "search_customers": _search_customers,
+    "get_customer": _get_customer,
+    "list_courier_connections": _list_courier_connections,
 }
 
 

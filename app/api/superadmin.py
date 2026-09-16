@@ -18,15 +18,17 @@ orders, etc.) — an operator who needs to see a customer's storefront data
 still does that the same way as today, not through here.
 """
 
+import calendar
 import uuid
 from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import cache, crud, invoices as invoices_module, mailer, queue, vercel
+from app import ai_images, cache, chat_credits as chat_credits_module, crud, invoices as invoices_module, mailer, media, queue, vercel
 from app.config import settings
 from app.db import get_db
 from app.models import (
@@ -45,6 +47,8 @@ from app.models import (
     User,
 )
 from app.schemas import (
+    GrantChatCreditsIn,
+    GrantImageCreditsIn,
     HelpTicketReplyIn,
     HelpTicketReplyOut,
     Page,
@@ -224,6 +228,9 @@ def _tenant_out(tenant: Tenant, aggregates: dict, sites: list[SuperAdminSiteOut]
         "id": tenant.id, "slug": tenant.slug, "name": tenant.name, "plan": tenant.plan,
         "status": tenant.status, "created_at": tenant.created_at, "business": tenant.business,
         "trial_expires_at": tenant.trial_expires_at,
+        "plan_renews_at": tenant.plan_renews_at,
+        "ai_image_credits": tenant.ai_image_credits,
+        "chat_credits": tenant.chat_credits,
         **aggregates,
         "sites": sites,
     }
@@ -287,7 +294,8 @@ async def create_account(
     )
     tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
     aggregates = (await _tenant_aggregates(db, [tenant.id]))[tenant.id]
-    return _tenant_out(tenant, aggregates)
+    sites = (await _sites_for_tenants(db, [tenant.id]))[tenant.id]
+    return _tenant_out(tenant, aggregates, sites)
 
 
 @router.patch("/tenants/{tenant_id}", response_model=SuperAdminTenantOut)
@@ -311,20 +319,139 @@ async def update_tenant(
         and payload.plan != old_plan
         and payload.plan not in ("trial", "demo")
     ):
+        # First-time conversion onto a paid plan starts the renewal clock —
+        # see migrations/065's own docstring; every cycle after this one
+        # advances via confirm_plan_renewal below, never reset here again.
+        now = datetime.now(UTC)
+        tenant.plan_renews_at = _add_one_month(now)
+        tenant.plan_renewal_reminded_at = None
+        tenant.plan_overdue_notified_at = None
+        tenant.plan_overdue_since = None
+        tenant.plan_deletion_warned_at = None
+        tenant = await crud.save(db, tenant)
+
         invoice = Invoice(
             tenant_id=tenant.id,
             invoice_number=await crud.next_invoice_number(db, tenant.id),
             plan=tenant.plan,
             amount_cents=invoices_module.PLAN_PRICES_CENTS.get(tenant.plan, 0),
             currency="BDT",
-            period_label=datetime.now(UTC).strftime("%b %Y"),
+            period_label=now.strftime("%b %Y"),
             tenant_business_snapshot=tenant.business,
         )
         await crud.save(db, invoice)
         await queue.publish(queue.JOB_GENERATE_INVOICE_PDF, {"invoice_id": str(invoice.id)})
 
     aggregates = (await _tenant_aggregates(db, [tenant.id]))[tenant.id]
-    return _tenant_out(tenant, aggregates)
+    sites = (await _sites_for_tenants(db, [tenant.id]))[tenant.id]
+    return _tenant_out(tenant, aggregates, sites)
+
+
+def _add_one_month(dt: datetime) -> datetime:
+    """Advances a datetime by exactly one calendar month, keeping the same
+    day-of-month where possible (Jan 31 + 1 month -> Feb 28/29, not Mar 3).
+    Python's stdlib has no calendar-aware date math (that's what
+    python-dateutil's relativedelta is for, not a dependency here) — this is
+    the one bit of it confirm_plan_renewal actually needs. See
+    migrations/065's docstring on why a naive +30 days would drift the
+    renewal date earlier every cycle that includes a 31-day month.
+    """
+    year = dt.year + dt.month // 12
+    month = dt.month % 12 + 1
+    day = min(dt.day, calendar.monthrange(year, month)[1])
+    return dt.replace(year=year, month=month, day=day)
+
+
+@router.post("/tenants/{tenant_id}/confirm-renewal", response_model=SuperAdminTenantOut)
+async def confirm_plan_renewal(tenant_id: uuid.UUID, admin: SuperAdminUser, db: DB) -> dict:
+    """Manual "payment received, renew" action — the recurring-billing
+    counterpart to update_tenant's one-time plan-change invoice above. This
+    (plus that first-time set on conversion to a paid plan, above) is the
+    ONLY place plan_renews_at ever advances — always by exactly one
+    calendar month from its own previous value, never "today + 1 month", so
+    a merchant who pays a few days late still renews on the same date next
+    cycle (migrations/065). Un-suspends a tenant the overdue sweep locked
+    out for non-payment (status == "payment_overdue"), but never touches a
+    real admin ban (status == "suspended") — those are a deliberate
+    separate action (PATCH above), not something a payment should silently
+    undo.
+    """
+    tenant = (await db.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one_or_none()
+    if tenant is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Tenant not found")
+    if tenant.plan in ("trial", "demo"):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, "Only a paid plan has a renewal to confirm."
+        )
+
+    now = datetime.now(UTC)
+    tenant.plan_renews_at = _add_one_month(tenant.plan_renews_at or now)
+    tenant.plan_renewal_reminded_at = None
+    tenant.plan_overdue_notified_at = None
+    tenant.plan_overdue_since = None
+    tenant.plan_deletion_warned_at = None
+    if tenant.status == "payment_overdue":
+        tenant.status = "active"
+    tenant = await crud.save(db, tenant)
+
+    invoice = Invoice(
+        tenant_id=tenant.id,
+        invoice_number=await crud.next_invoice_number(db, tenant.id),
+        plan=tenant.plan,
+        amount_cents=invoices_module.PLAN_PRICES_CENTS.get(tenant.plan, 0),
+        currency="BDT",
+        period_label=now.strftime("%b %Y"),
+        tenant_business_snapshot=tenant.business,
+    )
+    await crud.save(db, invoice)
+    await queue.publish(queue.JOB_GENERATE_INVOICE_PDF, {"invoice_id": str(invoice.id)})
+
+    aggregates = (await _tenant_aggregates(db, [tenant.id]))[tenant.id]
+    sites = (await _sites_for_tenants(db, [tenant.id]))[tenant.id]
+    return _tenant_out(tenant, aggregates, sites)
+
+
+@router.post("/tenants/{tenant_id}/grant-image-credits", response_model=SuperAdminTenantOut)
+async def grant_image_credits(
+    tenant_id: uuid.UUID, payload: GrantImageCreditsIn, admin: SuperAdminUser, db: DB
+) -> dict:
+    """Manual "credit purchase verified, grant it" action — the AI-image
+    counterpart to confirm_plan_renewal above, and the ONLY way credits
+    are ever added outside app/ai_images.py's own internal refund path.
+    Writes an AiImageCreditTransaction (reason="grant") through
+    ai_images.grant_credits so the ledger stays the single source of
+    truth for every balance change, not just this one.
+    """
+    tenant = (await db.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one_or_none()
+    if tenant is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Tenant not found")
+
+    await ai_images.grant_credits(db, tenant.id, payload.amount, reason="grant", reference=payload.note)
+    await db.refresh(tenant)
+
+    aggregates = (await _tenant_aggregates(db, [tenant.id]))[tenant.id]
+    sites = (await _sites_for_tenants(db, [tenant.id]))[tenant.id]
+    return _tenant_out(tenant, aggregates, sites)
+
+
+@router.post("/tenants/{tenant_id}/grant-chat-credits", response_model=SuperAdminTenantOut)
+async def grant_chat_credits(
+    tenant_id: uuid.UUID, payload: GrantChatCreditsIn, admin: SuperAdminUser, db: DB
+) -> dict:
+    """Same "credit purchase verified, grant it" action as
+    grant_image_credits above, for the OTHER currency — chat credits
+    (app/chat_credits.py), spent only once a tenant's free daily cap runs
+    out (app/ai.py's _check_chat_access)."""
+    tenant = (await db.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one_or_none()
+    if tenant is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Tenant not found")
+
+    await chat_credits_module.grant_credits(db, tenant.id, payload.amount, reason="grant", reference=payload.note)
+    await db.refresh(tenant)
+
+    aggregates = (await _tenant_aggregates(db, [tenant.id]))[tenant.id]
+    sites = (await _sites_for_tenants(db, [tenant.id]))[tenant.id]
+    return _tenant_out(tenant, aggregates, sites)
 
 
 @router.delete("/tenants/{tenant_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -378,6 +505,13 @@ async def delete_tenant(tenant_id: uuid.UUID, admin: SuperAdminUser, db: DB) -> 
             )
             if site.custom_domain:
                 await vercel.remove_domain_from_project(site.custom_domain, project_id)
+        # Same reasoning as the domain cleanup above — without this the
+        # site's uploaded media just sits in Cloudinary forever under a
+        # folder nothing in the DB references any more (media.py's own
+        # top docstring: Cloudinary is the source of truth, there's no table
+        # row for this to cascade-delete on its own). Previously cleaned up
+        # by hand; see media.delete_site_folder's docstring.
+        await run_in_threadpool(media.delete_site_folder, site.subdomain)
 
 
 # =============================================================================

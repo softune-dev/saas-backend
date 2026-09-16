@@ -136,6 +136,23 @@ class Settings(BaseSettings):
     # run up a surprise bill. Generous enough for real iterative use.
     ai_suggestions_per_tenant_per_day: int = 50
 
+    # --- AI image generation (app/ai_images.py) — a real purchasable
+    # credit balance, NOT covered by ai_suggestions_per_tenant_per_day
+    # above (that's the free daily text-chat counter). Google's per-image
+    # cost differs sharply by model/tier, confirmed live against the real
+    # API before these were chosen (see this settings' own credit counts
+    # for the ~5x markup math): Flash-Image-Preview standard res is the
+    # cheap default; the same model at higher requested resolution costs
+    # more per call; the Pro/"Nano Banana Pro" tier costs noticeably more
+    # still for real quality gains, not upsell padding. 1 credit = ৳10 face
+    # value (dashboard/components/ai-image/*'s own docstring mirrors this
+    # number — keep the two in sync by hand).
+    ai_image_model_standard: str = "gemini-3.1-flash-image-preview"
+    ai_image_model_premium: str = "gemini-3-pro-image-preview"
+    ai_image_credits_standard: int = 5
+    ai_image_credits_high_res: int = 10
+    ai_image_credits_premium: int = 15
+
     # --- trial signup / demo access (app/api/trial.py, app/api/public.py) ---
     # Real SMTP send via Hostinger's mail server — the OTP email is the
     # first thing this codebase actually sends (see app/mailer.py); nothing
@@ -165,13 +182,38 @@ class Settings(BaseSettings):
     # deletes the tenant — total lifetime of an unpurchased trial is
     # trial_days + this. A real purchase within that window just changes
     # `plan` away from "trial", which takes it out of the sweep's filter.
-    trial_grace_days: int = 4
+    # 7: the window the merchant sees on the Billing page ("pay within 7
+    # days of your trial ending or everything is permanently deleted") —
+    # keep this in sync with that copy if it ever changes.
+    trial_grace_days: int = 7
     # Which real (plan="demo") tenant's login the public "See a live demo"
     # button mints a token for (app/api/public.py) — a shared, read-only
     # account, decoupled from trial signup entirely. Not a secret: this
     # identifies WHICH account, app/security.py mints the token itself, no
     # password involved.
     demo_user_email: str = "kallol.business.ds@gmail.com"
+    # bKash personal/agent number shown on the dashboard's Billing page for
+    # the self-serve "I already sent the money" flow (no payment gateway —
+    # see dashboard/components/billing/billing-data.ts). Same number the
+    # merchant sends to; app/mailer.py's manual_payment_submitted_email just
+    # echoes it back in the notification for a quick cross-check.
+    platform_bkash_number: str = "01831624571"
+    # Personal inbox that gets a copy of every manual-payment notification
+    # alongside SUPPORT (mailer.SUPPORT) — a second, direct-to-a-person
+    # channel so a payment claim is never only sitting in a shared inbox.
+    # Same address as demo_user_email above by coincidence, not by design —
+    # kept as its own setting since the two mean different things (WHO the
+    # demo account logs in as vs. WHO gets billing notifications).
+    billing_notify_email: str = "kallol.business.ds@gmail.com"
+    # Real support WhatsApp number — shown alongside SUPPORT (the email
+    # address) anywhere a merchant needs a human, most importantly the
+    # payment-overdue lockout message (app/api/auth.py) and renewal
+    # reminder/overdue emails (app/mailer.py). Deliberately NOT the same
+    # number as platform_bkash_number above — that's where money gets sent,
+    # this is where a merchant reaches a person. Mixing the two up once
+    # already, don't repeat it: keep every future "contact us" surface
+    # pulling from this setting, never a hardcoded literal.
+    support_whatsapp_number: str = "01630582639"
 
     @property
     def cors_list(self) -> list[str]:
