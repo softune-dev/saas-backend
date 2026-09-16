@@ -18,7 +18,7 @@ kallol.business.ds@gmail.com
 randomt253@gmail.com
 t1N5CFKz1C7rShFG
 
-cd saas-backend
+cd ~/saas-backend && git pull && docker compose -f docker-compose.prod.yml up -d --build api worker
 docker compose -f docker-compose.prod.yml ps
 
 
