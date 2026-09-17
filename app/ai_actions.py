@@ -19,7 +19,7 @@ a real site_id once that's no longer true.
 import uuid
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import cache, crud, events, media, products
@@ -77,9 +77,17 @@ async def _find_product(
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY, "Need a product id or name to edit"
         )
+    # Matches name OR sku against the same string — a merchant referencing a
+    # product by its SKU (e.g. "VEILA-DUP-009") has nowhere else to put it,
+    # since this action's schema only has product_id/product_name (see
+    # app/ai_tools.py's get_product, which resolves the SAME way so the
+    # read-then-write flow never disagrees about which row this is).
     matches = (
         await db.execute(
-            select(Product).where(Product.site_id == site.id, Product.name.ilike(f"%{name}%"))
+            select(Product).where(
+                Product.site_id == site.id,
+                or_(Product.name.ilike(f"%{name}%"), Product.sku.ilike(f"%{name}%")),
+            )
         )
     ).scalars().all()
     if len(matches) == 0:

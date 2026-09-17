@@ -24,7 +24,7 @@ lists).
 import copy
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Category, Product, Site
@@ -318,10 +318,12 @@ async def _resolve_product(
             ).scalars().first()
 
         if product_name:
+            needle = product_name.strip()
             matches = (
                 await db.execute(
                     select(Product).where(
-                        Product.site_id == site.id, Product.name.ilike(f"%{product_name.strip()}%")
+                        Product.site_id == site.id,
+                        or_(Product.name.ilike(f"%{needle}%"), Product.sku.ilike(f"%{needle}%")),
                     )
                 )
             ).scalars().all()

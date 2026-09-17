@@ -76,6 +76,7 @@ TOOL_DECLARATIONS = [
             "properties": {
                 "product_id": {"type": "STRING", "description": "Exact id, e.g. from an earlier list_products result."},
                 "product_name": {"type": "STRING", "description": "Name or partial name, if you don't have an id yet."},
+                "sku": {"type": "STRING", "description": "SKU/product code, if the merchant gave you one instead of a name (e.g. 'VEILA-DUP-009')."},
             },
         },
     },
@@ -473,7 +474,7 @@ async def _list_products(
     limit = min(max(limit or 10, 1), 25)
     stmt = select(Product).where(Product.tenant_id == tenant_id)
     if query:
-        stmt = stmt.where(Product.name.ilike(f"%{query}%"))
+        stmt = stmt.where(or_(Product.name.ilike(f"%{query}%"), Product.sku.ilike(f"%{query}%")))
     if low_stock_only:
         stmt = stmt.where(Product.track_stock.is_(True), Product.stock <= 5)
     stmt = stmt.order_by(Product.updated_at.desc()).limit(limit)
@@ -497,13 +498,23 @@ async def _list_products(
 
 
 async def _get_product(
-    db: AsyncSession, tenant_id: uuid.UUID, product_id: str | None = None, product_name: str | None = None,
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    product_id: str | None = None,
+    product_name: str | None = None,
+    sku: str | None = None,
 ) -> dict:
     """Every field on one product — the read side of the "show the merchant
     everything, then ask what to change" edit flow (see app/ai.py's system
     prompt and app/ai_forms.py's update_product diff, which resolves the
     SAME product by the same id-or-name rule right before a confirm so the
     two never disagree about which row is being discussed).
+
+    `product_name` and `sku` both search BOTH the name and sku columns —
+    not just their own field — because a merchant giving a SKU like
+    "VEILA-DUP-009" often gets typed into whichever single free-text slot
+    the model reaches for first, and there's no real cost to matching a
+    SKU-shaped string against the name column too (it just won't hit).
     """
     product = None
     if product_id:
@@ -519,20 +530,23 @@ async def _get_product(
         if product is None:
             return {"error": "No product found with that id."}
     else:
-        name = (product_name or "").strip()
-        if not name:
-            return {"error": "Need a product id or name to look up."}
+        needle = (sku or product_name or "").strip()
+        if not needle:
+            return {"error": "Need a product id, name, or SKU to look up."}
         matches = (
             await db.execute(
-                select(Product).where(Product.tenant_id == tenant_id, Product.name.ilike(f"%{name}%"))
+                select(Product).where(
+                    Product.tenant_id == tenant_id,
+                    or_(Product.name.ilike(f"%{needle}%"), Product.sku.ilike(f"%{needle}%")),
+                )
             )
         ).scalars().all()
         if not matches:
-            return {"error": f'No product matching "{name}".'}
+            return {"error": f'No product matching "{needle}".'}
         if len(matches) > 1:
             return {
                 "error": "ambiguous",
-                "matches": [{"id": str(p.id), "name": p.name} for p in matches[:10]],
+                "matches": [{"id": str(p.id), "name": p.name, "sku": p.sku} for p in matches[:10]],
             }
         product = matches[0]
 
