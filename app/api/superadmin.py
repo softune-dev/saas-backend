@@ -162,7 +162,7 @@ async def _tenant_aggregates(db: AsyncSession, tenant_ids: list[uuid.UUID]) -> d
     metrics that's 7 queries total here, not 350."""
     out = {tid: {
         "site_count": 0, "category_count": 0, "product_count": 0,
-        "order_count": 0, "user_count": 0,
+        "order_count": 0, "user_count": 0, "invoice_count": 0,
         "payment_providers": [], "courier_providers": [],
         "owner_last_login_at": None, "template_key": None,
     } for tid in tenant_ids}
@@ -171,7 +171,7 @@ async def _tenant_aggregates(db: AsyncSession, tenant_ids: list[uuid.UUID]) -> d
 
     count_specs = [
         (Site, "site_count"), (Category, "category_count"), (Product, "product_count"),
-        (Order, "order_count"), (User, "user_count"),
+        (Order, "order_count"), (User, "user_count"), (Invoice, "invoice_count"),
     ]
     for model, key in count_specs:
         rows = (

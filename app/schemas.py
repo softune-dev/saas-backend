@@ -1178,6 +1178,12 @@ class SuperAdminTenantOut(ORMModel):
     product_count: int
     order_count: int
     user_count: int
+    # How many Invoice rows exist for this tenant (app/models.py's Invoice —
+    # event-triggered at trial-start/plan-change, not a recurring monthly
+    # job). Paired with created_at in the dashboard so an operator can spot
+    # a tenant whose invoice count looks low for how long they've been
+    # active, instead of only seeing a raw signup date.
+    invoice_count: int
     # Provider keys present in {payment,courier}_connections for this
     # tenant, regardless of connection status — "added or not", not "still
     # verified". A row existing means someone configured it at some point.
