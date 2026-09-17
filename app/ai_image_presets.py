@@ -48,9 +48,9 @@ usually leaves it out or garbles it if it guesses on its own.
 """
 
 PRESET_CATEGORIES: list[dict] = [
+    {"id": "product", "label": {"en": "Products", "bn": "প্রোডাক্ট"}},
     {"id": "events", "label": {"en": "Events", "bn": "ইভেন্ট"}},
     {"id": "marketing", "label": {"en": "Marketing", "bn": "মার্কেটিং"}},
-    {"id": "product", "label": {"en": "Products", "bn": "প্রোডাক্ট"}},
     {"id": "category", "label": {"en": "Category", "bn": "ক্যাটাগরি"}},
     {"id": "hero", "label": {"en": "Hero", "bn": "হিরো"}},
     {"id": "bento_showcase", "label": {"en": "Bento", "bn": "বেন্টো"}},
@@ -186,7 +186,7 @@ IMAGE_PRESETS: list[dict] = [
         "id": "product-underwater",
         "category": "product",
         "name": {"en": "Underwater", "bn": "আন্ডারওয়াটার"},
-        "thumbnail": "/ai-presets/prod1.webp",
+        "thumbnail": "/ai-presets/underwater.webp",
         "prompt": (
             "A striking product photo of {subject} submerged in clear blue "
             "water, surrounded by fine bubbles rising past it, soft caustic "
@@ -205,7 +205,7 @@ IMAGE_PRESETS: list[dict] = [
         "id": "product-cloud-float",
         "category": "product",
         "name": {"en": "Floating on Clouds", "bn": "মেঘে ভাসমান"},
-        "thumbnail": "/ai-presets/prod2.webp",
+        "thumbnail": "/ai-presets/cloud.webp",
         "prompt": (
             "A dreamy product photo of {subject} floating weightlessly among "
             "soft pastel clouds against a pale sky, gentle golden-hour light. "
@@ -222,7 +222,7 @@ IMAGE_PRESETS: list[dict] = [
         "id": "product-splash-burst",
         "category": "product",
         "name": {"en": "Liquid Splash", "bn": "লিকুইড স্প্ল্যাশ"},
-        "thumbnail": "/ai-presets/prod3.webp",
+        "thumbnail": "/ai-presets/splash.webp",
         "prompt": (
             "A high-energy product photo of {subject} frozen mid-air at the "
             "exact moment of a dynamic liquid splash bursting around it, "
@@ -241,7 +241,7 @@ IMAGE_PRESETS: list[dict] = [
         "id": "product-desert-dunes",
         "category": "product",
         "name": {"en": "Desert Dunes", "bn": "মরুভূমির টিলা"},
-        "thumbnail": "/ai-presets/prod4.webp",
+        "thumbnail": "/ai-presets/desert.webp",
         "prompt": (
             "A cinematic product photo of {subject} resting on golden desert "
             "sand dunes at sunset, warm dramatic side light, long soft "
@@ -259,7 +259,7 @@ IMAGE_PRESETS: list[dict] = [
         "id": "product-golden-hour",
         "category": "product",
         "name": {"en": "Golden Hour Glow", "bn": "গোল্ডেন আওয়ার গ্লো"},
-        "thumbnail": "/ai-presets/prod5.webp",
+        "thumbnail": "/ai-presets/golden.webp",
         "prompt": (
             "A warm cinematic product photo of {subject} bathed in "
             "golden-hour sunlight, soft warm rim light outlining the edges, "
@@ -278,7 +278,7 @@ IMAGE_PRESETS: list[dict] = [
         "id": "product-ice-frost",
         "category": "product",
         "name": {"en": "Ice & Frost", "bn": "বরফ ও তুষার"},
-        "thumbnail": "/ai-presets/prod6.webp",
+        "thumbnail": "/ai-presets/ice.webp",
         "prompt": (
             "A striking product photo of {subject} encased in a thin layer "
             "of frost with delicate ice crystals forming around it, cool "
@@ -297,7 +297,7 @@ IMAGE_PRESETS: list[dict] = [
         "id": "product-confetti",
         "category": "product",
         "name": {"en": "Confetti Celebration", "bn": "কনফেটি উদযাপন"},
-        "thumbnail": "/ai-presets/prod7.webp",
+        "thumbnail": "/ai-presets/celebrate.webp",
         "prompt": (
             "An energetic product photo of {subject} frozen mid-air "
             "surrounded by a colorful burst of confetti and streamers "
@@ -316,7 +316,7 @@ IMAGE_PRESETS: list[dict] = [
         "id": "product-glossy-reflection",
         "category": "product",
         "name": {"en": "Glossy Reflection", "bn": "গ্লসি প্রতিফলন"},
-        "thumbnail": "/ai-presets/prod8.webp",
+        "thumbnail": "/ai-presets/reflect.webp",
         "prompt": (
             "A moody product photo of {subject} standing on a glossy black "
             "reflective surface, dramatic single-source studio lighting, a "
@@ -335,7 +335,7 @@ IMAGE_PRESETS: list[dict] = [
         "id": "product-cosmic-float",
         "category": "product",
         "name": {"en": "Cosmic Float", "bn": "কসমিক ফ্লোট"},
-        "thumbnail": "/ai-presets/prod9.webp",
+        "thumbnail": "/ai-presets/galaxy.webp",
         "prompt": (
             "A dramatic product photo of {subject} floating in a starry "
             "cosmic nebula scene, deep purples and blues with scattered "
@@ -354,7 +354,7 @@ IMAGE_PRESETS: list[dict] = [
         "id": "product-rain-glass",
         "category": "product",
         "name": {"en": "Rain-Streaked Glass", "bn": "বৃষ্টিভেজা কাচ"},
-        "thumbnail": "/ai-presets/prod10.webp",
+        "thumbnail": "/ai-presets/rain.webp",
         "prompt": (
             "A cinematic product photo of {subject} shot through a "
             "rain-streaked window, soft bokeh city lights blurred in the "
