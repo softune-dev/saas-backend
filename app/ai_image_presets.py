@@ -533,12 +533,12 @@ IMAGE_PRESETS: list[dict] = [
         "id": "marketing-minimal-drop",
         "category": "marketing",
         "name": {"en": "Minimal Drop", "bn": "মিনিমাল ড্রপ"},
-        "thumbnail": "/ai-presets/social1.webp",
+        "thumbnail": "/ai-presets/minimal.webp",
         "prompt": (
             "A premium minimal product-drop social post for {subject}: a "
             "single product centered against a soft solid pastel background "
             "with generous negative space, a small confident caption in "
-            "modern sans-serif text in the lower corner — copy should "
+            "sleek modern sans-serif text in the lower corner — copy should "
             "genuinely fit this specific business (use the real business "
             "context given above). Understated branding-forward aesthetic — "
             "no gradients, no bursts, no clutter. Every letter crisp, "
@@ -550,53 +550,154 @@ IMAGE_PRESETS: list[dict] = [
         "id": "marketing-duotone-story",
         "category": "marketing",
         "name": {"en": "Duotone Story", "bn": "ডুওটোন স্টোরি"},
-        "thumbnail": "/ai-presets/social2.webp",
+        "thumbnail": "/ai-presets/duotone.webp",
         "prompt": (
             "A bold vertical 9:16 Instagram/Facebook Story graphic for "
             "{subject}: the product photo treated in a single striking "
             "duotone color filter filling most of the frame, with a large "
-            "confident statement headline in bold modern type in the lower "
-            "third over a solid-color strip for legibility — copy should "
-            "genuinely fit this specific business (use the real business "
-            "context given above). High-contrast editorial-fashion energy — "
-            "no soft gradients, no clip-art icons. Every letter crisp, "
-            "correctly spelled, legible. This is the finished, ready-to-post "
-            "graphic."
+            "confident statement headline in sleek modern bold type in the "
+            "lower third over a solid-color strip for legibility — copy "
+            "should genuinely fit this specific business (use the real "
+            "business context given above). High-contrast editorial-fashion "
+            "energy — no soft gradients, no clip-art icons. Every letter "
+            "crisp, correctly spelled, legible. This is the finished, "
+            "ready-to-post graphic."
         ),
     },
     {
         "id": "marketing-collage-grid",
         "category": "marketing",
         "name": {"en": "Collage Grid", "bn": "কোলাজ গ্রিড"},
-        "thumbnail": "/ai-presets/social3.webp",
+        "thumbnail": "/ai-presets/collagegrid.webp",
         "prompt": (
             "A modern collage-style social post for {subject}: three to four "
             "photos of the product from different angles or contexts "
             "arranged in an organic overlapping collage (not a rigid grid), "
-            "with one bold pull-quote style headline in large type "
-            "overlapping the collage at a confident angle — copy should "
-            "genuinely fit this specific business (use the real business "
-            "context given above). Cohesive color grading across all photos, "
-            "clean modern editorial feel. Every letter crisp, correctly "
-            "spelled, legible. 1:1, this is the finished, ready-to-post "
-            "graphic."
+            "with one bold pull-quote style headline in sleek modern large "
+            "type overlapping the collage at a confident angle — copy "
+            "should genuinely fit this specific business (use the real "
+            "business context given above). Cohesive color grading across "
+            "all photos, clean modern editorial feel. Every letter crisp, "
+            "correctly spelled, legible. 1:1, this is the finished, "
+            "ready-to-post graphic."
         ),
     },
     {
         "id": "marketing-glass-caption",
         "category": "marketing",
         "name": {"en": "Glass Caption", "bn": "গ্লাস ক্যাপশন"},
-        "thumbnail": "/ai-presets/social4.webp",
+        "thumbnail": "/ai-presets/glasscaption.webp",
         "prompt": (
             "A modern social post for {subject}: a full-bleed lifestyle "
             "photo of the product fills the entire square frame, with a "
             "frosted glassmorphism caption bar (translucent white, blurred "
             "backdrop, thin light border) across the bottom third, "
-            "containing a short bold headline in clean modern type — copy "
-            "should genuinely fit this specific business (use the real "
+            "containing a short bold headline in sleek modern clean type — "
+            "copy should genuinely fit this specific business (use the real "
             "business context given above). Trendy modern app-UI aesthetic, "
             "soft ambient lighting. Every letter crisp, correctly spelled, "
             "legible. 1:1, this is the finished, ready-to-post graphic."
+        ),
+    },
+    {
+        "id": "marketing-neon-sign",
+        "category": "marketing",
+        "name": {"en": "Neon Sign", "bn": "নিয়ন সাইন"},
+        "thumbnail": "/ai-presets/neon.webp",
+        "prompt": (
+            "A bold social media post for {subject}: the product lit by "
+            "glowing pink and blue neon light against a dark moody nightlife "
+            "backdrop, with a headline rendered as an actual glowing "
+            "neon-tube sign and a smaller neon-outline CTA button beneath it "
+            "— copy should genuinely fit this specific business (use the "
+            "real business context given above). Sleek modern neon "
+            "typography, crisp glow, moody urban energy. Every letter "
+            "crisp, correctly spelled, legible. 1:1, this is the finished "
+            "ready-to-post graphic."
+        ),
+    },
+    {
+        "id": "marketing-polaroid-frame",
+        "category": "marketing",
+        "name": {"en": "Polaroid Frame", "bn": "পোলারয়েড ফ্রেম"},
+        "thumbnail": "/ai-presets/frame.webp",
+        "prompt": (
+            "A trendy social post for {subject} styled as a single polaroid "
+            "photograph: the product shot in warm natural light, framed "
+            "with the classic white polaroid border, with a short "
+            "handwritten-style caption scrawled in the bottom white margin "
+            "in a casual script font — copy should genuinely fit this "
+            "specific business (use the real business context given above). "
+            "Subtle drop shadow beneath the polaroid on a soft neutral "
+            "background, sleek modern aesthetic, crisp legible "
+            "handwritten-style text. 1:1, this is the finished ready-to-post "
+            "graphic."
+        ),
+    },
+    {
+        "id": "marketing-phone-mockup",
+        "category": "marketing",
+        "name": {"en": "Phone Mockup", "bn": "ফোন মকআপ"},
+        "thumbnail": "/ai-presets/insta.webp",
+        "prompt": (
+            "A modern social post for {subject} showing a realistic "
+            "smartphone mockup centered in frame, its screen displaying an "
+            "Instagram-style post of the product with a caption and "
+            "heart/comment icons visible on-screen, soft gradient "
+            "background behind the phone, a bold headline above the phone "
+            "in sleek modern type — copy should genuinely fit this specific "
+            "business (use the real business context given above). Crisp "
+            "legible typography, premium tech-forward feel. 1:1, this is "
+            "the finished ready-to-post graphic."
+        ),
+    },
+    {
+        "id": "marketing-countdown",
+        "category": "marketing",
+        "name": {"en": "Countdown Urgency", "bn": "কাউন্টডাউন"},
+        "thumbnail": "/ai-presets/countdown.webp",
+        "prompt": (
+            "A vertical 9:16 Instagram/Facebook Story graphic for "
+            "{subject} on a bold solid-color background, with a large sleek "
+            "countdown-style badge and a bold headline below it plus a "
+            "rounded CTA button — copy should genuinely fit this specific "
+            "business and convey urgency (use the real business context "
+            "given above). Sleek modern high-urgency typography, crisp and "
+            "legible, energetic color palette. This is the finished, "
+            "ready-to-post graphic."
+        ),
+    },
+    {
+        "id": "marketing-split-duo",
+        "category": "marketing",
+        "name": {"en": "Split Duo", "bn": "স্প্লিট ডুও"},
+        "thumbnail": "/ai-presets/duo.webp",
+        "prompt": (
+            "A modern social post for {subject} split cleanly down the "
+            "middle: the product shown one way on the left half against a "
+            "light background, and a contrasting variant/angle on the right "
+            "half against a dark background, a bold headline spanning both "
+            "halves at the top in sleek modern type — copy should genuinely "
+            "fit this specific business (use the real business context "
+            "given above) — with a thin vertical divider line between the "
+            "two halves. Crisp legible typography, confident graphic "
+            "layout. 1:1, this is the finished ready-to-post graphic."
+        ),
+    },
+    {
+        "id": "marketing-testimonial-quote",
+        "category": "marketing",
+        "name": {"en": "Testimonial Quote", "bn": "টেস্টিমোনিয়াল কোট"},
+        "thumbnail": "/ai-presets/quote.webp",
+        "prompt": (
+            "A modern social post for {subject} shot in soft natural light "
+            "filling the frame, with a frosted glassmorphism quote card "
+            "overlapping the lower third containing a short five-star "
+            "review snippet in sleek modern type and the business name "
+            "beneath it — copy should genuinely fit this specific business "
+            "(use the real business context given above). Crisp legible "
+            "typography, premium social-proof aesthetic. 1:1, this is the "
+            "finished ready-to-post graphic."
         ),
     },
 ]
