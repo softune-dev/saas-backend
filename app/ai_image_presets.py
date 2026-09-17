@@ -34,11 +34,14 @@ typed for `subject` or as free-text instructions. `bento_showcase` is a
 multi-cell collage, so a plain photo grid with no labels just reads as
 random product shots — each cell gets a short caption naming what it
 shows (a color, an angle, "detail," "true to scale," etc.) so the banner
-actually communicates something. `events`/`marketing` already work the
-same way. Only `category`/`product` stay plain photography — a category
-tile or a single product shot doesn't need copy to be understood — but if
-a merchant's own instructions ask for text there too, that's honored the
-same way. The one hard rule for EVERY preset: whenever a prompt does
+actually communicates something. `events`/`marketing` already work the same way, and so does `product` —
+its ten presets are presentation-style creative shots (underwater, ice,
+confetti, etc.), not plain catalog photography, so they carry a
+business-context headline + CTA button the same as hero. Only `category`
+stays plain photography — a category tile doesn't need copy to be
+understood — but if a merchant's own instructions ask for text there too,
+that's honored the same way. The one hard rule for EVERY preset: whenever
+a prompt does
 include text, it must ask explicitly for crisp, correctly spelled,
 legible typography — an image-generation model told nothing about text
 usually leaves it out or garbles it if it guesses on its own.
@@ -178,7 +181,7 @@ IMAGE_PRESETS: list[dict] = [
     # presets a merchant reaches for when they want something more striking
     # than plain catalog photography. If a reference photo is attached, the
     # product's real shape/color/details must stay accurate; only the
-    # environment around it is generated. ---
+    # environment and text around it are generated. ---
     {
         "id": "product-underwater",
         "category": "product",
@@ -188,10 +191,14 @@ IMAGE_PRESETS: list[dict] = [
             "A striking product photo of {subject} submerged in clear blue "
             "water, surrounded by fine bubbles rising past it, soft caustic "
             "light rays filtering down from above, dreamy underwater "
-            "atmosphere. If a reference photo of the product is provided, keep "
-            "its real shape, color, and details accurate — only the "
-            "surrounding water and light are generated. Sharp focus on the "
-            "product, cinematic and eye-catching, no text."
+            "atmosphere. Include a short bold correctly spelled headline and "
+            "a rounded call-to-action button graphic positioned in the "
+            "clearer upper portion of the frame, genuinely fitting this "
+            "specific business (use the real business context given above). "
+            "If a reference photo of the product is provided, keep its real "
+            "shape, color, and details accurate — only the environment and "
+            "text are generated. Sharp focus on the product, cinematic and "
+            "eye-catching, crisp legible typography."
         ),
     },
     {
@@ -201,11 +208,14 @@ IMAGE_PRESETS: list[dict] = [
         "thumbnail": "/ai-presets/prod2.webp",
         "prompt": (
             "A dreamy product photo of {subject} floating weightlessly among "
-            "soft pastel clouds against a pale sky, gentle golden-hour light, "
-            "a sense of calm and elevation. If a reference photo of the "
-            "product is provided, keep its real shape, color, and details "
-            "accurate — only the surrounding clouds and sky are generated. "
-            "Sharp focus on the product, whimsical and eye-catching, no text."
+            "soft pastel clouds against a pale sky, gentle golden-hour light. "
+            "Include a short bold correctly spelled headline and a rounded "
+            "call-to-action button graphic positioned in the open sky area, "
+            "genuinely fitting this specific business (use the real business "
+            "context given above). If a reference photo of the product is "
+            "provided, keep its real shape, color, and details accurate — "
+            "only the environment and text are generated. Sharp focus on the "
+            "product, whimsical and eye-catching, crisp legible typography."
         ),
     },
     {
@@ -217,10 +227,14 @@ IMAGE_PRESETS: list[dict] = [
             "A high-energy product photo of {subject} frozen mid-air at the "
             "exact moment of a dynamic liquid splash bursting around it, "
             "droplets frozen in motion, dramatic studio lighting against a "
-            "dark background. If a reference photo of the product is "
-            "provided, keep its real shape, color, and details accurate — "
-            "only the splash effect is generated. Sharp focus on the product, "
-            "high-impact advertising style, no text."
+            "dark background. Include a short bold correctly spelled headline "
+            "and a rounded call-to-action button graphic in a clear area of "
+            "the dark background, genuinely fitting this specific business "
+            "(use the real business context given above). If a reference "
+            "photo of the product is provided, keep its real shape, color, "
+            "and details accurate — only the splash effect and text are "
+            "generated. Sharp focus on the product, high-impact advertising "
+            "style, crisp legible typography."
         ),
     },
     {
@@ -231,11 +245,128 @@ IMAGE_PRESETS: list[dict] = [
         "prompt": (
             "A cinematic product photo of {subject} resting on golden desert "
             "sand dunes at sunset, warm dramatic side light, long soft "
-            "shadows, vast dune landscape stretching into a hazy horizon. If "
-            "a reference photo of the product is provided, keep its real "
-            "shape, color, and details accurate — only the desert scene is "
-            "generated. Sharp focus on the product, striking and eye-catching, "
-            "no text."
+            "shadows, vast dune landscape stretching into a hazy horizon. "
+            "Include a short bold correctly spelled headline and a rounded "
+            "call-to-action button graphic in the open sky area, genuinely "
+            "fitting this specific business (use the real business context "
+            "given above). If a reference photo of the product is provided, "
+            "keep its real shape, color, and details accurate — only the "
+            "desert scene and text are generated. Sharp focus on the "
+            "product, striking and eye-catching, crisp legible typography."
+        ),
+    },
+    {
+        "id": "product-golden-hour",
+        "category": "product",
+        "name": {"en": "Golden Hour Glow", "bn": "গোল্ডেন আওয়ার গ্লো"},
+        "thumbnail": "/ai-presets/prod5.webp",
+        "prompt": (
+            "A warm cinematic product photo of {subject} bathed in "
+            "golden-hour sunlight, soft warm rim light outlining the edges, "
+            "gentle lens flare, dreamy amber atmosphere. Include a short "
+            "bold correctly spelled headline and a rounded call-to-action "
+            "button graphic in a clear area of the frame, genuinely fitting "
+            "this specific business (use the real business context given "
+            "above). If a reference photo of the product is provided, keep "
+            "its real shape, color, and details accurate — only the "
+            "lighting, atmosphere, and text are generated. Sharp focus on "
+            "the product, cinematic and eye-catching, crisp legible "
+            "typography."
+        ),
+    },
+    {
+        "id": "product-ice-frost",
+        "category": "product",
+        "name": {"en": "Ice & Frost", "bn": "বরফ ও তুষার"},
+        "thumbnail": "/ai-presets/prod6.webp",
+        "prompt": (
+            "A striking product photo of {subject} encased in a thin layer "
+            "of frost with delicate ice crystals forming around it, cool "
+            "blue-white lighting, a light mist drifting past. Include a "
+            "short bold correctly spelled headline and a rounded "
+            "call-to-action button graphic in a clear area of the frame, "
+            "genuinely fitting this specific business (use the real "
+            "business context given above). If a reference photo of the "
+            "product is provided, keep its real shape, color, and details "
+            "accurate — only the frost, atmosphere, and text are generated. "
+            "Sharp focus on the product, cinematic and eye-catching, crisp "
+            "legible typography."
+        ),
+    },
+    {
+        "id": "product-confetti",
+        "category": "product",
+        "name": {"en": "Confetti Celebration", "bn": "কনফেটি উদযাপন"},
+        "thumbnail": "/ai-presets/prod7.webp",
+        "prompt": (
+            "An energetic product photo of {subject} frozen mid-air "
+            "surrounded by a colorful burst of confetti and streamers "
+            "caught in motion, vibrant festive studio lighting against a "
+            "bright background. Include a short bold correctly spelled "
+            "headline and a rounded call-to-action button graphic in a "
+            "clear area of the frame, genuinely fitting this specific "
+            "business (use the real business context given above). If a "
+            "reference photo of the product is provided, keep its real "
+            "shape, color, and details accurate — only the confetti effect "
+            "and text are generated. Sharp focus on the product, joyful and "
+            "eye-catching, crisp legible typography."
+        ),
+    },
+    {
+        "id": "product-glossy-reflection",
+        "category": "product",
+        "name": {"en": "Glossy Reflection", "bn": "গ্লসি প্রতিফলন"},
+        "thumbnail": "/ai-presets/prod8.webp",
+        "prompt": (
+            "A moody product photo of {subject} standing on a glossy black "
+            "reflective surface, dramatic single-source studio lighting, a "
+            "crisp mirror reflection beneath it fading into darkness. "
+            "Include a short bold correctly spelled headline and a rounded "
+            "call-to-action button graphic in a clear dark area, genuinely "
+            "fitting this specific business (use the real business context "
+            "given above). If a reference photo of the product is provided, "
+            "keep its real shape, color, and details accurate — only the "
+            "reflective surface, lighting, and text are generated. Sharp "
+            "focus on the product, premium and eye-catching, crisp legible "
+            "typography."
+        ),
+    },
+    {
+        "id": "product-cosmic-float",
+        "category": "product",
+        "name": {"en": "Cosmic Float", "bn": "কসমিক ফ্লোট"},
+        "thumbnail": "/ai-presets/prod9.webp",
+        "prompt": (
+            "A dramatic product photo of {subject} floating in a starry "
+            "cosmic nebula scene, deep purples and blues with scattered "
+            "stars and soft glowing light, a sense of weightlessness. "
+            "Include a short bold correctly spelled headline and a rounded "
+            "call-to-action button graphic in a clear area of the nebula, "
+            "genuinely fitting this specific business (use the real "
+            "business context given above). If a reference photo of the "
+            "product is provided, keep its real shape, color, and details "
+            "accurate — only the cosmic background and text are generated. "
+            "Sharp focus on the product, striking and eye-catching, crisp "
+            "legible typography."
+        ),
+    },
+    {
+        "id": "product-rain-glass",
+        "category": "product",
+        "name": {"en": "Rain-Streaked Glass", "bn": "বৃষ্টিভেজা কাচ"},
+        "thumbnail": "/ai-presets/prod10.webp",
+        "prompt": (
+            "A cinematic product photo of {subject} shot through a "
+            "rain-streaked window, soft bokeh city lights blurred in the "
+            "background, moody blue-toned lighting, water droplets in "
+            "sharp focus near the lens. Include a short bold correctly "
+            "spelled headline and a rounded call-to-action button graphic "
+            "in a clear area of the frame, genuinely fitting this specific "
+            "business (use the real business context given above). If a "
+            "reference photo of the product is provided, keep its real "
+            "shape, color, and details accurate — only the rain/window "
+            "effect and text are generated. Sharp focus on the product, "
+            "moody and eye-catching, crisp legible typography."
         ),
     },
     # --- Product Bento ---
