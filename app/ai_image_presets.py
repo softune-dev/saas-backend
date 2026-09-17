@@ -198,7 +198,7 @@ IMAGE_PRESETS: list[dict] = [
             "If a reference photo of the product is provided, keep its real "
             "shape, color, and details accurate — only the environment and "
             "text are generated. Sharp focus on the product, cinematic and "
-            "eye-catching, crisp legible typography."
+            "eye-catching, sleek, modern, crisp legible typography."
         ),
     },
     {
@@ -215,7 +215,7 @@ IMAGE_PRESETS: list[dict] = [
             "context given above). If a reference photo of the product is "
             "provided, keep its real shape, color, and details accurate — "
             "only the environment and text are generated. Sharp focus on the "
-            "product, whimsical and eye-catching, crisp legible typography."
+            "product, whimsical and eye-catching, sleek, modern, crisp legible typography."
         ),
     },
     {
@@ -234,7 +234,7 @@ IMAGE_PRESETS: list[dict] = [
             "photo of the product is provided, keep its real shape, color, "
             "and details accurate — only the splash effect and text are "
             "generated. Sharp focus on the product, high-impact advertising "
-            "style, crisp legible typography."
+            "style, sleek, modern, crisp legible typography."
         ),
     },
     {
@@ -252,7 +252,7 @@ IMAGE_PRESETS: list[dict] = [
             "given above). If a reference photo of the product is provided, "
             "keep its real shape, color, and details accurate — only the "
             "desert scene and text are generated. Sharp focus on the "
-            "product, striking and eye-catching, crisp legible typography."
+            "product, striking and eye-catching, sleek, modern, crisp legible typography."
         ),
     },
     {
@@ -270,8 +270,8 @@ IMAGE_PRESETS: list[dict] = [
             "above). If a reference photo of the product is provided, keep "
             "its real shape, color, and details accurate — only the "
             "lighting, atmosphere, and text are generated. Sharp focus on "
-            "the product, cinematic and eye-catching, crisp legible "
-            "typography."
+            "the product, cinematic and eye-catching, sleek, modern, crisp "
+            "legible typography."
         ),
     },
     {
@@ -289,8 +289,8 @@ IMAGE_PRESETS: list[dict] = [
             "business context given above). If a reference photo of the "
             "product is provided, keep its real shape, color, and details "
             "accurate — only the frost, atmosphere, and text are generated. "
-            "Sharp focus on the product, cinematic and eye-catching, crisp "
-            "legible typography."
+            "Sharp focus on the product, cinematic and eye-catching, sleek, "
+            "modern, crisp legible typography."
         ),
     },
     {
@@ -309,7 +309,7 @@ IMAGE_PRESETS: list[dict] = [
             "reference photo of the product is provided, keep its real "
             "shape, color, and details accurate — only the confetti effect "
             "and text are generated. Sharp focus on the product, joyful and "
-            "eye-catching, crisp legible typography."
+            "eye-catching, sleek, modern, crisp legible typography."
         ),
     },
     {
@@ -327,8 +327,8 @@ IMAGE_PRESETS: list[dict] = [
             "given above). If a reference photo of the product is provided, "
             "keep its real shape, color, and details accurate — only the "
             "reflective surface, lighting, and text are generated. Sharp "
-            "focus on the product, premium and eye-catching, crisp legible "
-            "typography."
+            "focus on the product, premium and eye-catching, sleek, modern, "
+            "crisp legible typography."
         ),
     },
     {
@@ -346,8 +346,8 @@ IMAGE_PRESETS: list[dict] = [
             "business context given above). If a reference photo of the "
             "product is provided, keep its real shape, color, and details "
             "accurate — only the cosmic background and text are generated. "
-            "Sharp focus on the product, striking and eye-catching, crisp "
-            "legible typography."
+            "Sharp focus on the product, striking and eye-catching, sleek, "
+            "modern, crisp legible typography."
         ),
     },
     {
@@ -366,7 +366,7 @@ IMAGE_PRESETS: list[dict] = [
             "reference photo of the product is provided, keep its real "
             "shape, color, and details accurate — only the rain/window "
             "effect and text are generated. Sharp focus on the product, "
-            "moody and eye-catching, crisp legible typography."
+            "moody and eye-catching, sleek, modern, crisp legible typography."
         ),
     },
     # --- Product Bento ---
