@@ -19,9 +19,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import ai_images, mailer, media
 from app.ai_image_presets import (
+    ALWAYS_TEXT_FREE_CATEGORIES,
+    FREEFORM_QUALITY_BASELINE,
     NO_TEXT_INSTRUCTION,
     PRESET_CATEGORIES,
     TEXT_RENDER_QUALITY,
+    freeform_style_hint,
     get_preset,
     presets_by_category,
 )
@@ -92,7 +95,11 @@ def _apply_preset(payload: GenerateImageIn) -> str:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Unknown preset")
         subject = (payload.subject or "").strip() or "this product"
         prompt = preset["prompt"].format(subject=subject)
-        if payload.include_text:
+        # A category tile is never a marketing graphic — enforced here too,
+        # not just by the frontend hiding the toggle, so a raw API call
+        # can't bake text into one either (see ALWAYS_TEXT_FREE_CATEGORIES).
+        include_text = payload.include_text and preset["category"] not in ALWAYS_TEXT_FREE_CATEGORIES
+        if include_text:
             prompt += f" {preset['text_addon']} {TEXT_RENDER_QUALITY}"
         else:
             prompt += f" {NO_TEXT_INSTRUCTION}"
@@ -101,6 +108,16 @@ def _apply_preset(payload: GenerateImageIn) -> str:
         return prompt
     if payload.prompt and payload.prompt.strip():
         prompt = payload.prompt.strip()
+        # No preset picked — the merchant is generating from their own
+        # words. Still worth guiding toward a professional result: match
+        # keywords like "event"/"banner"/"social" against a preset
+        # category's own composition standards, and always add a baseline
+        # quality push either way (see app/ai_image_presets.py's
+        # freeform_style_hint/FREEFORM_QUALITY_BASELINE).
+        hint = freeform_style_hint(prompt)
+        if hint:
+            prompt += f" {hint}"
+        prompt += f" {FREEFORM_QUALITY_BASELINE}"
         prompt += f" {TEXT_RENDER_QUALITY}" if payload.include_text else f" {NO_TEXT_INSTRUCTION}"
         return prompt
     raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Need a preset or a prompt to generate an image.")

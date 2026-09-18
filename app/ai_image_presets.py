@@ -76,6 +76,100 @@ NO_TEXT_INSTRUCTION = (
     "and no graphic overlays of any kind anywhere in the image."
 )
 
+# Categories where text is never a merchant choice, regardless of what a
+# client sends — a category tile is a plain photo, not a marketing graphic
+# (see app/api/ai_images.py's resolve_prompt, which forces include_text to
+# False server-side for any preset in one of these categories, not just at
+# the frontend).
+ALWAYS_TEXT_FREE_CATEGORIES = {"category"}
+
+# When a merchant types a free-text prompt with no preset_id, these
+# keywords nudge the model toward the same professional composition
+# standards a matching preset already encodes — "I want to generate an
+# event image" typed straight into the box should not produce a worse
+# result than clicking the Events tab and picking one. Checked as a
+# case-insensitive substring against the merchant's own words; first match
+# wins, so more specific phrases are listed before their broader category.
+FREEFORM_STYLE_HINTS: list[tuple[str, str]] = [
+    (
+        "bento",
+        "Compose this like a modern bento-grid multi-cell product "
+        "showcase — clean rounded grid dividers, consistent studio "
+        "lighting and background tone across every cell.",
+    ),
+    (
+        "category",
+        "Compose this like a clean, minimal e-commerce category tile — "
+        "centered subject, simple uncluttered background.",
+    ),
+    (
+        "story",
+        "Compose this like a professional vertical 9:16 social story "
+        "graphic — bold modern composition, premium advertising quality.",
+    ),
+    (
+        "instagram",
+        "Compose this like a professional social-media post — bold "
+        "modern composition, scroll-stopping, premium advertising "
+        "quality.",
+    ),
+    (
+        "social",
+        "Compose this like a professional social-media post — bold "
+        "modern composition, scroll-stopping, premium advertising "
+        "quality.",
+    ),
+    (
+        "banner",
+        "Compose this like a premium website hero banner — clean, wide, "
+        "professional product photography style.",
+    ),
+    (
+        "hero",
+        "Compose this like a premium website hero banner — clean, wide, "
+        "professional product photography style.",
+    ),
+    (
+        "promo",
+        "Compose this like a professional promo/event announcement "
+        "graphic — clean layout, confident composition, premium "
+        "advertising quality.",
+    ),
+    (
+        "sale",
+        "Compose this like a professional promo/event announcement "
+        "graphic — clean layout, confident composition, premium "
+        "advertising quality.",
+    ),
+    (
+        "event",
+        "Compose this like a professional promo/event announcement "
+        "graphic — clean layout, confident composition, premium "
+        "advertising quality.",
+    ),
+]
+
+# Appended to EVERY freeform (no preset_id) generation regardless of
+# keyword match — the baseline answer to "the AI should generate nice
+# ones" even when nothing above matches what the merchant typed.
+FREEFORM_QUALITY_BASELINE = (
+    "Professional commercial photography or graphic design quality: "
+    "clean composition, well-lit, sharp focus, thoughtful framing — "
+    "avoid a cluttered, amateur, or flat result."
+)
+
+
+def freeform_style_hint(prompt: str) -> str | None:
+    """First matching FREEFORM_STYLE_HINTS entry for this free-text prompt,
+    or None — see app/api/ai_images.py's resolve_prompt, which appends
+    whatever this returns (plus FREEFORM_QUALITY_BASELINE either way) when
+    the merchant generated without picking a preset."""
+    lowered = prompt.lower()
+    for keyword, hint in FREEFORM_STYLE_HINTS:
+        if keyword in lowered:
+            return hint
+    return None
+
 PRESET_CATEGORIES: list[dict] = [
     {"id": "product", "label": {"en": "Products", "bn": "প্রোডাক্ট"}},
     {"id": "events", "label": {"en": "Events", "bn": "ইভেন্ট"}},
@@ -165,28 +259,24 @@ IMAGE_PRESETS: list[dict] = [
             "call-to-action button graphic with short fitting button text."
         ),
     },
-    # --- Category: circular-safe compositions (these render as circular
-    # tiles in the picker), a generic style catalog reusable for ANY
-    # category a merchant names via {subject}. ---
+    # --- Category: plain square photography, no text ever (see
+    # ALWAYS_TEXT_FREE_CATEGORIES below) — a category tile is browsed as a
+    # normal square box like Product/Events, not cropped into a circle, and
+    # never needs copy to be understood. Generic style catalog reusable for
+    # ANY category a merchant names via {subject}. ---
     {
         "id": "category-pastel-spotlight",
         "category": "category",
         "name": {"en": "Pastel Spotlight", "bn": "প্যাস্টেল স্পটলাইট"},
         "thumbnail": "/ai-presets/cat-spotlight.webp",
         "prompt": (
-            "A square category tile: {subject} placed dead center in the "
-            "frame with generous even empty space around it. This image "
-            "will be cropped into a circle, so keep the subject well within "
-            "a centered circular safe zone, with the soft pastel gradient "
-            "background filling the entire frame edge to edge including the "
-            "corners. Soft studio lighting, subtle shadow beneath, clean "
-            "minimal premium e-commerce category-tile style."
+            "A square category photo: {subject} placed dead center in the "
+            "frame with generous even empty space around it, soft pastel "
+            "gradient background filling the whole frame. Soft studio "
+            "lighting, subtle shadow beneath, clean minimal premium "
+            "e-commerce category-tile style."
         ),
-        "text_addon": (
-            "Include a short bold category label naming this category, "
-            "positioned just below the subject, still within the circular "
-            "safe zone."
-        ),
+        "text_addon": "",
     },
     {
         "id": "category-cluster",
@@ -194,18 +284,12 @@ IMAGE_PRESETS: list[dict] = [
         "name": {"en": "Cluster Arrangement", "bn": "ক্লাস্টার সজ্জা"},
         "thumbnail": "/ai-presets/cat-cluster.webp",
         "prompt": (
-            "A square category tile: a small curated cluster of 2-3 items "
+            "A square category photo: a small curated cluster of 2-3 items "
             "representing {subject}, grouped tightly together and centered "
-            "in the frame. This image will be cropped into a circle, so "
-            "keep every item within a centered circular safe zone, with the "
-            "clean neutral background filling the frame edge to edge "
-            "including the corners. Soft diffused studio light."
+            "in the frame, clean neutral background. Soft diffused studio "
+            "light."
         ),
-        "text_addon": (
-            "Include a short bold category label naming this category, "
-            "positioned just below the cluster, still within the circular "
-            "safe zone."
-        ),
+        "text_addon": "",
     },
     {
         "id": "category-texture",
@@ -213,93 +297,61 @@ IMAGE_PRESETS: list[dict] = [
         "name": {"en": "Textured Surface", "bn": "টেক্সচার্ড সারফেস"},
         "thumbnail": "/ai-presets/cat-texture.webp",
         "prompt": (
-            "A square category tile: items representing {subject} centered "
-            "on a subtle material texture relevant to the category. This "
-            "image will be cropped into a circle, so keep the subject "
-            "within a centered circular safe zone, with the texture filling "
-            "the frame edge to edge including the corners. Soft warm "
-            "directional light, premium boutique feel."
+            "A square category photo: items representing {subject} "
+            "centered on a subtle material texture relevant to the "
+            "category, filling the whole frame. Soft warm directional "
+            "light, premium boutique feel."
         ),
-        "text_addon": (
-            "Include a short bold category label naming this category, "
-            "positioned just below the subject, still within the circular "
-            "safe zone."
-        ),
+        "text_addon": "",
     },
     {
         "id": "category-pattern-grid",
         "category": "category",
         "name": {"en": "Pattern Grid", "bn": "প্যাটার্ন গ্রিড"},
-        "thumbnail": "/ai-presets/cat-pattern.webp",
+        "thumbnail": "/ai-presets/cat-grid.webp",
         "prompt": (
-            "A square category tile: several small items representing "
+            "A square category photo: several small items representing "
             "{subject} shot from directly overhead, arranged in a neat, "
-            "evenly spaced repeating grid pattern centered in the frame. "
-            "This image will be cropped into a circle, so keep the whole "
-            "grid within a centered circular safe zone, with the neutral "
-            "background filling the frame edge to edge including the "
-            "corners. Soft even studio lighting."
+            "evenly spaced repeating grid pattern filling the frame, "
+            "neutral background. Soft even studio lighting."
         ),
-        "text_addon": (
-            "Include a short bold category label naming this category, "
-            "centered just beneath the grid, still within the circular safe "
-            "zone."
-        ),
+        "text_addon": "",
     },
     {
         "id": "category-color-wash",
         "category": "category",
         "name": {"en": "Color Wash", "bn": "কালার ওয়াশ"},
-        "thumbnail": "/ai-presets/cat-colorwash.webp",
+        "thumbnail": "/ai-presets/cat-wash.webp",
         "prompt": (
-            "A square category tile: {subject} centered against a bold "
-            "saturated gradient color wash background. This image will be "
-            "cropped into a circle, so keep the subject within a centered "
-            "circular safe zone, with the gradient filling the frame edge "
-            "to edge including the corners. Crisp studio lighting."
+            "A square category photo: {subject} centered against a bold "
+            "saturated gradient color wash background filling the whole "
+            "frame. Crisp studio lighting."
         ),
-        "text_addon": (
-            "Include a short bold category label naming this category in "
-            "clean white type, positioned just below the subject, still "
-            "within the circular safe zone."
-        ),
+        "text_addon": "",
     },
     {
         "id": "category-framed-badge",
         "category": "category",
         "name": {"en": "Framed Badge", "bn": "ফ্রেমড ব্যাজ"},
-        "thumbnail": "/ai-presets/cat-badge.webp",
+        "thumbnail": "/ai-presets/cat-frame.webp",
         "prompt": (
-            "A square category tile: {subject} centered inside a thin gold "
-            "ring/badge outline, on a soft neutral background. This image "
-            "will be cropped into a circle, so keep the ring and subject "
-            "within a centered circular safe zone, with the background "
-            "filling the frame edge to edge including the corners. Soft "
+            "A square category photo: {subject} centered inside a thin "
+            "gold ring/badge outline, on a soft neutral background. Soft "
             "studio lighting, premium feel."
         ),
-        "text_addon": (
-            "Include a short bold category label naming this category, "
-            "positioned just beneath the ring, still within the circular "
-            "safe zone."
-        ),
+        "text_addon": "",
     },
     {
         "id": "category-duotone",
         "category": "category",
         "name": {"en": "Duotone Tile", "bn": "ডুওটোন টাইল"},
-        "thumbnail": "/ai-presets/cat-duotone.webp",
+        "thumbnail": "/ai-presets/cat-duetone.webp",
         "prompt": (
-            "A square category tile: {subject} treated in a single striking "
-            "duotone color filter, centered in frame. This image will be "
-            "cropped into a circle, so keep the subject within a centered "
-            "circular safe zone, with the duotone background filling the "
-            "frame edge to edge including the corners."
+            "A square category photo: {subject} treated in a single "
+            "striking duotone color filter, centered in frame, duotone "
+            "background filling the whole frame."
         ),
-        "text_addon": (
-            "Include a short bold category label naming this category in "
-            "clean white type, positioned just below the subject, still "
-            "within the circular safe zone."
-        ),
+        "text_addon": "",
     },
     {
         "id": "category-shadow-play",
@@ -307,18 +359,11 @@ IMAGE_PRESETS: list[dict] = [
         "name": {"en": "Shadow Play", "bn": "শ্যাডো প্লে"},
         "thumbnail": "/ai-presets/cat-shadow.webp",
         "prompt": (
-            "A square category tile: {subject} centered on a plain light "
+            "A square category photo: {subject} centered on a plain light "
             "background with one dramatic long shadow cast diagonally from "
-            "strong single-source side lighting. This image will be cropped "
-            "into a circle, so keep the subject and shadow within a "
-            "centered circular safe zone, with the background filling the "
-            "frame edge to edge including the corners."
+            "strong single-source side lighting."
         ),
-        "text_addon": (
-            "Include a short bold category label naming this category, "
-            "positioned just below the subject, still within the circular "
-            "safe zone."
-        ),
+        "text_addon": "",
     },
     {
         "id": "category-floating-glow",
@@ -326,37 +371,23 @@ IMAGE_PRESETS: list[dict] = [
         "name": {"en": "Floating Glow", "bn": "ফ্লোটিং গ্লো"},
         "thumbnail": "/ai-presets/cat-glow.webp",
         "prompt": (
-            "A square category tile: {subject} floating slightly above a "
+            "A square category photo: {subject} floating slightly above a "
             "soft reflective surface with a gentle glowing halo of light "
-            "beneath it, centered in frame. This image will be cropped into "
-            "a circle, so keep the subject and glow within a centered "
-            "circular safe zone, with the background filling the frame edge "
-            "to edge including the corners. Soft dreamy lighting."
+            "beneath it, centered in frame. Soft dreamy lighting."
         ),
-        "text_addon": (
-            "Include a short bold category label naming this category, "
-            "positioned just below the subject, still within the circular "
-            "safe zone."
-        ),
+        "text_addon": "",
     },
     {
         "id": "category-botanical-edge",
         "category": "category",
         "name": {"en": "Botanical Edge", "bn": "বোটানিক্যাল এজ"},
-        "thumbnail": "/ai-presets/cat-botanical.webp",
+        "thumbnail": "/ai-presets/cat-edge.webp",
         "prompt": (
-            "A square category tile: {subject} centered in frame, softly "
+            "A square category photo: {subject} centered in frame, softly "
             "surrounded by a delicate ring of green botanical leaves and "
-            "sprigs framing the edges. This image will be cropped into a "
-            "circle, so keep the subject and botanical frame within a "
-            "centered circular safe zone, with the background filling the "
-            "frame edge to edge including the corners. Soft natural light."
+            "sprigs framing the edges. Soft natural light."
         ),
-        "text_addon": (
-            "Include a short bold category label naming this category, "
-            "positioned just below the subject, still within the circular "
-            "safe zone."
-        ),
+        "text_addon": "",
     },
     # --- Product: dramatic environment effects. Same product, one reference
     # photo (REFERENCE_HELPFUL_CATEGORIES already covers "product"), only
