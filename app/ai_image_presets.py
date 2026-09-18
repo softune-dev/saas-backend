@@ -7,45 +7,74 @@ was scoped), not user data, so they ship with a code deploy like the theme
 catalog does, not through an admin CRUD screen.
 
 Each preset's `thumbnail` is a path served from the dashboard's own
-`public/ai-presets/` folder — drop a PNG there with the matching filename
-and it shows up; nothing here reads image bytes, this is just the prompt
-+ metadata half of the pair. `prompt` uses `{subject}` as the one
+`public/ai-presets/` folder — drop a PNG/WEBP there with the matching
+filename and it shows up; nothing here reads image bytes, this is just the
+prompt + metadata half of the pair. `prompt` uses `{subject}` as the one
 substitution point for whatever the merchant is actually generating for
 (a product name, a store name, a category name) — see
-app/api/ai_images.py's `_render_preset_prompt`.
+app/api/ai_images.py's `resolve_prompt`.
 
 Categories mirror the site-editor sections a generated image is destined
-for (hero/category/product) plus three standalone-graphic buckets that
-never get placed under a dynamic text overlay: `bento_showcase` (a
-multi-cell product-angle grid banner), `events` (a promo/announcement
-graphic with its own headline + CTA button baked in), and `marketing`
-(social posts/ad creative). Ten presets per category is the target scope;
-each category below ships with a real, working starter set — extend
-freely, this file is the only place that needs an edit.
+for (hero/category/product) plus three standalone-graphic buckets:
+`bento_showcase` (a multi-cell product-angle grid banner), `events` (a
+promo/announcement graphic), and `marketing` (social posts/ad creative).
+Ten presets per category is the target scope; each category below ships
+with a real, working starter set — extend freely, this file is the only
+place that needs an edit.
 
-TEXT POLICY — read before adding a preset: every category here produces a
-FINISHED, standalone graphic with real copy baked directly into the pixels
-— headline, supporting line, per-cell caption, and/or a CTA button where
-the layout calls for one. Nothing is left blank for a separate overlay:
-`hero` gets its headline/button text from the real business context
-(app/api/ai_images.py's `_business_context_line`, pulled from the
-merchant's own site.business name/description) plus whatever the merchant
-typed for `subject` or as free-text instructions. `bento_showcase` is a
-multi-cell collage, so a plain photo grid with no labels just reads as
-random product shots — each cell gets a short caption naming what it
-shows (a color, an angle, "detail," "true to scale," etc.) so the banner
-actually communicates something. `events`/`marketing` already work the same way, and so does `product` —
-its ten presets are presentation-style creative shots (underwater, ice,
-confetti, etc.), not plain catalog photography, so they carry a
-business-context headline + CTA button the same as hero. Only `category`
-stays plain photography — a category tile doesn't need copy to be
-understood — but if a merchant's own instructions ask for text there too,
-that's honored the same way. The one hard rule for EVERY preset: whenever
-a prompt does
-include text, it must ask explicitly for crisp, correctly spelled,
-legible typography — an image-generation model told nothing about text
-usually leaves it out or garbles it if it guesses on its own.
+TEXT MODEL — every preset now supports text as a MERCHANT CHOICE, not a
+fixed per-category rule. `prompt` is always the base scene/photography
+description and never mentions text, headlines, or buttons — it must
+stand on its own as a complete, good-looking image with nothing baked in.
+`text_addon` is a separate sentence appended ONLY when the merchant opts
+into text (see app/api/ai_images.py's resolve_prompt): what copy to add
+and roughly where, written so it reads naturally appended after `prompt`.
+Every preset here has a `text_addon` — even `category`, where a merchant
+might still want a category name baked into the tile. When text is
+requested, TEXT_RENDER_QUALITY (below) is appended after the addon on
+every single call — that's the one place text-rendering instructions
+live, so improving Gemini's output is a one-line edit, not a 40-preset
+find-and-replace. When text is NOT requested, NO_TEXT_INSTRUCTION is
+appended instead, so the model is never left to guess either way.
 """
+
+# Appended after a preset's `prompt` + `text_addon` whenever the merchant
+# has opted into baked-in text. This is the actual answer to "Gemini's text
+# looks basic and dull next to ChatGPT's" — a generic image model left to
+# guess at typography usually picks a mediocre font, drifts off the exact
+# wording, or garbles a letter here and there. Spelling out the same
+# professional-designer constraints a human would apply (one typeface,
+# short copy, real contrast, a final proofread pass) is what actually moves
+# the needle, far more than any scene description ever could. Edit THIS
+# constant to improve every preset's text quality at once.
+TEXT_RENDER_QUALITY = (
+    "The text must look like it was placed by a professional graphic "
+    "designer, not guessed at by an AI: choose ONE clean modern sans-serif "
+    "typeface and use it consistently for every word, render each "
+    "letterform fully formed with correct proportions — no distortion, "
+    "warping, doubled strokes, melted edges, missing letters, or invented "
+    "characters — and keep spacing and baseline alignment consistent "
+    "across every line. Place the text over a flat or softly blurred area "
+    "with genuine contrast against what's behind it; add a subtle dark "
+    "scrim behind light text or a soft light scrim behind dark text if the "
+    "background underneath is busy, so it reads instantly at a glance. "
+    "Keep any headline under 5 words and any button label under 3 words — "
+    "short copy renders far more reliably than long copy, and a model that "
+    "runs out of room is what causes broken or overlapping letters. Before "
+    "finishing, re-check every single word against exactly what was "
+    "specified, letter by letter — correct spelling, no repeated letters, "
+    "no dropped letters, nothing invented."
+)
+
+# Appended instead of TEXT_RENDER_QUALITY when the merchant did NOT opt
+# into text — an image-generation model told nothing about text will
+# sometimes add a stray watermark-like mark or a garbled attempt at a logo
+# on its own; this heads that off explicitly rather than just staying
+# silent on the subject.
+NO_TEXT_INSTRUCTION = (
+    "Pure photography only — no text, no logos, no buttons, no watermarks, "
+    "and no graphic overlays of any kind anywhere in the image."
+)
 
 PRESET_CATEGORIES: list[dict] = [
     {"id": "product", "label": {"en": "Products", "bn": "প্রোডাক্ট"}},
@@ -65,15 +94,17 @@ IMAGE_PRESETS: list[dict] = [
         "thumbnail": "/ai-presets/hero1.webp",
         "prompt": (
             "A finished, wide website hero banner for an e-commerce storefront "
-            "selling {subject}. Soft studio gradient background. On the left "
-            "third of the frame, include a short, bold, correctly spelled "
-            "headline and a brief supporting line that genuinely fit this "
-            "specific business and product (use the real business context given "
-            "above — do not invent an unrelated brand), plus a rounded "
-            "call-to-action button graphic with short button text appropriate to "
-            "what's being sold. Warm natural lighting, professional product "
-            "photography style, crisp legible typography baked directly into the "
-            "image — this is the finished banner, nothing is added afterward."
+            "selling {subject}. Soft studio gradient background, with the left "
+            "third of the frame kept clear, low-contrast, and free of any busy "
+            "detail. Warm natural lighting, professional product photography "
+            "style."
+        ),
+        "text_addon": (
+            "On the left third of the frame, include a short bold headline and "
+            "a brief supporting line that genuinely fit this specific business "
+            "and product (use the real business context given above — do not "
+            "invent an unrelated brand), plus a rounded call-to-action button "
+            "graphic with short button text appropriate to what's being sold."
         ),
     },
     {
@@ -82,15 +113,18 @@ IMAGE_PRESETS: list[dict] = [
         "name": {"en": "Lifestyle Scene", "bn": "লাইফস্টাইল দৃশ্য"},
         "thumbnail": "/ai-presets/hero2.webp",
         "prompt": (
-            "A finished lifestyle website hero banner showing {subject} naturally "
-            "in use in a real, warm, well-lit setting. Candid, editorial "
-            "photography feel, shallow depth of field, wide aspect ratio. On the "
-            "calmer, less busy side of the frame, include a short bold correctly "
-            "spelled headline and brief supporting line that genuinely fit this "
-            "specific business (use the real business context given above), plus "
-            "a rounded call-to-action button graphic with short fitting button "
-            "text. Crisp legible typography baked directly into the image — this "
-            "is the finished banner, nothing is added afterward."
+            "A finished lifestyle website hero banner showing {subject} "
+            "naturally in use in a real, warm, well-lit setting. Candid, "
+            "editorial photography feel, shallow depth of field, wide aspect "
+            "ratio, with one side of the frame kept visually calm and "
+            "uncluttered."
+        ),
+        "text_addon": (
+            "On the calmer side of the frame, include a short bold headline "
+            "and brief supporting line that genuinely fit this specific "
+            "business (use the real business context given above), plus a "
+            "rounded call-to-action button graphic with short fitting button "
+            "text."
         ),
     },
     {
@@ -100,14 +134,16 @@ IMAGE_PRESETS: list[dict] = [
         "thumbnail": "/ai-presets/hero3.webp",
         "prompt": (
             "A finished top-down flat-lay website hero banner featuring "
-            "{subject}, arranged with intention on a neutral textured surface, "
-            "soft even lighting, minimal color palette, wide banner composition. "
-            "On the open surface to one side, include a short bold correctly "
-            "spelled headline and brief supporting line fitting this specific "
-            "business (use the real business context given above), plus a "
-            "rounded call-to-action button graphic with short fitting button "
-            "text. Crisp legible typography baked directly into the image — this "
-            "is the finished banner, nothing is added afterward."
+            "{subject}, arranged with intention on a neutral textured "
+            "surface, soft even lighting, minimal color palette, wide banner "
+            "composition, with generous empty surface kept clear on one "
+            "side."
+        ),
+        "text_addon": (
+            "On the open surface, include a short bold headline and brief "
+            "supporting line fitting this specific business (use the real "
+            "business context given above), plus a rounded call-to-action "
+            "button graphic with short fitting button text."
         ),
     },
     {
@@ -116,72 +152,219 @@ IMAGE_PRESETS: list[dict] = [
         "name": {"en": "Bold Color Block", "bn": "বোল্ড কালার ব্লক"},
         "thumbnail": "/ai-presets/hero4.webp",
         "prompt": (
-            "A finished, bold, high-contrast website hero banner for {subject} "
-            "against a single saturated color background block, dramatic studio "
-            "lighting, modern e-commerce advertising style, wide composition, "
-            "product placed off-center. On the solid-color margin, include a "
-            "short bold correctly spelled headline and brief supporting line "
-            "fitting this specific business (use the real business context given "
-            "above), plus a rounded call-to-action button graphic with short "
-            "fitting button text. Crisp legible typography baked directly into "
-            "the image — this is the finished banner, nothing is added "
-            "afterward."
+            "A finished, bold, high-contrast website hero banner for "
+            "{subject} against a single saturated color background block, "
+            "dramatic studio lighting, modern e-commerce advertising style, "
+            "wide composition, product placed off-center with a clear "
+            "solid-color margin on the other side."
+        ),
+        "text_addon": (
+            "On the solid-color margin, include a short bold headline and "
+            "brief supporting line fitting this specific business (use the "
+            "real business context given above), plus a rounded "
+            "call-to-action button graphic with short fitting button text."
         ),
     },
-    # --- Category ---
+    # --- Category: circular-safe compositions (these render as circular
+    # tiles in the picker), a generic style catalog reusable for ANY
+    # category a merchant names via {subject}. ---
     {
-        "id": "category-icon-style",
+        "id": "category-pastel-spotlight",
         "category": "category",
-        "name": {"en": "Soft Icon Style", "bn": "সফট আইকন স্টাইল"},
-        "thumbnail": "/ai-presets/cat1.webp",
+        "name": {"en": "Pastel Spotlight", "bn": "প্যাস্টেল স্পটলাইট"},
+        "thumbnail": "/ai-presets/cat-spotlight.webp",
         "prompt": (
-            "A square category thumbnail representing {subject}, centered "
-            "composition, soft pastel background, subtle shadow, clean modern "
-            "e-commerce category tile style, no text."
+            "A square category tile: {subject} placed dead center in the "
+            "frame with generous even empty space around it. This image "
+            "will be cropped into a circle, so keep the subject well within "
+            "a centered circular safe zone, with the soft pastel gradient "
+            "background filling the entire frame edge to edge including the "
+            "corners. Soft studio lighting, subtle shadow beneath, clean "
+            "minimal premium e-commerce category-tile style."
+        ),
+        "text_addon": (
+            "Include a short bold category label naming this category, "
+            "positioned just below the subject, still within the circular "
+            "safe zone."
         ),
     },
     {
-        "id": "category-product-cluster",
+        "id": "category-cluster",
         "category": "category",
-        "name": {"en": "Product Cluster", "bn": "প্রোডাক্ট ক্লাস্টার"},
-        "thumbnail": "/ai-presets/cat2.webp",
+        "name": {"en": "Cluster Arrangement", "bn": "ক্লাস্টার সজ্জা"},
+        "thumbnail": "/ai-presets/cat-cluster.webp",
         "prompt": (
-            "A square image showing a small curated cluster of items representing "
-            "the {subject} category, neatly arranged, soft studio lighting, "
-            "neutral background, e-commerce category card style, no text."
+            "A square category tile: a small curated cluster of 2-3 items "
+            "representing {subject}, grouped tightly together and centered "
+            "in the frame. This image will be cropped into a circle, so "
+            "keep every item within a centered circular safe zone, with the "
+            "clean neutral background filling the frame edge to edge "
+            "including the corners. Soft diffused studio light."
+        ),
+        "text_addon": (
+            "Include a short bold category label naming this category, "
+            "positioned just below the cluster, still within the circular "
+            "safe zone."
         ),
     },
     {
-        "id": "category-textured-bg",
+        "id": "category-texture",
         "category": "category",
-        "name": {"en": "Textured Background", "bn": "টেক্সচার্ড ব্যাকগ্রাউন্ড"},
-        "thumbnail": "/ai-presets/cat3.webp",
+        "name": {"en": "Textured Surface", "bn": "টেক্সচার্ড সারফেস"},
+        "thumbnail": "/ai-presets/cat-texture.webp",
         "prompt": (
-            "A square category image for {subject} set against a subtle textured "
-            "material background relevant to the category, soft directional "
-            "light, minimal and premium e-commerce feel, no text."
+            "A square category tile: items representing {subject} centered "
+            "on a subtle material texture relevant to the category. This "
+            "image will be cropped into a circle, so keep the subject "
+            "within a centered circular safe zone, with the texture filling "
+            "the frame edge to edge including the corners. Soft warm "
+            "directional light, premium boutique feel."
+        ),
+        "text_addon": (
+            "Include a short bold category label naming this category, "
+            "positioned just below the subject, still within the circular "
+            "safe zone."
         ),
     },
     {
         "id": "category-pattern-grid",
         "category": "category",
         "name": {"en": "Pattern Grid", "bn": "প্যাটার্ন গ্রিড"},
-        "thumbnail": "/ai-presets/cat4.webp",
+        "thumbnail": "/ai-presets/cat-pattern.webp",
         "prompt": (
-            "A square category image for {subject}: several small identical or "
-            "closely related items shot from directly overhead, arranged in a "
-            "neat, evenly spaced repeating grid so it reads as a clean pattern "
-            "rather than a cluster, soft even studio lighting, neutral "
-            "background, minimal premium e-commerce category style, no text."
+            "A square category tile: several small items representing "
+            "{subject} shot from directly overhead, arranged in a neat, "
+            "evenly spaced repeating grid pattern centered in the frame. "
+            "This image will be cropped into a circle, so keep the whole "
+            "grid within a centered circular safe zone, with the neutral "
+            "background filling the frame edge to edge including the "
+            "corners. Soft even studio lighting."
+        ),
+        "text_addon": (
+            "Include a short bold category label naming this category, "
+            "centered just beneath the grid, still within the circular safe "
+            "zone."
+        ),
+    },
+    {
+        "id": "category-color-wash",
+        "category": "category",
+        "name": {"en": "Color Wash", "bn": "কালার ওয়াশ"},
+        "thumbnail": "/ai-presets/cat-colorwash.webp",
+        "prompt": (
+            "A square category tile: {subject} centered against a bold "
+            "saturated gradient color wash background. This image will be "
+            "cropped into a circle, so keep the subject within a centered "
+            "circular safe zone, with the gradient filling the frame edge "
+            "to edge including the corners. Crisp studio lighting."
+        ),
+        "text_addon": (
+            "Include a short bold category label naming this category in "
+            "clean white type, positioned just below the subject, still "
+            "within the circular safe zone."
+        ),
+    },
+    {
+        "id": "category-framed-badge",
+        "category": "category",
+        "name": {"en": "Framed Badge", "bn": "ফ্রেমড ব্যাজ"},
+        "thumbnail": "/ai-presets/cat-badge.webp",
+        "prompt": (
+            "A square category tile: {subject} centered inside a thin gold "
+            "ring/badge outline, on a soft neutral background. This image "
+            "will be cropped into a circle, so keep the ring and subject "
+            "within a centered circular safe zone, with the background "
+            "filling the frame edge to edge including the corners. Soft "
+            "studio lighting, premium feel."
+        ),
+        "text_addon": (
+            "Include a short bold category label naming this category, "
+            "positioned just beneath the ring, still within the circular "
+            "safe zone."
+        ),
+    },
+    {
+        "id": "category-duotone",
+        "category": "category",
+        "name": {"en": "Duotone Tile", "bn": "ডুওটোন টাইল"},
+        "thumbnail": "/ai-presets/cat-duotone.webp",
+        "prompt": (
+            "A square category tile: {subject} treated in a single striking "
+            "duotone color filter, centered in frame. This image will be "
+            "cropped into a circle, so keep the subject within a centered "
+            "circular safe zone, with the duotone background filling the "
+            "frame edge to edge including the corners."
+        ),
+        "text_addon": (
+            "Include a short bold category label naming this category in "
+            "clean white type, positioned just below the subject, still "
+            "within the circular safe zone."
+        ),
+    },
+    {
+        "id": "category-shadow-play",
+        "category": "category",
+        "name": {"en": "Shadow Play", "bn": "শ্যাডো প্লে"},
+        "thumbnail": "/ai-presets/cat-shadow.webp",
+        "prompt": (
+            "A square category tile: {subject} centered on a plain light "
+            "background with one dramatic long shadow cast diagonally from "
+            "strong single-source side lighting. This image will be cropped "
+            "into a circle, so keep the subject and shadow within a "
+            "centered circular safe zone, with the background filling the "
+            "frame edge to edge including the corners."
+        ),
+        "text_addon": (
+            "Include a short bold category label naming this category, "
+            "positioned just below the subject, still within the circular "
+            "safe zone."
+        ),
+    },
+    {
+        "id": "category-floating-glow",
+        "category": "category",
+        "name": {"en": "Floating Glow", "bn": "ফ্লোটিং গ্লো"},
+        "thumbnail": "/ai-presets/cat-glow.webp",
+        "prompt": (
+            "A square category tile: {subject} floating slightly above a "
+            "soft reflective surface with a gentle glowing halo of light "
+            "beneath it, centered in frame. This image will be cropped into "
+            "a circle, so keep the subject and glow within a centered "
+            "circular safe zone, with the background filling the frame edge "
+            "to edge including the corners. Soft dreamy lighting."
+        ),
+        "text_addon": (
+            "Include a short bold category label naming this category, "
+            "positioned just below the subject, still within the circular "
+            "safe zone."
+        ),
+    },
+    {
+        "id": "category-botanical-edge",
+        "category": "category",
+        "name": {"en": "Botanical Edge", "bn": "বোটানিক্যাল এজ"},
+        "thumbnail": "/ai-presets/cat-botanical.webp",
+        "prompt": (
+            "A square category tile: {subject} centered in frame, softly "
+            "surrounded by a delicate ring of green botanical leaves and "
+            "sprigs framing the edges. This image will be cropped into a "
+            "circle, so keep the subject and botanical frame within a "
+            "centered circular safe zone, with the background filling the "
+            "frame edge to edge including the corners. Soft natural light."
+        ),
+        "text_addon": (
+            "Include a short bold category label naming this category, "
+            "positioned just below the subject, still within the circular "
+            "safe zone."
         ),
     },
     # --- Product: dramatic environment effects. Same product, one reference
-    # photo (REFERENCE_HELPFUL_CATEGORIES already covers "product"), only the
-    # surrounding scene/effect changes — the "/underwater"-style eye-catching
-    # presets a merchant reaches for when they want something more striking
-    # than plain catalog photography. If a reference photo is attached, the
-    # product's real shape/color/details must stay accurate; only the
-    # environment and text around it are generated. ---
+    # photo (REFERENCE_HELPFUL_CATEGORIES already covers "product"), only
+    # the surrounding scene/effect changes — the "/underwater"-style
+    # eye-catching presets a merchant reaches for when they want something
+    # more striking than plain catalog photography. If a reference photo is
+    # attached, the product's real shape/color/details must stay accurate;
+    # only the environment (and, if opted in, the text) is generated. ---
     {
         "id": "product-golden-hour",
         "category": "product",
@@ -190,15 +373,17 @@ IMAGE_PRESETS: list[dict] = [
         "prompt": (
             "A warm cinematic product photo of {subject} bathed in "
             "golden-hour sunlight, soft warm rim light outlining the edges, "
-            "gentle lens flare, dreamy amber atmosphere. Include a short "
-            "bold correctly spelled headline and a rounded call-to-action "
-            "button graphic in a clear area of the frame, genuinely fitting "
-            "this specific business (use the real business context given "
-            "above). If a reference photo of the product is provided, keep "
-            "its real shape, color, and details accurate — only the "
-            "lighting, atmosphere, and text are generated. Sharp focus on "
-            "the product, cinematic and eye-catching, sleek, modern, crisp "
-            "legible typography."
+            "gentle lens flare, dreamy amber atmosphere. If a reference "
+            "photo of the product is provided, keep its real shape, color, "
+            "and details accurate — only the lighting and atmosphere are "
+            "generated. Sharp focus on the product, cinematic and "
+            "eye-catching."
+        ),
+        "text_addon": (
+            "Include a short bold headline and a rounded call-to-action "
+            "button graphic in a clear area of the frame, genuinely "
+            "fitting this specific business (use the real business context "
+            "given above)."
         ),
     },
     {
@@ -209,15 +394,17 @@ IMAGE_PRESETS: list[dict] = [
         "prompt": (
             "A striking product photo of {subject} encased in a thin layer "
             "of frost with delicate ice crystals forming around it, cool "
-            "blue-white lighting, a light mist drifting past. Include a "
-            "short bold correctly spelled headline and a rounded "
-            "call-to-action button graphic in a clear area of the frame, "
-            "genuinely fitting this specific business (use the real "
-            "business context given above). If a reference photo of the "
-            "product is provided, keep its real shape, color, and details "
-            "accurate — only the frost, atmosphere, and text are generated. "
-            "Sharp focus on the product, cinematic and eye-catching, sleek, "
-            "modern, crisp legible typography."
+            "blue-white lighting, a light mist drifting past. If a "
+            "reference photo of the product is provided, keep its real "
+            "shape, color, and details accurate — only the frost and "
+            "atmosphere are generated. Sharp focus on the product, "
+            "cinematic and eye-catching."
+        ),
+        "text_addon": (
+            "Include a short bold headline and a rounded call-to-action "
+            "button graphic in a clear area of the frame, genuinely "
+            "fitting this specific business (use the real business context "
+            "given above)."
         ),
     },
     {
@@ -229,14 +416,16 @@ IMAGE_PRESETS: list[dict] = [
             "An energetic product photo of {subject} frozen mid-air "
             "surrounded by a colorful burst of confetti and streamers "
             "caught in motion, vibrant festive studio lighting against a "
-            "bright background. Include a short bold correctly spelled "
-            "headline and a rounded call-to-action button graphic in a "
-            "clear area of the frame, genuinely fitting this specific "
-            "business (use the real business context given above). If a "
-            "reference photo of the product is provided, keep its real "
-            "shape, color, and details accurate — only the confetti effect "
-            "and text are generated. Sharp focus on the product, joyful and "
-            "eye-catching, sleek, modern, crisp legible typography."
+            "bright background. If a reference photo of the product is "
+            "provided, keep its real shape, color, and details accurate — "
+            "only the confetti effect is generated. Sharp focus on the "
+            "product, joyful and eye-catching."
+        ),
+        "text_addon": (
+            "Include a short bold headline and a rounded call-to-action "
+            "button graphic in a clear area of the frame, genuinely "
+            "fitting this specific business (use the real business context "
+            "given above)."
         ),
     },
     {
@@ -247,15 +436,17 @@ IMAGE_PRESETS: list[dict] = [
         "prompt": (
             "A moody product photo of {subject} standing on a glossy black "
             "reflective surface, dramatic single-source studio lighting, a "
-            "crisp mirror reflection beneath it fading into darkness. "
-            "Include a short bold correctly spelled headline and a rounded "
-            "call-to-action button graphic in a clear dark area, genuinely "
-            "fitting this specific business (use the real business context "
-            "given above). If a reference photo of the product is provided, "
-            "keep its real shape, color, and details accurate — only the "
-            "reflective surface, lighting, and text are generated. Sharp "
-            "focus on the product, premium and eye-catching, sleek, modern, "
-            "crisp legible typography."
+            "crisp mirror reflection beneath it fading into darkness. If a "
+            "reference photo of the product is provided, keep its real "
+            "shape, color, and details accurate — only the reflective "
+            "surface and lighting are generated. Sharp focus on the "
+            "product, premium and eye-catching."
+        ),
+        "text_addon": (
+            "Include a short bold headline and a rounded call-to-action "
+            "button graphic in a clear dark area, genuinely fitting this "
+            "specific business (use the real business context given "
+            "above)."
         ),
     },
     {
@@ -266,15 +457,17 @@ IMAGE_PRESETS: list[dict] = [
         "prompt": (
             "A dramatic product photo of {subject} floating in a starry "
             "cosmic nebula scene, deep purples and blues with scattered "
-            "stars and soft glowing light, a sense of weightlessness. "
-            "Include a short bold correctly spelled headline and a rounded "
-            "call-to-action button graphic in a clear area of the nebula, "
-            "genuinely fitting this specific business (use the real "
-            "business context given above). If a reference photo of the "
-            "product is provided, keep its real shape, color, and details "
-            "accurate — only the cosmic background and text are generated. "
-            "Sharp focus on the product, striking and eye-catching, sleek, "
-            "modern, crisp legible typography."
+            "stars and soft glowing light, a sense of weightlessness. If a "
+            "reference photo of the product is provided, keep its real "
+            "shape, color, and details accurate — only the cosmic "
+            "background is generated. Sharp focus on the product, striking "
+            "and eye-catching."
+        ),
+        "text_addon": (
+            "Include a short bold headline and a rounded call-to-action "
+            "button graphic in a clear area of the nebula, genuinely "
+            "fitting this specific business (use the real business context "
+            "given above)."
         ),
     },
     {
@@ -286,14 +479,16 @@ IMAGE_PRESETS: list[dict] = [
             "A cinematic product photo of {subject} shot through a "
             "rain-streaked window, soft bokeh city lights blurred in the "
             "background, moody blue-toned lighting, water droplets in "
-            "sharp focus near the lens. Include a short bold correctly "
-            "spelled headline and a rounded call-to-action button graphic "
-            "in a clear area of the frame, genuinely fitting this specific "
-            "business (use the real business context given above). If a "
-            "reference photo of the product is provided, keep its real "
-            "shape, color, and details accurate — only the rain/window "
-            "effect and text are generated. Sharp focus on the product, "
-            "moody and eye-catching, sleek, modern, crisp legible typography."
+            "sharp focus near the lens. If a reference photo of the "
+            "product is provided, keep its real shape, color, and details "
+            "accurate — only the rain/window effect is generated. Sharp "
+            "focus on the product, moody and eye-catching."
+        ),
+        "text_addon": (
+            "Include a short bold headline and a rounded call-to-action "
+            "button graphic in a clear area of the frame, genuinely "
+            "fitting this specific business (use the real business context "
+            "given above)."
         ),
     },
     {
@@ -305,14 +500,16 @@ IMAGE_PRESETS: list[dict] = [
             "A striking product photo of {subject} submerged in clear blue "
             "water, surrounded by fine bubbles rising past it, soft caustic "
             "light rays filtering down from above, dreamy underwater "
-            "atmosphere. Include a short bold correctly spelled headline and "
-            "a rounded call-to-action button graphic positioned in the "
-            "clearer upper portion of the frame, genuinely fitting this "
-            "specific business (use the real business context given above). "
-            "If a reference photo of the product is provided, keep its real "
-            "shape, color, and details accurate — only the environment and "
-            "text are generated. Sharp focus on the product, cinematic and "
-            "eye-catching, sleek, modern, crisp legible typography."
+            "atmosphere. If a reference photo of the product is provided, "
+            "keep its real shape, color, and details accurate — only the "
+            "surrounding water and light are generated. Sharp focus on the "
+            "product, cinematic and eye-catching."
+        ),
+        "text_addon": (
+            "Include a short bold headline and a rounded call-to-action "
+            "button graphic positioned in the clearer upper portion of the "
+            "frame, genuinely fitting this specific business (use the real "
+            "business context given above)."
         ),
     },
     {
@@ -321,15 +518,18 @@ IMAGE_PRESETS: list[dict] = [
         "name": {"en": "Floating on Clouds", "bn": "মেঘে ভাসমান"},
         "thumbnail": "/ai-presets/cloud.webp",
         "prompt": (
-            "A dreamy product photo of {subject} floating weightlessly among "
-            "soft pastel clouds against a pale sky, gentle golden-hour light. "
-            "Include a short bold correctly spelled headline and a rounded "
-            "call-to-action button graphic positioned in the open sky area, "
-            "genuinely fitting this specific business (use the real business "
-            "context given above). If a reference photo of the product is "
+            "A dreamy product photo of {subject} floating weightlessly "
+            "among soft pastel clouds against a pale sky, gentle "
+            "golden-hour light. If a reference photo of the product is "
             "provided, keep its real shape, color, and details accurate — "
-            "only the environment and text are generated. Sharp focus on the "
-            "product, whimsical and eye-catching, sleek, modern, crisp legible typography."
+            "only the surrounding clouds and sky are generated. Sharp "
+            "focus on the product, whimsical and eye-catching."
+        ),
+        "text_addon": (
+            "Include a short bold headline and a rounded call-to-action "
+            "button graphic positioned in the open sky area, genuinely "
+            "fitting this specific business (use the real business context "
+            "given above)."
         ),
     },
     {
@@ -338,17 +538,19 @@ IMAGE_PRESETS: list[dict] = [
         "name": {"en": "Liquid Splash", "bn": "লিকুইড স্প্ল্যাশ"},
         "thumbnail": "/ai-presets/splash.webp",
         "prompt": (
-            "A high-energy product photo of {subject} frozen mid-air at the "
-            "exact moment of a dynamic liquid splash bursting around it, "
-            "droplets frozen in motion, dramatic studio lighting against a "
-            "dark background. Include a short bold correctly spelled headline "
-            "and a rounded call-to-action button graphic in a clear area of "
-            "the dark background, genuinely fitting this specific business "
-            "(use the real business context given above). If a reference "
-            "photo of the product is provided, keep its real shape, color, "
-            "and details accurate — only the splash effect and text are "
-            "generated. Sharp focus on the product, high-impact advertising "
-            "style, sleek, modern, crisp legible typography."
+            "A high-energy product photo of {subject} frozen mid-air at "
+            "the exact moment of a dynamic liquid splash bursting around "
+            "it, droplets frozen in motion, dramatic studio lighting "
+            "against a dark background. If a reference photo of the "
+            "product is provided, keep its real shape, color, and details "
+            "accurate — only the splash effect is generated. Sharp focus "
+            "on the product, high-impact advertising style."
+        ),
+        "text_addon": (
+            "Include a short bold headline and a rounded call-to-action "
+            "button graphic in a clear area of the dark background, "
+            "genuinely fitting this specific business (use the real "
+            "business context given above)."
         ),
     },
     {
@@ -357,16 +559,19 @@ IMAGE_PRESETS: list[dict] = [
         "name": {"en": "Desert Dunes", "bn": "মরুভূমির টিলা"},
         "thumbnail": "/ai-presets/desert.webp",
         "prompt": (
-            "A cinematic product photo of {subject} resting on golden desert "
-            "sand dunes at sunset, warm dramatic side light, long soft "
-            "shadows, vast dune landscape stretching into a hazy horizon. "
-            "Include a short bold correctly spelled headline and a rounded "
-            "call-to-action button graphic in the open sky area, genuinely "
-            "fitting this specific business (use the real business context "
-            "given above). If a reference photo of the product is provided, "
+            "A cinematic product photo of {subject} resting on golden "
+            "desert sand dunes at sunset, warm dramatic side light, long "
+            "soft shadows, vast dune landscape stretching into a hazy "
+            "horizon. If a reference photo of the product is provided, "
             "keep its real shape, color, and details accurate — only the "
-            "desert scene and text are generated. Sharp focus on the "
-            "product, striking and eye-catching, sleek, modern, crisp legible typography."
+            "desert scene is generated. Sharp focus on the product, "
+            "striking and eye-catching."
+        ),
+        "text_addon": (
+            "Include a short bold headline and a rounded call-to-action "
+            "button graphic in the open sky area, genuinely fitting this "
+            "specific business (use the real business context given "
+            "above)."
         ),
     },
     # --- Product Bento ---
@@ -376,16 +581,19 @@ IMAGE_PRESETS: list[dict] = [
         "name": {"en": "Multi-Angle Bento", "bn": "মাল্টি-অ্যাঙ্গেল বেন্টো"},
         "thumbnail": "/ai-presets/bento1.webp",
         "prompt": (
-            "A modern bento-grid product showcase banner for {subject}: one large "
-            "cell showing the full product clearly, surrounded by 3-4 smaller "
-            "cells in the same grid each highlighting a different angle, a "
-            "close-up material/detail shot, and the product in real use. Each "
-            "cell has a short bold correctly spelled caption baked into its "
-            "corner naming what it shows (e.g. 'Full View', 'Close-Up', "
-            "'In Use'). Clean rounded grid dividers between cells, consistent "
-            "soft studio lighting and matching neutral background tone across "
-            "every cell so it reads as one cohesive banner, premium modern "
-            "social/product-page layout, crisp legible typography."
+            "A modern bento-grid product showcase banner for {subject}: "
+            "one large cell showing the full product clearly, surrounded "
+            "by 3-4 smaller cells in the same grid each highlighting a "
+            "different angle, a close-up material/detail shot, and the "
+            "product in real use. Clean rounded grid dividers between "
+            "cells, consistent soft studio lighting and matching neutral "
+            "background tone across every cell so it reads as one cohesive "
+            "banner, premium modern social/product-page layout."
+        ),
+        "text_addon": (
+            "Each cell has a short bold caption baked into its corner "
+            "naming what it shows (e.g. 'Full View', 'Close-Up', "
+            "'In Use')."
         ),
     },
     {
@@ -395,12 +603,14 @@ IMAGE_PRESETS: list[dict] = [
         "thumbnail": "/ai-presets/bento2.webp",
         "prompt": (
             "A bento-grid product banner for {subject} mixing one larger "
-            "lifestyle in-use cell with several smaller studio close-up/detail "
-            "cells around it. Each cell has a short bold correctly spelled "
-            "caption baked into its corner naming what it shows (e.g. "
-            "'In Use', 'Detail', 'Texture'). Consistent warm color grading and "
-            "lighting across every cell, clean rounded grid dividers, premium "
-            "cohesive e-commerce banner layout, crisp legible typography."
+            "lifestyle in-use cell with several smaller studio "
+            "close-up/detail cells around it. Consistent warm color "
+            "grading and lighting across every cell, clean rounded grid "
+            "dividers, premium cohesive e-commerce banner layout."
+        ),
+        "text_addon": (
+            "Each cell has a short bold caption baked into its corner "
+            "naming what it shows (e.g. 'In Use', 'Detail', 'Texture')."
         ),
     },
     {
@@ -411,14 +621,16 @@ IMAGE_PRESETS: list[dict] = [
         "prompt": (
             "A bento-grid product banner for {subject} with an asymmetric "
             "layout: one larger cell showing the full product clearly, "
-            "paired with smaller cells showing a close-up macro shot of its "
-            "material/texture detail and the product held or worn for a "
-            "sense of real scale. Each cell has a short bold correctly "
-            "spelled caption baked into its corner naming what it shows "
-            "(e.g. 'Full View', 'Texture', 'True to Scale'). Consistent soft "
-            "studio lighting and neutral background tone across every cell, "
-            "clean rounded grid dividers, premium cohesive layout, crisp "
-            "legible typography."
+            "paired with smaller cells showing a close-up macro shot of "
+            "its material/texture detail and the product held or worn for "
+            "a sense of real scale. Consistent soft studio lighting and "
+            "neutral background tone across every cell, clean rounded grid "
+            "dividers, premium cohesive layout."
+        ),
+        "text_addon": (
+            "Each cell has a short bold caption baked into its corner "
+            "naming what it shows (e.g. 'Full View', 'Texture', "
+            "'True to Scale')."
         ),
     },
     # --- Events / Promo ---
@@ -428,16 +640,17 @@ IMAGE_PRESETS: list[dict] = [
         "name": {"en": "Editorial Minimal", "bn": "এডিটোরিয়াল মিনিমাল"},
         "thumbnail": "/ai-presets/event1.webp",
         "prompt": (
-            "A premium minimal promo graphic for {subject}: a warm cream/"
-            "off-white background with generous negative space, one small "
-            "elegant product photo in the lower third, and a large refined "
-            "modern sans-serif headline in near-black text across the upper "
-            "two-thirds — the headline and a short thin-outlined pill button "
-            "beneath it should genuinely fit this specific business (use the "
-            "real business context given above). Sophisticated boutique "
-            "editorial aesthetic — no gradients, no starbursts, no neon. "
-            "Every letter crisp, correctly spelled, legible. 1:1, this is the "
-            "finished graphic."
+            "A premium minimal promo graphic for {subject}: a warm "
+            "cream/off-white background with generous negative space, one "
+            "small elegant product photo in the lower third. Sophisticated "
+            "boutique editorial aesthetic — no gradients, no starbursts, "
+            "no neon. 1:1."
+        ),
+        "text_addon": (
+            "A large refined modern sans-serif headline across the upper "
+            "two-thirds and a short thin-outlined pill button beneath it "
+            "should genuinely fit this specific business (use the real "
+            "business context given above)."
         ),
     },
     {
@@ -447,15 +660,17 @@ IMAGE_PRESETS: list[dict] = [
         "thumbnail": "/ai-presets/event2.webp",
         "prompt": (
             "A bold modern promo graphic for {subject} styled like a "
-            "streetwear product-drop announcement: the product photo treated "
-            "in a single striking duotone color filter filling the left half "
-            "of the frame, a solid matching dark color block on the right "
-            "half containing large condensed bold headline text and a sharp "
-            "rectangular CTA button — copy should genuinely fit this specific "
-            "business (use the real business context given above). High "
-            "contrast, confident modern energy, no soft gradients. Every "
-            "letter crisp, correctly spelled, legible. 1:1, this is the "
-            "finished graphic."
+            "streetwear product-drop announcement: the product photo "
+            "treated in a single striking duotone color filter filling the "
+            "left half of the frame, a solid matching dark color block on "
+            "the right half. High contrast, confident modern energy, no "
+            "soft gradients. 1:1."
+        ),
+        "text_addon": (
+            "On the right color block, include large condensed bold "
+            "headline text and a sharp rectangular CTA button — copy "
+            "should genuinely fit this specific business (use the real "
+            "business context given above)."
         ),
     },
     {
@@ -467,12 +682,14 @@ IMAGE_PRESETS: list[dict] = [
             "A modern promo graphic for {subject}: a full-bleed soft-focus "
             "product photo fills the entire frame, with a frosted "
             "glassmorphism card (translucent white, blurred backdrop, thin "
-            "light border, subtle shadow) floating centered over it, "
-            "containing a bold headline and a solid rounded CTA button — copy "
-            "should genuinely fit this specific business (use the real "
-            "business context given above). Trendy modern app-UI aesthetic, "
-            "soft ambient lighting behind the glass card. Every letter crisp, "
-            "correctly spelled, legible. 1:1, this is the finished graphic."
+            "light border, subtle shadow) floating centered over it. "
+            "Trendy modern app-UI aesthetic, soft ambient lighting behind "
+            "the glass card. 1:1."
+        ),
+        "text_addon": (
+            "Inside the glass card, include a bold headline and a solid "
+            "rounded CTA button — copy should genuinely fit this specific "
+            "business (use the real business context given above)."
         ),
     },
     {
@@ -481,16 +698,17 @@ IMAGE_PRESETS: list[dict] = [
         "name": {"en": "Bold Type Poster", "bn": "বোল্ড টাইপ পোস্টার"},
         "thumbnail": "/ai-presets/event4.webp",
         "prompt": (
-            "A high-impact typographic promo poster for {subject}: massive "
-            "oversized bold headline text fills most of the frame edge to "
-            "edge as the dominant visual element — copy should genuinely fit "
-            "this specific business (use the real business context given "
-            "above) — with the product photo integrated behind or within the "
-            "negative space of the lettering, two-tone black-and-white or "
-            "single-accent-color palette, a small solid CTA button tucked in "
-            "the bottom corner. Editorial fashion-poster energy, confident "
-            "and graphic. Every letter crisp, correctly spelled, legible. "
-            "1:1, this is the finished graphic."
+            "A high-impact typographic promo poster for {subject}: the "
+            "product photo integrated behind or within negative space, "
+            "two-tone black-and-white or single-accent-color palette. "
+            "Editorial fashion-poster energy, confident and graphic. 1:1."
+        ),
+        "text_addon": (
+            "Massive oversized bold headline text fills most of the frame "
+            "edge to edge as the dominant visual element — copy should "
+            "genuinely fit this specific business (use the real business "
+            "context given above) — with a small solid CTA button tucked "
+            "in the bottom corner."
         ),
     },
     {
@@ -500,14 +718,17 @@ IMAGE_PRESETS: list[dict] = [
         "thumbnail": "/ai-presets/event5.webp",
         "prompt": (
             "A modern flat-design promo graphic for {subject}: the frame "
-            "split cleanly into two solid color blocks (a confident two-tone "
-            "palette, no gradients, no photo treatment), the product photo "
-            "cut out cleanly on one side, a large bold headline and a solid "
-            "rectangular CTA button on the other side — copy should "
-            "genuinely fit this specific business (use the real business "
-            "context given above). Flat, graphic, poster-like confidence, "
-            "sharp clean edges between the color blocks. Every letter crisp, "
-            "correctly spelled, legible. 1:1, this is the finished graphic."
+            "split cleanly into two solid color blocks (a confident "
+            "two-tone palette, no gradients, no photo treatment), the "
+            "product photo cut out cleanly on one side. Flat, graphic, "
+            "poster-like confidence, sharp clean edges between the color "
+            "blocks. 1:1."
+        ),
+        "text_addon": (
+            "On the other side, include a large bold headline and a solid "
+            "rectangular CTA button — copy should genuinely fit this "
+            "specific business (use the real business context given "
+            "above)."
         ),
     },
     {
@@ -517,15 +738,16 @@ IMAGE_PRESETS: list[dict] = [
         "thumbnail": "/ai-presets/event6.webp",
         "prompt": (
             "A premium promo graphic for {subject}: the product photo sits "
-            "centered within a thin rounded rectangular frame/border (like a "
-            "museum label or gallery spotlight), soft focused lighting on "
-            "the product inside the frame, with a refined headline and a "
-            "small outlined CTA button placed neatly below the frame, "
-            "outside it — copy should genuinely fit this specific business "
-            "(use the real business context given above). Clean neutral "
-            "background outside the frame, elegant gallery-retail "
-            "aesthetic, no clutter. Every letter crisp, correctly spelled, "
-            "legible. 1:1, this is the finished graphic."
+            "centered within a thin rounded rectangular frame/border (like "
+            "a museum label or gallery spotlight), soft focused lighting "
+            "on the product inside the frame. Clean neutral background "
+            "outside the frame, elegant gallery-retail aesthetic, no "
+            "clutter. 1:1."
+        ),
+        "text_addon": (
+            "Below the frame, include a refined headline and a small "
+            "outlined CTA button — copy should genuinely fit this specific "
+            "business (use the real business context given above)."
         ),
     },
     # --- Marketing / Social ---
@@ -536,14 +758,15 @@ IMAGE_PRESETS: list[dict] = [
         "thumbnail": "/ai-presets/minimal.webp",
         "prompt": (
             "A premium minimal product-drop social post for {subject}: a "
-            "single product centered against a soft solid pastel background "
-            "with generous negative space, a small confident caption in "
-            "sleek modern sans-serif text in the lower corner — copy should "
-            "genuinely fit this specific business (use the real business "
-            "context given above). Understated branding-forward aesthetic — "
-            "no gradients, no bursts, no clutter. Every letter crisp, "
-            "correctly spelled, legible. 1:1, this is the finished, "
-            "ready-to-post graphic."
+            "single product centered against a soft solid pastel "
+            "background with generous negative space. Understated "
+            "branding-forward aesthetic — no gradients, no bursts, no "
+            "clutter. 1:1."
+        ),
+        "text_addon": (
+            "A small confident caption in sleek modern sans-serif text in "
+            "the lower corner — copy should genuinely fit this specific "
+            "business (use the real business context given above)."
         ),
     },
     {
@@ -554,14 +777,15 @@ IMAGE_PRESETS: list[dict] = [
         "prompt": (
             "A bold vertical 9:16 Instagram/Facebook Story graphic for "
             "{subject}: the product photo treated in a single striking "
-            "duotone color filter filling most of the frame, with a large "
-            "confident statement headline in sleek modern bold type in the "
-            "lower third over a solid-color strip for legibility — copy "
-            "should genuinely fit this specific business (use the real "
-            "business context given above). High-contrast editorial-fashion "
-            "energy — no soft gradients, no clip-art icons. Every letter "
-            "crisp, correctly spelled, legible. This is the finished, "
-            "ready-to-post graphic."
+            "duotone color filter filling most of the frame. "
+            "High-contrast editorial-fashion energy — no soft gradients, "
+            "no clip-art icons."
+        ),
+        "text_addon": (
+            "A large confident statement headline in sleek modern bold "
+            "type in the lower third over a solid-color strip for "
+            "legibility — copy should genuinely fit this specific business "
+            "(use the real business context given above)."
         ),
     },
     {
@@ -570,16 +794,17 @@ IMAGE_PRESETS: list[dict] = [
         "name": {"en": "Collage Grid", "bn": "কোলাজ গ্রিড"},
         "thumbnail": "/ai-presets/collagegrid.webp",
         "prompt": (
-            "A modern collage-style social post for {subject}: three to four "
-            "photos of the product from different angles or contexts "
-            "arranged in an organic overlapping collage (not a rigid grid), "
-            "with one bold pull-quote style headline in sleek modern large "
-            "type overlapping the collage at a confident angle — copy "
-            "should genuinely fit this specific business (use the real "
-            "business context given above). Cohesive color grading across "
-            "all photos, clean modern editorial feel. Every letter crisp, "
-            "correctly spelled, legible. 1:1, this is the finished, "
-            "ready-to-post graphic."
+            "A modern collage-style social post for {subject}: three to "
+            "four photos of the product from different angles or contexts "
+            "arranged in an organic overlapping collage (not a rigid "
+            "grid). Cohesive color grading across all photos, clean modern "
+            "editorial feel. 1:1."
+        ),
+        "text_addon": (
+            "One bold pull-quote style headline in sleek modern large type "
+            "overlapping the collage at a confident angle — copy should "
+            "genuinely fit this specific business (use the real business "
+            "context given above)."
         ),
     },
     {
@@ -589,14 +814,15 @@ IMAGE_PRESETS: list[dict] = [
         "thumbnail": "/ai-presets/glasscaption.webp",
         "prompt": (
             "A modern social post for {subject}: a full-bleed lifestyle "
-            "photo of the product fills the entire square frame, with a "
-            "frosted glassmorphism caption bar (translucent white, blurred "
-            "backdrop, thin light border) across the bottom third, "
-            "containing a short bold headline in sleek modern clean type — "
-            "copy should genuinely fit this specific business (use the real "
-            "business context given above). Trendy modern app-UI aesthetic, "
-            "soft ambient lighting. Every letter crisp, correctly spelled, "
-            "legible. 1:1, this is the finished, ready-to-post graphic."
+            "photo of the product fills the entire square frame. Trendy "
+            "modern app-UI aesthetic, soft ambient lighting. 1:1."
+        ),
+        "text_addon": (
+            "A frosted glassmorphism caption bar (translucent white, "
+            "blurred backdrop, thin light border) across the bottom third "
+            "containing a short bold headline in sleek modern clean type "
+            "— copy should genuinely fit this specific business (use the "
+            "real business context given above)."
         ),
     },
     {
@@ -606,14 +832,14 @@ IMAGE_PRESETS: list[dict] = [
         "thumbnail": "/ai-presets/neon.webp",
         "prompt": (
             "A bold social media post for {subject}: the product lit by "
-            "glowing pink and blue neon light against a dark moody nightlife "
-            "backdrop, with a headline rendered as an actual glowing "
-            "neon-tube sign and a smaller neon-outline CTA button beneath it "
-            "— copy should genuinely fit this specific business (use the "
-            "real business context given above). Sleek modern neon "
-            "typography, crisp glow, moody urban energy. Every letter "
-            "crisp, correctly spelled, legible. 1:1, this is the finished "
-            "ready-to-post graphic."
+            "glowing pink and blue neon light against a dark moody "
+            "nightlife backdrop. Moody urban energy. 1:1."
+        ),
+        "text_addon": (
+            "A headline rendered as an actual glowing neon-tube sign and a "
+            "smaller neon-outline CTA button beneath it — copy should "
+            "genuinely fit this specific business (use the real business "
+            "context given above)."
         ),
     },
     {
@@ -622,16 +848,17 @@ IMAGE_PRESETS: list[dict] = [
         "name": {"en": "Polaroid Frame", "bn": "পোলারয়েড ফ্রেম"},
         "thumbnail": "/ai-presets/frame.webp",
         "prompt": (
-            "A trendy social post for {subject} styled as a single polaroid "
-            "photograph: the product shot in warm natural light, framed "
-            "with the classic white polaroid border, with a short "
-            "handwritten-style caption scrawled in the bottom white margin "
-            "in a casual script font — copy should genuinely fit this "
-            "specific business (use the real business context given above). "
-            "Subtle drop shadow beneath the polaroid on a soft neutral "
-            "background, sleek modern aesthetic, crisp legible "
-            "handwritten-style text. 1:1, this is the finished ready-to-post "
-            "graphic."
+            "A trendy social post for {subject} styled as a single "
+            "polaroid photograph: the product shot in warm natural light, "
+            "framed with the classic white polaroid border. Subtle drop "
+            "shadow beneath the polaroid on a soft neutral background, "
+            "sleek modern aesthetic. 1:1."
+        ),
+        "text_addon": (
+            "A short handwritten-style caption scrawled in the bottom "
+            "white margin in a casual script font — copy should genuinely "
+            "fit this specific business (use the real business context "
+            "given above)."
         ),
     },
     {
@@ -642,13 +869,14 @@ IMAGE_PRESETS: list[dict] = [
         "prompt": (
             "A modern social post for {subject} showing a realistic "
             "smartphone mockup centered in frame, its screen displaying an "
-            "Instagram-style post of the product with a caption and "
-            "heart/comment icons visible on-screen, soft gradient "
-            "background behind the phone, a bold headline above the phone "
-            "in sleek modern type — copy should genuinely fit this specific "
-            "business (use the real business context given above). Crisp "
-            "legible typography, premium tech-forward feel. 1:1, this is "
-            "the finished ready-to-post graphic."
+            "Instagram-style post of the product with heart/comment icons "
+            "visible on-screen, soft gradient background behind the "
+            "phone. Premium tech-forward feel. 1:1."
+        ),
+        "text_addon": (
+            "Above the phone, include a bold headline in sleek modern type "
+            "— copy should genuinely fit this specific business (use the "
+            "real business context given above)."
         ),
     },
     {
@@ -658,13 +886,14 @@ IMAGE_PRESETS: list[dict] = [
         "thumbnail": "/ai-presets/countdown.webp",
         "prompt": (
             "A vertical 9:16 Instagram/Facebook Story graphic for "
-            "{subject} on a bold solid-color background, with a large sleek "
-            "countdown-style badge and a bold headline below it plus a "
-            "rounded CTA button — copy should genuinely fit this specific "
-            "business and convey urgency (use the real business context "
-            "given above). Sleek modern high-urgency typography, crisp and "
-            "legible, energetic color palette. This is the finished, "
-            "ready-to-post graphic."
+            "{subject} on a bold solid-color background. Sleek modern "
+            "high-urgency energetic color palette."
+        ),
+        "text_addon": (
+            "Include a large sleek countdown-style badge and a bold "
+            "headline below it plus a rounded CTA button — copy should "
+            "genuinely fit this specific business and convey urgency (use "
+            "the real business context given above)."
         ),
     },
     {
@@ -675,13 +904,15 @@ IMAGE_PRESETS: list[dict] = [
         "prompt": (
             "A modern social post for {subject} split cleanly down the "
             "middle: the product shown one way on the left half against a "
-            "light background, and a contrasting variant/angle on the right "
-            "half against a dark background, a bold headline spanning both "
-            "halves at the top in sleek modern type — copy should genuinely "
-            "fit this specific business (use the real business context "
-            "given above) — with a thin vertical divider line between the "
-            "two halves. Crisp legible typography, confident graphic "
-            "layout. 1:1, this is the finished ready-to-post graphic."
+            "light background, and a contrasting variant/angle on the "
+            "right half against a dark background, with a thin vertical "
+            "divider line between the two halves. Confident graphic "
+            "layout. 1:1."
+        ),
+        "text_addon": (
+            "A bold headline spanning both halves at the top in sleek "
+            "modern type — copy should genuinely fit this specific "
+            "business (use the real business context given above)."
         ),
     },
     {
@@ -691,13 +922,14 @@ IMAGE_PRESETS: list[dict] = [
         "thumbnail": "/ai-presets/quote.webp",
         "prompt": (
             "A modern social post for {subject} shot in soft natural light "
-            "filling the frame, with a frosted glassmorphism quote card "
-            "overlapping the lower third containing a short five-star "
-            "review snippet in sleek modern type and the business name "
-            "beneath it — copy should genuinely fit this specific business "
-            "(use the real business context given above). Crisp legible "
-            "typography, premium social-proof aesthetic. 1:1, this is the "
-            "finished ready-to-post graphic."
+            "filling the frame. Premium social-proof aesthetic. 1:1."
+        ),
+        "text_addon": (
+            "A frosted glassmorphism quote card overlapping the lower "
+            "third containing a short five-star review snippet in sleek "
+            "modern type and the business name beneath it — copy should "
+            "genuinely fit this specific business (use the real business "
+            "context given above)."
         ),
     },
 ]

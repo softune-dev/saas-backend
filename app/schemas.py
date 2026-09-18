@@ -249,6 +249,11 @@ class GenerateImageIn(BaseModel):
     tier: Literal["standard", "high_res", "premium"] = "standard"
     aspect_ratio: ImageAspectRatio = "1:1"
     reference_images: list[ImageDataIn] = Field(default_factory=list, max_length=3)
+    # Merchant's with-text/without-text choice — see app/ai_image_presets.py's
+    # TEXT MODEL docstring. Every preset supports both; this is what decides
+    # whether its text_addon + TEXT_RENDER_QUALITY get appended, or
+    # NO_TEXT_INSTRUCTION instead.
+    include_text: bool = True
 
 
 class EditImageIn(BaseModel):
@@ -256,6 +261,7 @@ class EditImageIn(BaseModel):
     tier: Literal["standard", "high_res", "premium"] = "standard"
     aspect_ratio: ImageAspectRatio = "1:1"
     source_image: ImageDataIn
+    include_text: bool = True
 
 
 class SaveImageToGalleryIn(BaseModel):

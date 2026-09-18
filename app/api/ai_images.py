@@ -18,7 +18,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import ai_images, mailer, media
-from app.ai_image_presets import PRESET_CATEGORIES, get_preset, presets_by_category
+from app.ai_image_presets import (
+    NO_TEXT_INSTRUCTION,
+    PRESET_CATEGORIES,
+    TEXT_RENDER_QUALITY,
+    get_preset,
+    presets_by_category,
+)
 from app.config import settings
 from app.db import get_db
 from app.media import IMAGE_MAX_BYTES, IMAGE_MAX_MEGAPIXELS, plan_storage_limit, site_storage_used_bytes
@@ -74,17 +80,29 @@ async def _business_context_line(db: AsyncSession, tenant_id) -> str:
 
 
 def _apply_preset(payload: GenerateImageIn) -> str:
+    """Builds the base scene prompt (never mentions text) plus, depending on
+    payload.include_text, either the preset's own text_addon +
+    TEXT_RENDER_QUALITY or NO_TEXT_INSTRUCTION — see app/ai_image_presets.py's
+    module docstring for why this split exists (one merchant choice, not a
+    fixed per-category rule).
+    """
     if payload.preset_id:
         preset = get_preset(payload.preset_id)
         if preset is None:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Unknown preset")
         subject = (payload.subject or "").strip() or "this product"
         prompt = preset["prompt"].format(subject=subject)
+        if payload.include_text:
+            prompt += f" {preset['text_addon']} {TEXT_RENDER_QUALITY}"
+        else:
+            prompt += f" {NO_TEXT_INSTRUCTION}"
         if payload.prompt and payload.prompt.strip():
             prompt += f"\n\nAdditional instructions from the merchant: {payload.prompt.strip()}"
         return prompt
     if payload.prompt and payload.prompt.strip():
-        return payload.prompt.strip()
+        prompt = payload.prompt.strip()
+        prompt += f" {TEXT_RENDER_QUALITY}" if payload.include_text else f" {NO_TEXT_INSTRUCTION}"
+        return prompt
     raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Need a preset or a prompt to generate an image.")
 
 
@@ -134,7 +152,9 @@ async def edit(payload: EditImageIn, user: CurrentUser, db: DB) -> GeneratedImag
     balance = await ai_images.charge_credits(db, user.tenant_id, credits, reason="edit")
     try:
         context = await _business_context_line(db, user.tenant_id)
-        prompt = f"{context}\n\n{payload.prompt}" if context else payload.prompt
+        instruction = payload.prompt
+        instruction += f" {TEXT_RENDER_QUALITY}" if payload.include_text else f" {NO_TEXT_INSTRUCTION}"
+        prompt = f"{context}\n\n{instruction}" if context else instruction
         source_bytes = base64.b64decode(payload.source_image.data_base64)
         image_bytes, mime_type = await ai_images.generate_image(
             prompt, payload.tier, [(source_bytes, payload.source_image.mime_type)], payload.aspect_ratio
