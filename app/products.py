@@ -46,6 +46,38 @@ matching the label against a hardcoded color-name dictionary
 not in that list. `image` works on ANY type's values (Color or otherwise —
 e.g. a "Pattern" swatch benefits from its own photo too), and is what lets
 the storefront swap the main product photo when that value is selected.
+
+COMBINATIONS — the "stock stays pooled" decision above was reversed
+(migrations/070): a product with real Size×Color combinations needs its
+own price/compare-at/stock/image per combination, not one number for the
+whole product. Lives alongside "variants" under the same "combinations"
+key, still JSONB — no new table, since each row is just a cartesian-product
+pick of the "variants" values plus four numbers and an optional image/sku.
+A product with no "variants" has no "combinations" either and behaves
+exactly as before (Product.price_cents/stock/compare_at_cents are the
+source of truth). Shape:
+
+    {
+      "combinations": [
+        {
+          "key": "Color:Navy|Size:M",
+          "optionValues": {"Color": "Navy", "Size": "M"},
+          "sku": "SHIRT-NAVY-M",
+          "priceCents": 70000,
+          "compareAtCents": 95000,
+          "stock": 12,
+          "trackStock": true,
+          "image": "https://...",
+          "isActive": true
+        }
+      ]
+    }
+
+`key` is a stable join of sorted "type:value" pairs — the dashboard
+generates it deterministically from the cartesian product of "variants" so
+it can match existing rows (and their saved price/stock/image) back up
+after an unrelated option edit, and so app/api/public.py's checkout can
+look a submitted selection up by exact key instead of a positional index.
 """
 
 import re
@@ -58,6 +90,13 @@ MAX_VALUES_PER_TYPE = 30
 MAX_LABEL_LEN = 40
 MAX_IMAGE_URL_LEN = 500
 _HEX_COLOR = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+# Cartesian product of MAX_VARIANT_TYPES x MAX_VALUES_PER_TYPE could in
+# theory reach the thousands — a real cap here is what stops a merchant (or
+# a buggy dashboard build) from ever submitting a combinations array that
+# size, not just the UI choosing not to generate one that big.
+MAX_COMBINATIONS = 300
+MAX_SKU_LEN = 60
 
 # Per-tenant product cap by plan. Deliberately a plain dict, not a database
 # column — same reasoning as app/ai.py's PLAN_AI_DAILY_CAP: pricing isn't
@@ -173,11 +212,98 @@ def validate_variants(raw: Any) -> list[dict]:
     return [_validate_variant_type(v, i) for i, v in enumerate(raw)]
 
 
+def _validate_combination(
+    raw: Any, index: int, options: list[dict], seen_keys: set[str]
+) -> dict:
+    where = f"variant combination #{index + 1}"
+    if not isinstance(raw, dict):
+        raise ValueError(f"{where}: must be an object")
+
+    key = str(raw.get("key", "")).strip()
+    if not key:
+        raise ValueError(f"{where}: key is required")
+    if key in seen_keys:
+        raise ValueError(f"{where}: duplicate combination key {key!r}")
+    seen_keys.add(key)
+
+    raw_option_values = raw.get("optionValues")
+    if not isinstance(raw_option_values, dict) or not raw_option_values:
+        raise ValueError(f"{where} ({key}): optionValues must be a non-empty object")
+
+    # Every {type: value} pair has to be a real, currently-defined option —
+    # this is what stops a stale combination (from a value the merchant
+    # since renamed or deleted) from silently reaching the storefront with
+    # a selection that no longer resolves to anything pickable.
+    option_values: dict[str, str] = {}
+    for type_name, value_label in raw_option_values.items():
+        type_name = str(type_name).strip()
+        value_label = str(value_label).strip()
+        option = next((o for o in options if o["type"] == type_name), None)
+        if option is None:
+            raise ValueError(f"{where} ({key}): unknown variant type {type_name!r}")
+        if not any(v["value"] == value_label for v in option["values"]):
+            raise ValueError(
+                f"{where} ({key}): {value_label!r} is not a value of {type_name!r}"
+            )
+        option_values[type_name] = value_label
+
+    result: dict[str, Any] = {"key": key, "optionValues": option_values}
+
+    sku = str(raw.get("sku", "")).strip()
+    if sku:
+        if len(sku) > MAX_SKU_LEN:
+            raise ValueError(f"{where} ({key}): SKU is too long (max {MAX_SKU_LEN} characters)")
+        result["sku"] = sku
+
+    for money_field in ("priceCents", "compareAtCents"):
+        value = raw.get(money_field)
+        if value is None:
+            continue
+        try:
+            cents = int(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{where} ({key}): {money_field} must be a number") from None
+        if cents < 0:
+            raise ValueError(f"{where} ({key}): {money_field} can't be negative")
+        result[money_field] = cents
+
+    stock = raw.get("stock", 0)
+    try:
+        stock = int(stock)
+    except (TypeError, ValueError):
+        raise ValueError(f"{where} ({key}): stock must be a number") from None
+    if stock < 0:
+        raise ValueError(f"{where} ({key}): stock can't be negative")
+    result["stock"] = stock
+    result["trackStock"] = bool(raw.get("trackStock", True))
+
+    image_url = str(raw.get("image", "")).strip()
+    if image_url:
+        if len(image_url) > MAX_IMAGE_URL_LEN:
+            raise ValueError(f"{where} ({key}): image URL is too long")
+        result["image"] = image_url
+
+    result["isActive"] = bool(raw.get("isActive", True))
+    return result
+
+
+def validate_combinations(raw: Any, options: list[dict]) -> list[dict]:
+    """Validate and normalise the whole combinations array against the
+    already-validated `options` (the "variants" list) — a combination can
+    only reference option types/values that actually exist."""
+    if not isinstance(raw, list):
+        raise ValueError("combinations must be a list")
+    if len(raw) > MAX_COMBINATIONS:
+        raise ValueError(f"too many variant combinations (max {MAX_COMBINATIONS})")
+    seen_keys: set[str] = set()
+    return [_validate_combination(c, i, options, seen_keys) for i, c in enumerate(raw)]
+
+
 def validate_attributes(raw: dict | None) -> dict:
-    """Validate a product's attributes dict. Only 'variants' is a structured,
-    enforced shape — everything else passes through untouched, since
-    attributes is deliberately an open bag for anything else a merchant
-    wants to store.
+    """Validate a product's attributes dict. 'variants' and 'combinations'
+    are structured, enforced shapes — everything else passes through
+    untouched, since attributes is deliberately an open bag for anything
+    else a merchant wants to store.
     """
     if raw is None:
         return {}
@@ -186,4 +312,11 @@ def validate_attributes(raw: dict | None) -> dict:
     clean = dict(raw)
     if "variants" in clean:
         clean["variants"] = validate_variants(clean["variants"])
+    if "combinations" in clean:
+        # combinations validates against options, so it always needs the
+        # freshly-validated "variants" list from this same write — never
+        # whatever combinations claims options look like, and never a
+        # combinations array with no variants at all to reference.
+        options = clean.get("variants") or []
+        clean["combinations"] = validate_combinations(clean["combinations"], options)
     return clean

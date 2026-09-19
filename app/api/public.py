@@ -25,6 +25,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from app import ai_images, billing_actions, bkash, cache, chat_credits, courier_crypto, crud, events, fraud, invoices as invoices_module, mailer, nagad, notifications, queue, recaptcha, sslcommerz, steadfast
 from app.ratelimit import _client_ip, demo_access_rate_limit, rate_limit
@@ -69,6 +70,28 @@ DB = Annotated[AsyncSession, Depends(get_db)]
 
 # Fixed for now, not a per-site setting — see queue.JOB_SEND_LOW_STOCK_EMAIL.
 _LOW_STOCK_THRESHOLD = 5
+
+
+def _resolve_combo(product: Product, variant_key: str | None) -> dict | None:
+    """Look up a product's selected variant combination by key (see
+    app/products.py's module docstring for the combinations shape). Returns
+    None both when the product has no combinations at all (nothing to
+    resolve — today's plain-product behavior) and when it has some but the
+    given key doesn't match any of them — callers tell those two cases
+    apart by checking `combinations` themselves, since only the second one
+    is a real error."""
+    combinations = (product.attributes or {}).get("combinations") or []
+    if not variant_key:
+        return None
+    return next((c for c in combinations if c.get("key") == variant_key), None)
+
+
+def _variant_snapshot_text(combo: dict) -> str:
+    """Human-readable "Color: Navy, Size: M" for OrderItem.variant_snapshot
+    — order the same way the combo's own optionValues dict iterates, which
+    the dashboard already builds from the merchant's own variant-type
+    order, so this reads in the order the merchant defined, not alphabetized."""
+    return ", ".join(f"{k}: {v}" for k, v in combo["optionValues"].items())
 
 
 async def _find_published_site(host: str, db: AsyncSession) -> Site:
@@ -891,11 +914,16 @@ async def create_public_order(
         p.id: p
         for p in (
             await db.execute(
-                select(Product).where(
+                # FOR UPDATE: two concurrent checkouts for the last unit of
+                # the same product/combination must not both pass the stock
+                # check below — the second has to see the first's decrement.
+                select(Product)
+                .where(
                     Product.id.in_(ids),
                     Product.site_id == site.id,
                     Product.is_active,
                 )
+                .with_for_update()
             )
         ).scalars()
     }
@@ -917,8 +945,32 @@ async def create_public_order(
     low_stock_product_ids: list[uuid.UUID] = []
     for line in payload.items:
         product = products[line.product_id]
+        combinations = (product.attributes or {}).get("combinations") or []
 
-        if product.track_stock and product.stock < line.quantity:
+        # A product with real combinations requires picking one — there's no
+        # honest "pooled" stock/price to fall back to once combinations
+        # exist (see app/products.py's module docstring). A product with no
+        # combinations at all ignores variant_key entirely — today's plain
+        # behavior, untouched.
+        combo: dict | None = None
+        if combinations:
+            combo = _resolve_combo(product, line.variant_key)
+            if combo is None:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    f"Please select a variant for '{product.name}'.",
+                )
+
+        if combo is not None:
+            combo_track_stock = combo.get("trackStock", True)
+            combo_stock = combo.get("stock", 0)
+            if combo_track_stock and combo_stock < line.quantity:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    f"Only {combo_stock} left of '{product.name}' "
+                    f"({_variant_snapshot_text(combo)}).",
+                )
+        elif product.track_stock and product.stock < line.quantity:
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
                 f"Only {product.stock} left of '{product.name}'.",
@@ -927,11 +979,19 @@ async def create_public_order(
         # An active event's discount is actually charged here, not cosmetic
         # (see app/events.py's round_discounted_cents — pure integer
         # round-half-up, never a float division, per CLAUDE.md rule 7).
+        # A combo's own priceCents (when set) is the base to discount from,
+        # not the product's — that's the whole point of a per-combination
+        # price existing at all.
+        base_price = (
+            combo["priceCents"]
+            if combo is not None and combo.get("priceCents") is not None
+            else product.price_cents
+        )
         active_event = event_by_product.get(product.id)
         charged_unit_price = (
-            events.round_discounted_cents(product.price_cents, active_event.discount_percent)
+            events.round_discounted_cents(base_price, active_event.discount_percent)
             if active_event is not None
-            else product.price_cents
+            else base_price
         )
         line_total = charged_unit_price * line.quantity
         subtotal += line_total
@@ -952,7 +1012,7 @@ async def create_public_order(
             OrderItem(
                 product_id=product.id,
                 name_snapshot=product.name,
-                sku_snapshot=product.sku,
+                sku_snapshot=combo.get("sku") or product.sku if combo is not None else product.sku,
                 unit_price_cents=charged_unit_price,
                 cost_price_cents_snapshot=product.cost_price_cents,
                 quantity=line.quantity,
@@ -964,6 +1024,7 @@ async def create_public_order(
                 event_discount_percent_snapshot=(
                     active_event.discount_percent if active_event else None
                 ),
+                variant_snapshot=_variant_snapshot_text(combo) if combo is not None else None,
             )
         )
         out_items.append(
@@ -978,7 +1039,21 @@ async def create_public_order(
                 ),
             )
         )
-        if product.track_stock:
+        if combo is not None:
+            if combo.get("trackStock", True):
+                stock_before = combo.get("stock", 0)
+                combo["stock"] = stock_before - line.quantity
+                # attributes is a plain JSONB dict — mutating combo (found by
+                # reference inside product.attributes["combinations"]) in
+                # place doesn't tell SQLAlchemy the column changed; without
+                # this the decrement above would silently never be saved.
+                flag_modified(product, "attributes")
+                if (
+                    stock_before > _LOW_STOCK_THRESHOLD
+                    and combo["stock"] <= _LOW_STOCK_THRESHOLD
+                ):
+                    low_stock_product_ids.append(product.id)
+        elif product.track_stock:
             stock_before = product.stock
             product.stock -= line.quantity
             if stock_before > _LOW_STOCK_THRESHOLD and product.stock <= _LOW_STOCK_THRESHOLD:

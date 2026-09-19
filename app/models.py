@@ -617,6 +617,13 @@ class OrderItem(Base):
     # even after the event is later edited or deleted (CLAUDE.md rule 8).
     event_name_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
     event_discount_percent_snapshot: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    # Human-readable selected variant combination at sale time, e.g. "Color:
+    # Navy, Size: M" — null for a product with no variants. Same immutable-
+    # history reasoning as every other *_snapshot column here (CLAUDE.md
+    # rule 8): a past order has to keep showing what was actually bought
+    # even after the product's variant combinations are later edited or
+    # removed. See migrations/070 and app/products.py's combinations shape.
+    variant_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = _created()
 
     order: Mapped["Order"] = relationship(back_populates="items")

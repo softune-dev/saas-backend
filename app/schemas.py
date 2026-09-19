@@ -717,6 +717,11 @@ class OrderCreate(BaseModel):
 class PublicOrderItemIn(BaseModel):
     product_id: uuid.UUID
     quantity: int = Field(ge=1, le=100)
+    # Matches one of the product's attributes.combinations[].key (see
+    # app/products.py). Required by app/api/public.py's create_public_order
+    # whenever the product actually has combinations defined — a product
+    # with none is unaffected and this stays null, exactly today's behavior.
+    variant_key: str | None = Field(default=None, max_length=200)
 
 
 class AbandonedCheckoutCapture(BaseModel):
