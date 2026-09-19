@@ -180,6 +180,7 @@ def _explain(exc: IntegrityError) -> str:
         "uq_fraud_ip_blocklist_site_ip": "That IP address is already blocked.",
         "uq_customers_site_phone": "A customer with that phone number already exists on this site.",
         "uq_push_subscriptions_endpoint": "This browser is already subscribed.",
+        "idx_payment_claims_trx_id": "That Transaction ID has already been submitted.",
     }
     for name, message in known.items():
         if name in detail:

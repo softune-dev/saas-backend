@@ -659,6 +659,44 @@ def plan_renewal_upcoming_email(
     return subject, html_body, text_body
 
 
+def plan_payment_confirmed_email(
+    recipient_name: str | None, plan_name: str, amount_taka: int, trx_id: str,
+) -> tuple[str, str, str]:
+    """Sent the moment app/api/public.py's bkash_sms_webhook auto-matches a
+    PaymentClaim (migrations/068) against a real deposit SMS and upgrades
+    Tenant.plan — the merchant's confirmation that their manual payment
+    actually landed, without anyone from the team having to tell them by
+    hand.
+    """
+    greeting = f"Hi {html.escape(recipient_name)}," if recipient_name else "Hi,"
+    greeting_text = f"Hi {recipient_name}," if recipient_name else "Hi,"
+    subject = f"Payment confirmed — {plan_name} plan is active"
+    billing_url = f"{DASHBOARD}/settings/billing"
+
+    body_html = f"""\
+<tr>
+  <td style="padding:28px 36px 8px 36px;">
+    <p style="margin:0 0 8px 0;font-size:14px;color:{INK};">{greeting}</p>
+    <h1 style="margin:0 0 10px 0;font-size:22px;line-height:1.3;font-weight:400;color:{INK};">Payment confirmed</h1>
+    <p style="margin:0 0 16px 0;font-size:15px;line-height:1.55;color:{MUTED};">
+      We've matched your ৳{amount_taka:,} payment (Transaction ID {html.escape(trx_id)}) and your
+      {html.escape(plan_name)} plan is now active.
+    </p>
+    {_btn(billing_url, "Open Billing")}
+  </td>
+</tr>
+"""
+    html_body = _shell(f"{plan_name} plan is active", body_html)
+    text_body = (
+        f"{greeting_text}\n\n"
+        f"We've matched your ৳{amount_taka:,} payment (Transaction ID {trx_id}) and your "
+        f"{plan_name} plan is now active.\n\n"
+        f"Billing: {billing_url}\n\n"
+        "Softunebd — softunebd.com"
+    )
+    return subject, html_body, text_body
+
+
 def plan_payment_due_email(
     recipient_name: str | None, plan_name: str, amount_taka: int, grace_days: int,
 ) -> tuple[str, str, str]:

@@ -986,6 +986,41 @@ class Invoice(Base):
     )
 
 
+class PaymentClaim(Base):
+    """One row per "I already sent the money" submission from the dashboard
+    Billing page (app/api/billing.py's submit_manual_payment) — see
+    migrations/068's own docstring. Matched by trx_id against a real deposit
+    SMS relayed to app/api/public.py's bkash_sms_webhook, which is what
+    flips status to "verified" and upgrades Tenant.plan automatically
+    instead of waiting on a human to read the notification email.
+
+    No TimestampMixin: created_at is set once at submission and never
+    touched again; verified_at is its own separate one-shot timestamp, not
+    an updated_at."""
+
+    __tablename__ = "payment_claims"
+
+    id: Mapped[uuid.UUID] = _pk()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    plan: Mapped[str] = mapped_column(Text)
+    amount_cents: Mapped[int] = mapped_column(Integer)
+    sender_number: Mapped[str] = mapped_column(Text)
+    trx_id: Mapped[str] = mapped_column(Text)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(Text, default="pending")
+    # Raw SMS body that matched this claim — kept as the audit trail for why
+    # an automated upgrade happened, same instinct as order_items' *_snapshot
+    # columns: if a merchant disputes it later, the actual evidence is here,
+    # not just a boolean.
+    matched_sms: Mapped[str | None] = mapped_column(Text, nullable=True)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+
 class AiImageCreditTransaction(Base):
     """One row per change to Tenant.ai_image_credits — purchase, manual
     grant, a generate/edit spend, or a refund when a generate call failed

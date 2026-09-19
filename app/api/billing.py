@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import crud, invoices as invoices_module, mailer
 from app.config import settings
 from app.db import get_db
-from app.models import Invoice, Site, Tenant, User
+from app.models import Invoice, PaymentClaim, Site, Tenant, User
 from app.schemas import InvoiceOut, ManualPaymentSubmit, Page
 from app.security import CurrentUser
 
@@ -33,17 +33,27 @@ async def list_invoices(user: CurrentUser, db: DB) -> dict:
 async def submit_manual_payment(payload: ManualPaymentSubmit, user: CurrentUser, db: DB) -> dict:
     """The dashboard Billing page's self-serve "I already sent the money"
     step — there's still no payment gateway (see
-    dashboard/components/billing/billing-data.ts's own docstring), so a
-    real plan change is still applied by hand from Superadmin, but the
-    merchant no longer has to compose their own email to say they paid.
+    dashboard/components/billing/billing-data.ts's own docstring).
 
-    Deliberately stores nothing: this email IS the record (two copies —
-    SUPPORT and settings.billing_notify_email — see
-    mailer.manual_payment_submitted_email's own docstring for why both).
-    trx_id gets cross-checked against the real bKash merchant statement by
-    a person before anyone touches Tenant.plan.
+    Persists a PaymentClaim (migrations/068) so app/api/public.py's
+    bkash_sms_webhook has something to match trx_id against once the real
+    deposit SMS arrives — that's what actually upgrades Tenant.plan now,
+    automatically. The email is still sent as a human-readable fallback (two
+    copies — SUPPORT and settings.billing_notify_email — see
+    mailer.manual_payment_submitted_email's own docstring for why both), for
+    the case the SMS never arrives (wrong number, claim mistyped, etc.) and
+    someone has to look at it by hand.
     """
     tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
+    claim = PaymentClaim(
+        tenant_id=user.tenant_id,
+        plan=payload.plan,
+        amount_cents=invoices_module.PLAN_PRICES_CENTS.get(payload.plan, 0),
+        sender_number=payload.sender_number.strip(),
+        trx_id=payload.trx_id.strip(),
+        note=payload.note.strip() if payload.note else None,
+    )
+    await crud.save(db, claim)
     owner = (
         await db.execute(
             select(User).where(User.tenant_id == user.tenant_id, User.role == "owner")

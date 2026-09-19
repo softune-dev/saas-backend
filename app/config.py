@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     # --- misc ---
     cors_origins: str = "http://localhost:3000"
     revalidate_secret: str = ""
+    # Bearer token the phone-side SMS-forwarding app (e.g. MacroDroid) sends
+    # to app/api/public.py's bkash_sms_webhook — same shared-secret pattern
+    # as CourierConnection.webhook_secret, just one value for the whole
+    # account rather than per-connection, since there's exactly one phone.
+    bkash_sms_webhook_secret: str = ""
     site_base_domain: str = "vercel.app"
 
     # Where THIS backend is publicly reachable — gateway checkout callbacks

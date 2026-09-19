@@ -14,6 +14,7 @@ correct metadata without reimplementing the fallback rules.
 """
 
 import json
+import hmac
 import logging
 import re
 import uuid
@@ -22,10 +23,10 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import bkash, cache, courier_crypto, crud, events, fraud, mailer, nagad, queue, recaptcha, sslcommerz, steadfast
+from app import billing_actions, bkash, cache, courier_crypto, crud, events, fraud, invoices as invoices_module, mailer, nagad, queue, recaptcha, sslcommerz, steadfast
 from app.ratelimit import _client_ip, demo_access_rate_limit, rate_limit
 from app.config import settings
 from app.db import get_db
@@ -40,10 +41,12 @@ from app.models import (
     Order,
     OrderItem,
     PageView,
+    PaymentClaim,
     PaymentConnection,
     Product,
     Site,
     SitePage,
+    Tenant,
     User,
 )
 from app.schemas import (
@@ -1549,3 +1552,120 @@ async def steadfast_webhook(site_id: uuid.UUID, request: Request, db: DB) -> dic
     await crud.save(db, order)
     await cache.invalidate_dashboard(str(site_id))
     return {"ok": True}
+
+
+# =============================================================================
+#  bKash/bank deposit SMS -> automated plan-payment matching
+# =============================================================================
+# The phone that actually receives bKash's and the bank's deposit SMS runs a
+# forwarding app (e.g. MacroDroid — SMS Received trigger, HTTP POST action)
+# that relays the raw SMS body here the instant it arrives. One shared bearer
+# secret (settings.bkash_sms_webhook_secret) authenticates it — there's
+# exactly one phone, so no per-connection secret like CourierConnection's.
+#
+# This never charges or moves money; a merchant already sent the real
+# payment by hand before this fires. All it does is close the loop that used
+# to require a human reading an email and clicking a button in Superadmin
+# (see app/api/billing.py's submit_manual_payment and migrations/068).
+
+_TRX_ID_RE = re.compile(r"TrxID\s+([A-Za-z0-9]+)", re.IGNORECASE)
+# Tried first: the amount right after "received", anchoring to bKash's own
+# wording instead of just "whichever Tk figure appears first" — a message
+# type that ever mentions a fee before the received line would otherwise
+# misparse the fee as the payment. Falls back to the old first-match
+# behavior if "received" isn't present, so an unexpected wording still gets
+# a best-effort amount instead of no match at all.
+_AMOUNT_RECEIVED_RE = re.compile(r"received\s+Tk\.?\s*([\d,]+\.\d{2})", re.IGNORECASE)
+_AMOUNT_RE = re.compile(r"Tk\.?\s*([\d,]+\.\d{2})", re.IGNORECASE)
+
+
+@router.post("/webhooks/bkash-sms")
+async def bkash_sms_webhook(request: Request, db: DB) -> dict:
+    auth = request.headers.get("authorization", "")
+    token = auth.removeprefix("Bearer ").strip()
+    # Constant-time compare — this is a single static shared secret, so a
+    # plain `!=` would leak a little timing information per byte matched.
+    if not token or not settings.bkash_sms_webhook_secret or not hmac.compare_digest(
+        token, settings.bkash_sms_webhook_secret
+    ):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid webhook token")
+
+    body = await request.json()
+    text = str(body.get("text") or body.get("message") or "").strip()
+
+    trx_match = _TRX_ID_RE.search(text)
+    if not trx_match:
+        # Not every SMS the forwarder relays is a deposit notice (balance
+        # checks, OTPs, etc. share the same sender) — 200 so the forwarding
+        # app doesn't treat this as a delivery failure and retry forever.
+        return {"ok": False, "reason": "no trx_id in message"}
+    trx_id = trx_match.group(1).strip()
+
+    amount_match = _AMOUNT_RECEIVED_RE.search(text) or _AMOUNT_RE.search(text)
+    received_cents = (
+        round(float(amount_match.group(1).replace(",", "")) * 100) if amount_match else None
+    )
+
+    # Atomically claim the row: flip pending -> verified in the same
+    # statement that selects it, so two overlapping requests for the same
+    # trx_id (a retried webhook delivery, or the forwarder firing twice)
+    # can't both pass a separate "is it still pending" check and both call
+    # apply_paid_plan — only whichever request's UPDATE actually matches
+    # `status = 'pending'` gets rows back. Setting status BEFORE applying
+    # the plan (rather than after, as this first shipped) means the failure
+    # mode of a crash mid-request is "claim marked verified, plan not yet
+    # applied" — a visible, human-fixable state — instead of "silently
+    # re-applies the plan and extends the renewal date again" on retry.
+    result = await db.execute(
+        update(PaymentClaim)
+        .where(
+            func.upper(PaymentClaim.trx_id) == trx_id.upper(),
+            PaymentClaim.status == "pending",
+        )
+        .values(
+            status="verified",
+            matched_sms=text,
+            verified_at=datetime.now(timezone.utc),
+        )
+        .returning(PaymentClaim)
+    )
+    claim = result.scalar_one_or_none()
+    if claim is None:
+        await db.rollback()
+        log.info("bkash sms webhook: no pending claim for trx_id %s", trx_id)
+        return {"ok": False, "reason": "no matching pending claim"}
+
+    if received_cents != claim.amount_cents:
+        # Trust the merchant's own submitted amount, not the SMS, when they
+        # disagree — never auto-upgrade on a guess. A real mismatch (wrong
+        # plan claimed, short payment) needs a human, same as before this
+        # webhook existed. Roll back the claim to "pending" instead of
+        # leaving it "verified" with nothing actually applied — a later SMS
+        # (or a human correction) should still be able to match it.
+        await db.rollback()
+        log.warning(
+            "bkash sms webhook: trx_id %s amount mismatch (claim %s, sms %s)",
+            trx_id, claim.amount_cents, received_cents,
+        )
+        return {"ok": False, "reason": "amount mismatch"}
+
+    await db.commit()
+
+    tenant = (await db.execute(select(Tenant).where(Tenant.id == claim.tenant_id))).scalar_one()
+    await billing_actions.apply_paid_plan(db, tenant, claim.plan)
+
+    owner = (
+        await db.execute(
+            select(User).where(User.tenant_id == tenant.id, User.role == "owner")
+        )
+    ).scalars().first()
+    if owner is not None:
+        subject, html_body, text_body = mailer.plan_payment_confirmed_email(
+            recipient_name=owner.full_name,
+            plan_name=invoices_module.PLAN_NAMES.get(claim.plan, claim.plan),
+            amount_taka=claim.amount_cents // 100,
+            trx_id=claim.trx_id,
+        )
+        await mailer.send_email(owner.email, subject, html_body, text_body)
+
+    return {"ok": True, "tenant_id": str(tenant.id), "plan": claim.plan}
