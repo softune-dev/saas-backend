@@ -17,7 +17,7 @@ from PIL import Image
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import ai_images, mailer, media
+from app import ai_images, crud, mailer, media
 from app.ai_image_presets import (
     ALWAYS_TEXT_FREE_CATEGORIES,
     FREEFORM_QUALITY_BASELINE,
@@ -31,7 +31,7 @@ from app.ai_image_presets import (
 from app.config import settings
 from app.db import get_db
 from app.media import IMAGE_MAX_BYTES, IMAGE_MAX_MEGAPIXELS, plan_storage_limit, site_storage_used_bytes
-from app.models import Site, Tenant, User
+from app.models import PaymentClaim, Site, Tenant, User
 from app.schemas import (
     CreditPurchaseSubmit,
     EditImageIn,
@@ -246,17 +246,28 @@ async def save_to_gallery(payload: SaveImageToGalleryIn, user: CurrentUser, db: 
 @router.post("/purchase-credits", status_code=status.HTTP_202_ACCEPTED)
 async def submit_credit_purchase(payload: CreditPurchaseSubmit, user: CurrentUser, db: DB) -> dict:
     """Same self-serve "I already sent the money" boundary as
-    app/api/billing.py's submit_manual_payment — deliberately stores
-    nothing (this email IS the record), sent to SUPPORT and
-    settings.billing_notify_email separately. A person verifies trx_id
-    against the real bKash statement, then grants credits from Superadmin
-    (grant_image_credits below) — never automatic, same as a plan change.
+    app/api/billing.py's submit_manual_payment — persists a PaymentClaim
+    (kind="image_credits", migrations/069) so app/api/public.py's
+    bkash_sms_webhook has something to match trx_id against once the real
+    deposit SMS arrives, same as a plan purchase. The email is still sent
+    as a human-readable fallback for the case the SMS never arrives.
     """
     pack = ai_images.CREDIT_PACKS.get(payload.pack_id)
     if pack is None:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Unknown credit pack")
 
     tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
+    claim = PaymentClaim(
+        tenant_id=user.tenant_id,
+        kind="image_credits",
+        pack_id=payload.pack_id,
+        credits=pack["credits"],
+        amount_cents=pack["price_taka"] * 100,
+        sender_number=payload.sender_number.strip(),
+        trx_id=payload.trx_id.strip(),
+        note=payload.note.strip() if payload.note else None,
+    )
+    await crud.save(db, claim)
     owner = (
         await db.execute(select(User).where(User.tenant_id == user.tenant_id, User.role == "owner"))
     ).scalars().first()

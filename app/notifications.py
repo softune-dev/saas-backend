@@ -21,9 +21,17 @@ from app.models import Notification
 logger = logging.getLogger(__name__)
 
 # Mirrors the CHECK constraint in migrations/019_notifications.sql /
-# 021_order_blocked_notification.sql — kept in sync by hand, same as every
-# other provider/type enum in this codebase.
-_KNOWN_TYPES = {"order_created", "order_blocked", "site_published", "site_unpublished"}
+# 021_order_blocked_notification.sql / 069_payment_claims_credits.sql —
+# kept in sync by hand, same as every other provider/type enum in this
+# codebase.
+_KNOWN_TYPES = {
+    "order_created",
+    "order_blocked",
+    "site_published",
+    "site_unpublished",
+    "payment_verified",
+    "credit_purchase_verified",
+}
 
 
 async def notify(

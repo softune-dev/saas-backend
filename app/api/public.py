@@ -26,7 +26,7 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import billing_actions, bkash, cache, courier_crypto, crud, events, fraud, invoices as invoices_module, mailer, nagad, queue, recaptcha, sslcommerz, steadfast
+from app import ai_images, billing_actions, bkash, cache, chat_credits, courier_crypto, crud, events, fraud, invoices as invoices_module, mailer, nagad, notifications, queue, recaptcha, sslcommerz, steadfast
 from app.ratelimit import _client_ip, demo_access_rate_limit, rate_limit
 from app.config import settings
 from app.db import get_db
@@ -1555,7 +1555,7 @@ async def steadfast_webhook(site_id: uuid.UUID, request: Request, db: DB) -> dic
 
 
 # =============================================================================
-#  bKash/bank deposit SMS -> automated plan-payment matching
+#  bKash/bank deposit SMS -> automated payment matching (plan or credits)
 # =============================================================================
 # The phone that actually receives bKash's and the bank's deposit SMS runs a
 # forwarding app (e.g. MacroDroid — SMS Received trigger, HTTP POST action)
@@ -1565,8 +1565,12 @@ async def steadfast_webhook(site_id: uuid.UUID, request: Request, db: DB) -> dic
 #
 # This never charges or moves money; a merchant already sent the real
 # payment by hand before this fires. All it does is close the loop that used
-# to require a human reading an email and clicking a button in Superadmin
-# (see app/api/billing.py's submit_manual_payment and migrations/068).
+# to require a human reading an email and clicking a button in Superadmin.
+# Matches against any pending PaymentClaim regardless of kind — a plan
+# upgrade (app/api/billing.py's submit_manual_payment, migrations/068), an
+# AI image credit pack (app/api/ai_images.py's submit_credit_purchase), or
+# an AI chat credit pack (app/api/ai.py's submit_chat_credit_purchase) —
+# see migrations/069 for the kind discriminator.
 
 _TRX_ID_RE = re.compile(r"TrxID\s+([A-Za-z0-9]+)", re.IGNORECASE)
 # Tried first: the amount right after "received", anchoring to bKash's own
@@ -1652,20 +1656,72 @@ async def bkash_sms_webhook(request: Request, db: DB) -> dict:
     await db.commit()
 
     tenant = (await db.execute(select(Tenant).where(Tenant.id == claim.tenant_id))).scalar_one()
-    await billing_actions.apply_paid_plan(db, tenant, claim.plan)
-
     owner = (
         await db.execute(
             select(User).where(User.tenant_id == tenant.id, User.role == "owner")
         )
     ).scalars().first()
+    # Dashboard bell/toast (5s poll — see dashboard/lib/api/notifications.ts)
+    # is site-scoped, same as Orders/Analytics/etc; a tenant's first site is
+    # the same resolution app/api/billing.py's submit_manual_payment already
+    # uses for its own email.
+    site = (
+        await db.execute(select(Site).where(Site.tenant_id == tenant.id).limit(1))
+    ).scalars().first()
+
+    if claim.kind == "plan":
+        await billing_actions.apply_paid_plan(db, tenant, claim.plan)
+        plan_name = invoices_module.PLAN_NAMES.get(claim.plan, claim.plan)
+        if owner is not None:
+            subject, html_body, text_body = mailer.plan_payment_confirmed_email(
+                recipient_name=owner.full_name,
+                plan_name=plan_name,
+                amount_taka=claim.amount_cents // 100,
+                trx_id=claim.trx_id,
+            )
+            await mailer.send_email(owner.email, subject, html_body, text_body)
+        if site is not None:
+            await notifications.notify(
+                db,
+                tenant_id=tenant.id,
+                site_id=site.id,
+                type="payment_verified",
+                title="Payment confirmed",
+                body=f"Your {plan_name} plan is now active.",
+                link="/settings/billing",
+            )
+        return {"ok": True, "tenant_id": str(tenant.id), "kind": "plan", "plan": claim.plan}
+
+    # image_credits / chat_credits — same grant_credits(db, tenant_id,
+    # credits, reason, reference) signature on both modules (see each
+    # module's own docstring), so one branch covers both currencies.
+    credit_module = ai_images if claim.kind == "image_credits" else chat_credits
+    credit_label = "AI image" if claim.kind == "image_credits" else "AI chat"
+    await credit_module.grant_credits(
+        db, tenant.id, claim.credits, reason="purchase", reference=claim.trx_id
+    )
     if owner is not None:
-        subject, html_body, text_body = mailer.plan_payment_confirmed_email(
+        subject, html_body, text_body = mailer.credit_purchase_confirmed_email(
             recipient_name=owner.full_name,
-            plan_name=invoices_module.PLAN_NAMES.get(claim.plan, claim.plan),
+            credit_kind_label=credit_label,
+            credits=claim.credits,
             amount_taka=claim.amount_cents // 100,
             trx_id=claim.trx_id,
         )
         await mailer.send_email(owner.email, subject, html_body, text_body)
-
-    return {"ok": True, "tenant_id": str(tenant.id), "plan": claim.plan}
+    if site is not None:
+        await notifications.notify(
+            db,
+            tenant_id=tenant.id,
+            site_id=site.id,
+            type="credit_purchase_verified",
+            title="Payment confirmed",
+            body=f"{claim.credits} {credit_label} credits added to your account.",
+            link="/settings/billing",
+        )
+    return {
+        "ok": True,
+        "tenant_id": str(tenant.id),
+        "kind": claim.kind,
+        "credits": claim.credits,
+    }

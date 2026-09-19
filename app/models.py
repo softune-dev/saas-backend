@@ -987,12 +987,21 @@ class Invoice(Base):
 
 
 class PaymentClaim(Base):
-    """One row per "I already sent the money" submission from the dashboard
-    Billing page (app/api/billing.py's submit_manual_payment) — see
-    migrations/068's own docstring. Matched by trx_id against a real deposit
-    SMS relayed to app/api/public.py's bkash_sms_webhook, which is what
-    flips status to "verified" and upgrades Tenant.plan automatically
-    instead of waiting on a human to read the notification email.
+    """One row per "I already sent the money" submission — a plan upgrade
+    from the dashboard Billing page (app/api/billing.py's
+    submit_manual_payment), or an AI image/chat credit-pack purchase
+    (app/api/ai_images.py's submit_credit_purchase, app/api/ai.py's
+    submit_chat_credit_purchase) — see migrations/068 and 069's own
+    docstrings. Matched by trx_id against a real deposit SMS relayed to
+    app/api/public.py's bkash_sms_webhook, which is what flips status to
+    "verified" and applies the purchase automatically instead of waiting on
+    a human to read the notification email.
+
+    `kind` picks which fields are meaningful: 'plan' uses `plan`, nothing
+    else; 'image_credits'/'chat_credits' use `pack_id`+`credits`, not
+    `plan` — enforced by migrations/069's payment_claims_kind_fields_check
+    so the webhook's branch-by-kind logic never reads a NULL it didn't
+    expect.
 
     No TimestampMixin: created_at is set once at submission and never
     touched again; verified_at is its own separate one-shot timestamp, not
@@ -1004,7 +1013,16 @@ class PaymentClaim(Base):
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
     )
-    plan: Mapped[str] = mapped_column(Text)
+    kind: Mapped[str] = mapped_column(Text, default="plan")
+    plan: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Only set for kind in ('image_credits', 'chat_credits') — which
+    # CREDIT_PACKS/CHAT_CREDIT_PACKS entry, and how many credits it resolves
+    # to (never re-derived from pack_id at grant time, same "never trust a
+    # recomputation of a price/amount that could drift" reasoning as
+    # everywhere else money is involved — this is the server-priced amount
+    # from submission time).
+    pack_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    credits: Mapped[int | None] = mapped_column(Integer, nullable=True)
     amount_cents: Mapped[int] = mapped_column(Integer)
     sender_number: Mapped[str] = mapped_column(Text)
     trx_id: Mapped[str] = mapped_column(Text)

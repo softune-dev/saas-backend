@@ -406,10 +406,11 @@ def credit_purchase_submitted_email(
     """Internal — the AI image credits "I already sent the money" step
     (app/api/ai_images.py's submit_credit_purchase). Same reasoning as
     manual_payment_submitted_email above (different SKU, identical
-    boundary): no gateway, nothing stored, this email IS the record, sent
-    to SUPPORT and settings.billing_notify_email separately. A person
-    verifies trx_id, then grants credits from Superadmin
-    (app/api/superadmin.py's grant_image_credits) — never automatic.
+    boundary): no gateway, sent to SUPPORT and settings.billing_notify_email
+    as a human-readable fallback. A person can still verify trx_id and grant
+    credits from Superadmin by hand, but app/api/public.py's
+    bkash_sms_webhook usually beats them to it — see credit_purchase_
+    confirmed_email below for the email sent once that happens.
     """
     subject = f"Credit purchase claim — {tenant_name} ({pack_name}, {credits} credits, ৳{amount_taka:,})"
     rows = [
@@ -463,7 +464,7 @@ def chat_credit_purchase_submitted_email(
     """Same shape and boundary as credit_purchase_submitted_email above —
     the OTHER currency (chat credits, app/chat_credits.py), a completely
     separate claim/grant flow so the two are never confused in an ops
-    inbox either."""
+    inbox either. Same webhook-usually-beats-a-human caveat applies."""
     subject = f"Chat credit purchase claim — {tenant_name} ({pack_name}, {credits} credits, ৳{amount_taka:,})"
     rows = [
         ("Tenant", f"{tenant_name} ({tenant_slug})"),
@@ -691,6 +692,50 @@ def plan_payment_confirmed_email(
         f"{greeting_text}\n\n"
         f"We've matched your ৳{amount_taka:,} payment (Transaction ID {trx_id}) and your "
         f"{plan_name} plan is now active.\n\n"
+        f"Billing: {billing_url}\n\n"
+        "Softunebd — softunebd.com"
+    )
+    return subject, html_body, text_body
+
+
+def credit_purchase_confirmed_email(
+    recipient_name: str | None,
+    credit_kind_label: str,
+    credits: int,
+    amount_taka: int,
+    trx_id: str,
+) -> tuple[str, str, str]:
+    """Sent the moment app/api/public.py's bkash_sms_webhook auto-matches a
+    PaymentClaim (kind="image_credits"/"chat_credits", migrations/069)
+    against a real deposit SMS and grants the credits — the same "landed
+    without anyone from the team having to tell you by hand" confirmation
+    as plan_payment_confirmed_email above, for a credit-pack purchase
+    instead of a plan upgrade. `credit_kind_label` is "AI image" or "AI
+    chat" — plain English, not the internal kind string.
+    """
+    greeting = f"Hi {html.escape(recipient_name)}," if recipient_name else "Hi,"
+    greeting_text = f"Hi {recipient_name}," if recipient_name else "Hi,"
+    subject = f"Payment confirmed — {credits} {credit_kind_label} credits added"
+    billing_url = f"{DASHBOARD}/settings/billing"
+
+    body_html = f"""\
+<tr>
+  <td style="padding:28px 36px 8px 36px;">
+    <p style="margin:0 0 8px 0;font-size:14px;color:{INK};">{greeting}</p>
+    <h1 style="margin:0 0 10px 0;font-size:22px;line-height:1.3;font-weight:400;color:{INK};">Payment confirmed</h1>
+    <p style="margin:0 0 16px 0;font-size:15px;line-height:1.55;color:{MUTED};">
+      We've matched your ৳{amount_taka:,} payment (Transaction ID {html.escape(trx_id)}) and added
+      {credits} {html.escape(credit_kind_label)} credits to your account.
+    </p>
+    {_btn(billing_url, "Open Billing")}
+  </td>
+</tr>
+"""
+    html_body = _shell(f"{credits} {credit_kind_label} credits added", body_html)
+    text_body = (
+        f"{greeting_text}\n\n"
+        f"We've matched your ৳{amount_taka:,} payment (Transaction ID {trx_id}) and added "
+        f"{credits} {credit_kind_label} credits to your account.\n\n"
         f"Billing: {billing_url}\n\n"
         "Softunebd — softunebd.com"
     )

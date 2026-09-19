@@ -47,6 +47,7 @@ async def submit_manual_payment(payload: ManualPaymentSubmit, user: CurrentUser,
     tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
     claim = PaymentClaim(
         tenant_id=user.tenant_id,
+        kind="plan",
         plan=payload.plan,
         amount_cents=invoices_module.PLAN_PRICES_CENTS.get(payload.plan, 0),
         sender_number=payload.sender_number.strip(),

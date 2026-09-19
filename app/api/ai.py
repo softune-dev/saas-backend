@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import ai, ai_actions, ai_forms, ai_tools, chat_credits, crud, mailer
 from app.config import settings
 from app.db import get_db
-from app.models import Site, Tenant, User
+from app.models import PaymentClaim, Site, Tenant, User
 from app.schemas import ChatCreditPurchaseSubmit
 from app.security import CurrentUser
 
@@ -136,15 +136,28 @@ async def get_chat_credit_balance(user: CurrentUser, db: DB) -> dict:
 async def submit_chat_credit_purchase(payload: ChatCreditPurchaseSubmit, user: CurrentUser, db: DB) -> dict:
     """Same self-serve "I already sent the money" claim as
     app/api/ai_images.py's submit_credit_purchase — a different currency
-    (chat credits, not image credits), same boundary: nothing is stored
-    here, the email IS the record, a person verifies trx_id and grants
-    credits from Superadmin (grant_chat_credits) afterward.
+    (chat credits, not image credits), same boundary: persists a
+    PaymentClaim (kind="chat_credits", migrations/069) so
+    app/api/public.py's bkash_sms_webhook has something to match trx_id
+    against once the real deposit SMS arrives. The email is still sent as a
+    human-readable fallback for the case the SMS never arrives.
     """
     pack = chat_credits.CHAT_CREDIT_PACKS.get(payload.pack_id)
     if pack is None:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Unknown credit pack")
 
     tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
+    claim = PaymentClaim(
+        tenant_id=user.tenant_id,
+        kind="chat_credits",
+        pack_id=payload.pack_id,
+        credits=pack["credits"],
+        amount_cents=pack["price_taka"] * 100,
+        sender_number=payload.sender_number.strip(),
+        trx_id=payload.trx_id.strip(),
+        note=payload.note.strip() if payload.note else None,
+    )
+    await crud.save(db, claim)
     owner = (
         await db.execute(select(User).where(User.tenant_id == user.tenant_id, User.role == "owner"))
     ).scalars().first()
