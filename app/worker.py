@@ -79,23 +79,35 @@ async def handle_revalidate_site(payload: dict) -> None:
         log.warning("revalidate: REVALIDATE_SECRET is empty in .env, skipping")
         return
 
-    host = site.custom_domain or f"{site.subdomain}.{settings.site_base_domain}"
+    # A site is reachable under more than one hostname once a custom domain
+    # is attached (its subdomain still resolves too — see app/cache.py's
+    # invalidate_site, which drops both for exactly this reason). Next.js's
+    # fetch cache is keyed per the request's actual Host header, so
+    # revalidating only ONE hostname leaves the other one silently serving
+    # stale pages forever after every edit. Confirmed for real against
+    # elarabd.store/elara.softunebd.com: this used to pick custom_domain
+    # only, so the subdomain never got the memo once a custom domain existed.
+    hosts = [f"{site.subdomain}.{settings.site_base_domain}"]
+    if site.custom_domain:
+        hosts.append(site.custom_domain)
     paths = payload.get("paths") or ["/"]
 
-    try:
-        async with httpx.AsyncClient(timeout=10) as http:
-            response = await http.post(
-                f"https://{host}/api/revalidate",
-                json={"paths": paths},
-                # Header, not a query string: a secret in a URL ends up in access
-                # logs, browser history and referrer headers.
-                headers={"x-revalidate-secret": settings.revalidate_secret},
-            )
-        log.info("revalidate: %s %s -> %s", host, paths, response.status_code)
-    except httpx.HTTPError as exc:
-        # Expected while the site is not deployed yet. Not worth a retry storm:
-        # the content is already saved, and the next edit will try again.
-        log.warning("revalidate: could not reach %s (%s)", host, exc)
+    for host in hosts:
+        try:
+            async with httpx.AsyncClient(timeout=10) as http:
+                response = await http.post(
+                    f"https://{host}/api/revalidate",
+                    json={"paths": paths},
+                    # Header, not a query string: a secret in a URL ends up in
+                    # access logs, browser history and referrer headers.
+                    headers={"x-revalidate-secret": settings.revalidate_secret},
+                )
+            log.info("revalidate: %s %s -> %s", host, paths, response.status_code)
+        except httpx.HTTPError as exc:
+            # Expected while the site is not deployed yet. Not worth a retry
+            # storm: the content is already saved, and the next edit will
+            # try again. One host failing must not skip the other.
+            log.warning("revalidate: could not reach %s (%s)", host, exc)
 
 
 async def handle_attach_domain(payload: dict) -> None:
