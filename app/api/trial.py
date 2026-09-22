@@ -1,4 +1,4 @@
-"""Self-serve 3-day trial signup — replaces the old lead-capture funnel.
+"""Self-serve 7-day trial signup — replaces the old lead-capture funnel.
 
 Creates a REAL Tenant + User immediately (plan="trial"), not a staging row
 that a superadmin later converts. The only pre-verification state is the

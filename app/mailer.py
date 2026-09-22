@@ -511,7 +511,7 @@ def welcome_email(recipient_name: str | None = None) -> tuple[str, str, str]:
         ("Theme editor", "Colors, fonts, and sections — live preview, no code."),
         ("Payments that Bangladesh uses", "COD, bKash, Nagad, and SSLCommerz."),
         ("Couriers, connected", "Steadfast, Pathao, RedX, and eCourier."),
-        ("Three days, no card", "Full dashboard access. Upgrade when you're ready."),
+        ("Seven days, no card", "Full dashboard access. Upgrade when you're ready."),
     ]
     rows_html = "".join(
         f'<tr>'
@@ -530,7 +530,7 @@ def welcome_email(recipient_name: str | None = None) -> tuple[str, str, str]:
     <p style="margin:0 0 8px 0;font-size:14px;color:{INK};">{greeting}</p>
     <h1 style="margin:0 0 10px 0;font-size:22px;line-height:1.3;font-weight:400;color:{INK};">Your store is live</h1>
     <p style="margin:0 0 24px 0;font-size:15px;line-height:1.55;color:{MUTED};">
-      The 3-day trial is on. Open the dashboard, add a product, and publish when it looks right.
+      The 7-day trial is on. Open the dashboard, add a product, and publish when it looks right.
     </p>
     {_btn(DASHBOARD, "Open dashboard")}
   </td>
@@ -542,10 +542,10 @@ def welcome_email(recipient_name: str | None = None) -> tuple[str, str, str]:
   </td>
 </tr>
 """
-    html_body = _shell("Your Softune store is ready — 3-day trial, no card", body_html)
+    html_body = _shell("Your Softune store is ready — 7-day trial, no card", body_html)
     text_body = (
         f"{greeting_text}\n\n"
-        "Your store is live. The 3-day trial is on — no credit card.\n\n"
+        "Your store is live. The 7-day trial is on — no credit card.\n\n"
         f"Open dashboard: {DASHBOARD}\n\n"
         f"{rows_text}\n\n"
         "Questions? Reply to this email.\n\n"
@@ -573,7 +573,7 @@ def trial_ended_email(recipient_name: str | None = None, grace_days: int = 4) ->
     <p style="margin:0 0 8px 0;font-size:14px;color:{INK};">{greeting}</p>
     <h1 style="margin:0 0 10px 0;font-size:22px;line-height:1.3;font-weight:400;color:{INK};">Your trial has ended</h1>
     <p style="margin:0 0 16px 0;font-size:15px;line-height:1.55;color:{MUTED};">
-      Your 3-day Softunebd trial is over, so the dashboard is locked for now. Your store,
+      Your 7-day Softunebd trial is over, so the dashboard is locked for now. Your store,
       products, and orders are all still there — nothing is deleted.
     </p>
     <p style="margin:0 0 24px 0;font-size:15px;line-height:1.55;color:{MUTED};">
@@ -594,7 +594,7 @@ def trial_ended_email(recipient_name: str | None = None, grace_days: int = 4) ->
     html_body = _shell("Your Softunebd trial has ended — your store is still there", body_html)
     text_body = (
         f"{greeting_text}\n\n"
-        "Your 3-day Softunebd trial is over, so the dashboard is locked for now. "
+        "Your 7-day Softunebd trial is over, so the dashboard is locked for now. "
         "Your store, products, and orders are all still there — nothing is deleted.\n\n"
         f"Pick a plan and you're back in immediately: {pricing_url}\n\n"
         f"If we don't hear from you, your trial data stays put for {grace_days} more "
@@ -1215,12 +1215,12 @@ def invoice_email(
 def demo_followup_email() -> tuple[str, str, str]:
     """One-click send from the superadmin demo-requests list. Pitch is
     'you've seen the demo — start a trial', not the welcome intro."""
-    subject = "Build your own store — 3 days free, no card"
+    subject = "Build your own store — 7 days free, no card"
     signup = f"{SITE}/signup"
     bullets = [
         "Your shop name, theme, and products",
         "COD, bKash, Nagad, and SSLCommerz",
-        "Three days, no credit card",
+        "Seven days, no credit card",
     ]
     bullets_html = "".join(
         f'<tr>'
@@ -1237,7 +1237,7 @@ def demo_followup_email() -> tuple[str, str, str]:
     <p style="margin:0 0 8px 0;font-size:14px;font-weight:400;color:{BRAND};">You tried the demo</p>
     <h1 style="margin:0 0 12px 0;font-size:22px;line-height:1.3;font-weight:400;color:{INK};">Now make it yours</h1>
     <p style="margin:0 0 18px 0;font-size:15px;line-height:1.55;color:{MUTED};">
-      The demo is a shared, read-only shop. A trial is your shop for three days.
+      The demo is a shared, read-only shop. A trial is your shop for seven days.
     </p>
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 22px 0;">{bullets_html}</table>
     {_btn(signup, "Start free trial")}
@@ -1247,10 +1247,10 @@ def demo_followup_email() -> tuple[str, str, str]:
   </td>
 </tr>
 """
-    html_body = _shell("Start your free 3-day trial — no card required", body_html)
+    html_body = _shell("Start your free 7-day trial — no card required", body_html)
     text_body = (
         "You tried the demo. Now make it yours.\n\n"
-        "The demo is a shared, read-only shop. A trial is your shop for three days.\n\n"
+        "The demo is a shared, read-only shop. A trial is your shop for seven days.\n\n"
         f"{bullets_text}\n\n"
         f"Start free trial: {signup}\n\n"
         "About five minutes. Pick a theme, add your shop name, and you're in.\n\n"

@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 #   - demo: the one shared, read-only "click and look around" account
 #     (app/api/public.py's demo_access) — enough allowance to actually try
 #     the assistant, not a token amount. Distinct from trial below.
-#   - trial: self-serve 3-day signup (app/api/trial.py) — gets exactly the
+#   - trial: self-serve 7-day signup (app/api/trial.py) — gets exactly the
 #     Starter cap, same as the plan it's a preview of. Was silently falling
 #     through to DEFAULT_AI_DAILY_CAP (80, Growth's cap) before this entry
 #     existed, which is wrong on purpose only for plan values that are truly

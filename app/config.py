@@ -182,7 +182,7 @@ class Settings(BaseSettings):
     # How long a trial tenant can log in for. Login is rejected once
     # Tenant.trial_expires_at (trial_started_at + this) passes — see
     # app/api/auth.py.
-    trial_days: int = 3
+    trial_days: int = 7
     # Extra days AFTER trial_expires_at before app/worker.py's sweep hard-
     # deletes the tenant — total lifetime of an unpurchased trial is
     # trial_days + this. A real purchase within that window just changes

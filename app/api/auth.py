@@ -89,7 +89,7 @@ async def _check_tenant_access(db: AsyncSession, tenant_id: uuid.UUID) -> None:
     if tenant.plan == "trial" and tenant.trial_expires_at and datetime.now(UTC) > tenant.trial_expires_at:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
-            "Your 3-day trial has ended — upgrade to keep access.",
+            "Your 7-day trial has ended — upgrade to keep access.",
         )
 
 
