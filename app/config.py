@@ -157,6 +157,12 @@ class Settings(BaseSettings):
     ai_image_credits_standard: int = 5
     ai_image_credits_high_res: int = 10
     ai_image_credits_premium: int = 15
+    # One-time free generations a brand-new merchant gets for the onboarding
+    # "Site images" step (hero/why-choose-us/about), standard tier only and
+    # never charged against ai_image_credits (see app/ai_images.py's
+    # claim_onboarding_free). 5 = the three core slots plus two retries.
+    # migrations/071's one-off backfill hardcodes the same 5 — change both.
+    onboarding_free_images: int = 5
 
     # --- trial signup / demo access (app/api/trial.py, app/api/public.py) ---
     # Real SMTP send via Hostinger's mail server — the OTP email is the

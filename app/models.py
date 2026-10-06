@@ -138,6 +138,11 @@ class Tenant(Base, TimestampMixin):
     # text request and an image generation are priced on wildly different
     # scales.
     chat_credits: Mapped[int] = mapped_column(Integer, default=0)
+    # One-time free AI image allowance for the onboarding "Site images" step
+    # (migrations/071). A countdown claimed atomically in
+    # app/ai_images.py's claim_onboarding_free — deliberately NOT part of
+    # ai_image_credits, so paid credits and this gift never mix in the ledger.
+    onboarding_free_images_remaining: Mapped[int] = mapped_column(Integer, default=0)
 
     users: Mapped[list["User"]] = relationship(back_populates="tenant")
 

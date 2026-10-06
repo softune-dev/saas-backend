@@ -254,6 +254,18 @@ class GenerateImageIn(BaseModel):
     # whether its text_addon + TEXT_RENDER_QUALITY get appended, or
     # NO_TEXT_INSTRUCTION instead.
     include_text: bool = True
+    # Exact copy the merchant wants rendered on the image (only used when
+    # include_text is true). Empty/None for any of them = "let AI choose" —
+    # the preset's own text_addon already tells the model to write copy that
+    # fits the business, so a blank field is simply not overridden.
+    headline: str | None = Field(default=None, max_length=80)
+    description: str | None = Field(default=None, max_length=160)
+    button_text: str | None = Field(default=None, max_length=30)
+    # The onboarding "Site images" step's one-time free allowance (see
+    # app/ai_images.py's claim_onboarding_free). Explicit opt-in on purpose:
+    # a normal credit-paid generation never silently burns the free units,
+    # and an exhausted allowance answers 402 instead of quietly charging.
+    use_onboarding_free: bool = False
 
 
 class EditImageIn(BaseModel):
@@ -274,6 +286,8 @@ class GeneratedImageOut(BaseModel):
     mime_type: str
     credits_charged: int
     balance: int
+    # What's left of the one-time onboarding allowance after this call.
+    onboarding_free_remaining: int = 0
 
 
 class TokenOut(BaseModel):

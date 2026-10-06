@@ -177,6 +177,8 @@ PRESET_CATEGORIES: list[dict] = [
     {"id": "category", "label": {"en": "Category", "bn": "ক্যাটাগরি"}},
     {"id": "hero", "label": {"en": "Hero", "bn": "হিরো"}},
     {"id": "bento_showcase", "label": {"en": "Bento", "bn": "বেন্টো"}},
+    {"id": "why_choose_us", "label": {"en": "Why choose us", "bn": "কেন আমরা"}},
+    {"id": "about", "label": {"en": "About us", "bn": "আমাদের সম্পর্কে"}},
 ]
 
 IMAGE_PRESETS: list[dict] = [
@@ -961,6 +963,157 @@ IMAGE_PRESETS: list[dict] = [
             "modern type and the business name beneath it — copy should "
             "genuinely fit this specific business (use the real business "
             "context given above)."
+        ),
+    },
+    # --- Why choose us --- (the storefront renders this image at its own
+    # natural proportions beside the three "why" points, so 1:1 or 4:3 both
+    # sit well; the onboarding step defaults to 1:1.)
+    {
+        "id": "why-craft-closeup",
+        "category": "why_choose_us",
+        "name": {"en": "Craftsmanship Close-up", "bn": "কারুকাজের ক্লোজআপ"},
+        "thumbnail": "/ai-presets/why1.webp",
+        "prompt": (
+            "A premium editorial close-up photograph that shows the care and "
+            "craftsmanship behind {subject}: fine material detail, skilled "
+            "hands at work if people appear (no faces), shallow depth of "
+            "field, warm natural window light, rich tactile texture. "
+            "Authentic, trustworthy, magazine-quality, nothing staged-looking."
+        ),
+        "text_addon": (
+            "In one clear, uncluttered corner, add a small tasteful quality "
+            "tagline of two to four words that reflects a genuine promise "
+            "for this specific business (use the real business context "
+            "given above — do not invent claims it could not honestly make)."
+        ),
+    },
+    {
+        "id": "why-careful-packing",
+        "category": "why_choose_us",
+        "name": {"en": "Careful Packing", "bn": "যত্নে প্যাকিং"},
+        "thumbnail": "/ai-presets/why2.webp",
+        "prompt": (
+            "A beautifully styled photograph of {subject} carefully packed "
+            "and ready to ship: neat plain packaging, tissue paper and twine, "
+            "tidy arrangement on a clean light surface, soft daylight from "
+            "one side. It should say reliable, careful delivery. Do not "
+            "invent a brand logo on the packaging."
+        ),
+        "text_addon": (
+            "On the clean surface, add a short friendly line of two to four "
+            "words about careful delivery that fits this specific business "
+            "(use the real business context given above)."
+        ),
+    },
+    {
+        "id": "why-lifestyle-joy",
+        "category": "why_choose_us",
+        "name": {"en": "Everyday Joy", "bn": "প্রতিদিনের আনন্দ"},
+        "thumbnail": "/ai-presets/why3.webp",
+        "prompt": (
+            "A warm, candid lifestyle photograph of someone in a bright airy "
+            "Bangladeshi home enjoying {subject}: natural relaxed smile, "
+            "soft natural light, shallow depth of field, genuine and "
+            "relatable rather than stiff stock photography."
+        ),
+        "text_addon": (
+            "In a calm area of the frame, add one short warm line of two to "
+            "five words that fits this specific business (use the real "
+            "business context given above)."
+        ),
+    },
+    {
+        "id": "why-studio-quality",
+        "category": "why_choose_us",
+        "name": {"en": "Studio Quality", "bn": "স্টুডিও কোয়ালিটি"},
+        "thumbnail": "/ai-presets/why4.webp",
+        "prompt": (
+            "A clean premium studio photograph of {subject} on a softly lit "
+            "pedestal against a subtle gradient backdrop, crisp detail, "
+            "confident and trustworthy, balanced symmetrical composition "
+            "with generous breathing room around the subject."
+        ),
+        "text_addon": (
+            "Beneath the subject, add a short confident line of two to four "
+            "words about quality that fits this specific business (use the "
+            "real business context given above)."
+        ),
+    },
+    # --- About us --- (the About page crops this to roughly 3:4 / 4:5; no
+    # AI-generated people in this set on purpose — an invented "founder"
+    # portrait on a page that claims to tell the real story would mislead
+    # shoppers.)
+    {
+        "id": "about-hands-at-work",
+        "category": "about",
+        "name": {"en": "Hands at Work", "bn": "কাজের মুহূর্ত"},
+        "thumbnail": "/ai-presets/about1.webp",
+        "prompt": (
+            "An authentic, warm behind-the-scenes photograph of the workspace "
+            "where {subject} is made or prepared: a tidy bench with tools and "
+            "materials, a pair of working hands in frame (no face), natural "
+            "window light, lived-in yet organised, documentary feel, shallow "
+            "depth of field. Vertical composition."
+        ),
+        "text_addon": (
+            "In a calm lower area, add one short brand-story line of under "
+            "six words that fits this specific business (use the real "
+            "business context given above)."
+        ),
+    },
+    {
+        "id": "about-collection-story",
+        "category": "about",
+        "name": {"en": "Our Collection", "bn": "আমাদের সংগ্রহ"},
+        "thumbnail": "/ai-presets/about2.webp",
+        "prompt": (
+            "A thoughtfully arranged overhead flat lay of {subject} as a "
+            "small curated collection on a warm neutral surface, with a few "
+            "natural props (dried leaves, linen, a handwritten-looking note "
+            "without legible words) that hint at the story behind the "
+            "brand. Soft diffused daylight, editorial styling. Vertical "
+            "composition."
+        ),
+        "text_addon": (
+            "On the open surface, add one short elegant brand line of under "
+            "six words that fits this specific business (use the real "
+            "business context given above)."
+        ),
+    },
+    {
+        "id": "about-packing-table",
+        "category": "about",
+        "name": {"en": "Packing Orders", "bn": "অর্ডার প্যাকিং"},
+        "thumbnail": "/ai-presets/about3.webp",
+        "prompt": (
+            "A cosy morning scene of orders of {subject} being packed with "
+            "care at a small business's packing table: wrapped parcels, "
+            "twine, tape, and a stack of finished orders, warm sunlight "
+            "through a window, authentic small-shop atmosphere. Only hands "
+            "may appear, never faces. Vertical composition."
+        ),
+        "text_addon": (
+            "In a calm area of the frame, add one short warm line of under "
+            "six words that fits this specific business (use the real "
+            "business context given above)."
+        ),
+    },
+    {
+        "id": "about-brand-moodboard",
+        "category": "about",
+        "name": {"en": "Brand Mood", "bn": "ব্র্যান্ডের অনুভূতি"},
+        "thumbnail": "/ai-presets/about4.webp",
+        "prompt": (
+            "A calm, elegant editorial still life that captures the feeling "
+            "of a brand selling {subject}: a harmonious palette, tactile "
+            "materials and textures, soft directional light and gentle "
+            "shadows, minimal composition with generous negative space. "
+            "Vertical composition."
+        ),
+        "text_addon": (
+            "In the negative space, add one short refined brand line of "
+            "under six words that fits this specific business (use the real "
+            "business context given above)."
         ),
     },
 ]

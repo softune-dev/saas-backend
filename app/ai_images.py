@@ -32,7 +32,7 @@ import uuid
 
 import httpx
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -207,6 +207,61 @@ async def charge_credits(
     )
     await db.commit()
     return tenant.ai_image_credits
+
+
+async def get_onboarding_free_remaining(db: AsyncSession, tenant_id: uuid.UUID) -> int:
+    return (
+        await db.execute(
+            select(Tenant.onboarding_free_images_remaining).where(Tenant.id == tenant_id)
+        )
+    ).scalar_one()
+
+
+async def claim_onboarding_free(db: AsyncSession, tenant_id: uuid.UUID) -> int:
+    """Spends ONE unit of the one-time onboarding free allowance and returns
+    how many are left. Raises 402 (same "you need to pay" meaning as
+    charge_credits, but a different message prefix so the dashboard can tell
+    "free allowance gone" apart from "not enough credits") when none remain.
+
+    Unlike charge_credits' read-then-write, this is a single atomic UPDATE ...
+    WHERE remaining > 0 RETURNING — two concurrent requests racing for the
+    last unit can't both win, because the second UPDATE's WHERE re-evaluates
+    against the first one's committed value. It also never touches
+    ai_image_credits or the credit ledger: the free allowance is a gift
+    outside the paid balance, on purpose.
+    """
+    remaining = (
+        await db.execute(
+            update(Tenant)
+            .where(Tenant.id == tenant_id, Tenant.onboarding_free_images_remaining > 0)
+            .values(onboarding_free_images_remaining=Tenant.onboarding_free_images_remaining - 1)
+            .returning(Tenant.onboarding_free_images_remaining)
+        )
+    ).scalar_one_or_none()
+    if remaining is None:
+        await db.rollback()
+        raise HTTPException(
+            status.HTTP_402_PAYMENT_REQUIRED,
+            "Your free onboarding images are used up. Upload your own, or buy image credits to keep generating.",
+        )
+    await db.commit()
+    return remaining
+
+
+async def release_onboarding_free(db: AsyncSession, tenant_id: uuid.UUID) -> int:
+    """Gives back the unit claim_onboarding_free took, after a generation
+    that never produced an image — same "never leave them charged for
+    nothing" rule as refund_credits."""
+    remaining = (
+        await db.execute(
+            update(Tenant)
+            .where(Tenant.id == tenant_id)
+            .values(onboarding_free_images_remaining=Tenant.onboarding_free_images_remaining + 1)
+            .returning(Tenant.onboarding_free_images_remaining)
+        )
+    ).scalar_one()
+    await db.commit()
+    return remaining
 
 
 async def refund_credits(

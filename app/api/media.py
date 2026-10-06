@@ -190,7 +190,8 @@ CLEANUP_GRACE = timedelta(hours=24)
 async def _referenced_urls(db: AsyncSession, site: Site) -> set[str]:
     """Every image URL currently pointed at by something real on this site —
     theme (logo/hero/why-us/testimonials), site-wide SEO (OG image, favicon),
-    business info (logo), every category's image, every product's gallery.
+    business info (logo), the About page photo, every category's image,
+    every product's gallery.
     Shared by the cleanup sweep and the gallery's "in use" badge so both
     agree on what "in use" means.
     """
@@ -203,6 +204,12 @@ async def _referenced_urls(db: AsyncSession, site: Site) -> set[str]:
     business = site.business or {}
     if business.get("logo_url"):
         referenced.add(business["logo_url"])
+    # The About page's photo lives in site.about, not the theme — without
+    # this the cleanup sweep treated a saved About image as orphaned and
+    # deleted it after the 24h grace window.
+    about = site.about or {}
+    if about.get("image"):
+        referenced.add(about["image"])
 
     categories = (
         await db.execute(select(CategoryModel).where(CategoryModel.site_id == site.id))

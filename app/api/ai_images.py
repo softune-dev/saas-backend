@@ -9,6 +9,7 @@ per-tier credit costs are both server-side constants (app/ai_images.py).
 
 import base64
 import io
+import re
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -54,9 +55,29 @@ async def list_presets(user: CurrentUser) -> dict:
     }
 
 
+async def _onboarding_allowance_open(db: AsyncSession, tenant_id) -> bool:
+    """The free allowance only exists while a site is still mid-onboarding
+    (onboarding_completed_at IS NULL). Checked server-side, not just by the
+    dashboard hiding the step: once the merchant has finished onboarding,
+    any leftover units are dead — "one time, during setup" is the rule, not
+    "5 free images forever"."""
+    open_site = (
+        await db.execute(
+            select(Site.id).where(Site.tenant_id == tenant_id, Site.onboarding_completed_at.is_(None)).limit(1)
+        )
+    ).scalar_one_or_none()
+    return open_site is not None
+
+
 @router.get("/balance")
 async def get_balance(user: CurrentUser, db: DB) -> dict:
-    return {"balance": await ai_images.get_balance(db, user.tenant_id)}
+    free_remaining = 0
+    if await _onboarding_allowance_open(db, user.tenant_id):
+        free_remaining = await ai_images.get_onboarding_free_remaining(db, user.tenant_id)
+    return {
+        "balance": await ai_images.get_balance(db, user.tenant_id),
+        "onboarding_free_remaining": free_remaining,
+    }
 
 
 async def _business_context_line(db: AsyncSession, tenant_id) -> str:
@@ -82,6 +103,47 @@ async def _business_context_line(db: AsyncSession, tenant_id) -> str:
     return line
 
 
+_BENGALI_CHARS = re.compile(r"[ঀ-৿]")
+
+
+def _clean_copy(value: str | None) -> str:
+    """One line, no double quotes — the merchant's own words, kept from
+    breaking out of the quoted copy block they're embedded in."""
+    return " ".join((value or "").replace('"', "'").split())
+
+
+def _copy_instruction(payload: GenerateImageIn) -> str:
+    """The merchant's exact headline/description/button wording, if they
+    gave any. A blank field is "let AI choose" and is simply not mentioned,
+    so the preset's text_addon still tells the model to write copy that fits
+    the business for every element left blank. Bengali copy gets an explicit
+    script instruction — image models otherwise tend to mangle conjuncts or
+    swap in Latin letters, which is exactly the failure a Bangla storefront
+    can't ship.
+    """
+    fields = [
+        ("headline", _clean_copy(payload.headline)),
+        ("supporting line", _clean_copy(payload.description)),
+        ("button label", _clean_copy(payload.button_text)),
+    ]
+    given = [(label, text) for label, text in fields if text]
+    if not given:
+        return ""
+    listed = "; ".join(f'{label} "{text}"' for label, text in given)
+    instruction = (
+        f"Use EXACTLY this wording, character for character, for these elements: {listed}. "
+        "Do not reword, translate, shorten, or add to them. Any text element not "
+        "listed here you may still write yourself to fit the business."
+    )
+    if any(_BENGALI_CHARS.search(text) for _, text in given):
+        instruction += (
+            " The given copy is in Bengali (Bangla) script: render every letter, "
+            "conjunct (juktakkhor), and vowel sign (matra) correctly in a clean, "
+            "legible Bengali typeface, and never substitute Latin letters for it."
+        )
+    return instruction
+
+
 def _apply_preset(payload: GenerateImageIn) -> str:
     """Builds the base scene prompt (never mentions text) plus, depending on
     payload.include_text, either the preset's own text_addon +
@@ -100,7 +162,11 @@ def _apply_preset(payload: GenerateImageIn) -> str:
         # can't bake text into one either (see ALWAYS_TEXT_FREE_CATEGORIES).
         include_text = payload.include_text and preset["category"] not in ALWAYS_TEXT_FREE_CATEGORIES
         if include_text:
-            prompt += f" {preset['text_addon']} {TEXT_RENDER_QUALITY}"
+            prompt += f" {preset['text_addon']}"
+            copy = _copy_instruction(payload)
+            if copy:
+                prompt += f" {copy}"
+            prompt += f" {TEXT_RENDER_QUALITY}"
         else:
             prompt += f" {NO_TEXT_INSTRUCTION}"
         if payload.prompt and payload.prompt.strip():
@@ -118,7 +184,13 @@ def _apply_preset(payload: GenerateImageIn) -> str:
         if hint:
             prompt += f" {hint}"
         prompt += f" {FREEFORM_QUALITY_BASELINE}"
-        prompt += f" {TEXT_RENDER_QUALITY}" if payload.include_text else f" {NO_TEXT_INSTRUCTION}"
+        if payload.include_text:
+            copy = _copy_instruction(payload)
+            if copy:
+                prompt += f" {copy}"
+            prompt += f" {TEXT_RENDER_QUALITY}"
+        else:
+            prompt += f" {NO_TEXT_INSTRUCTION}"
         return prompt
     raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Need a preset or a prompt to generate an image.")
 
@@ -137,6 +209,10 @@ async def generate(payload: GenerateImageIn, user: CurrentUser, db: DB) -> Gener
     docstrings for why the ordering is this way round, not the reverse).
     """
     prompt = await _resolve_prompt(db, user.tenant_id, payload)
+
+    if payload.use_onboarding_free:
+        return await _generate_with_onboarding_free(payload, prompt, user.tenant_id, db)
+
     credits = ai_images.tier_credit_cost(payload.tier)
     balance = await ai_images.charge_credits(
         db, user.tenant_id, credits, reason="generate", reference=payload.preset_id or "custom"
@@ -156,6 +232,44 @@ async def generate(payload: GenerateImageIn, user: CurrentUser, db: DB) -> Gener
         mime_type=mime_type,
         credits_charged=credits,
         balance=balance,
+    )
+
+
+async def _generate_with_onboarding_free(
+    payload: GenerateImageIn, prompt: str, tenant_id, db: AsyncSession
+) -> GeneratedImageOut:
+    """The onboarding "Site images" step's free path: standard tier only,
+    only while a site is still mid-onboarding, one atomic claim per image
+    (see ai_images.claim_onboarding_free), released again if Gemini fails.
+    Never touches ai_image_credits — credits_charged is always 0 here.
+    """
+    if payload.tier != "standard":
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Free onboarding images are generated at standard quality.",
+        )
+    if not await _onboarding_allowance_open(db, tenant_id):
+        raise HTTPException(
+            status.HTTP_402_PAYMENT_REQUIRED,
+            "Your free onboarding images are used up. Upload your own, or buy image credits to keep generating.",
+        )
+    free_remaining = await ai_images.claim_onboarding_free(db, tenant_id)
+    try:
+        reference_images = [
+            (base64.b64decode(r.data_base64), r.mime_type) for r in payload.reference_images
+        ]
+        image_bytes, mime_type = await ai_images.generate_image(
+            prompt, payload.tier, reference_images or None, payload.aspect_ratio
+        )
+    except Exception:
+        await ai_images.release_onboarding_free(db, tenant_id)
+        raise
+    return GeneratedImageOut(
+        image_base64=base64.b64encode(image_bytes).decode("ascii"),
+        mime_type=mime_type,
+        credits_charged=0,
+        balance=await ai_images.get_balance(db, tenant_id),
+        onboarding_free_remaining=free_remaining,
     )
 
 

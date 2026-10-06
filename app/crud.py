@@ -26,6 +26,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.models import Base
 
 T = TypeVar("T", bound=Base)
@@ -411,7 +412,15 @@ async def create_tenant_owner_and_site(
             break
         slug = f"{base}-{n}"
 
-    tenant = Tenant(slug=slug, name=workspace_name, plan=plan)
+    # Every real (non-demo) tenant starts with the one-time free AI image
+    # allowance for the onboarding "Site images" step — see
+    # app/ai_images.py's claim_onboarding_free for how it's spent.
+    tenant = Tenant(
+        slug=slug,
+        name=workspace_name,
+        plan=plan,
+        onboarding_free_images_remaining=0 if plan == "demo" else settings.onboarding_free_images,
+    )
     if trial_days is not None:
         from datetime import UTC, datetime, timedelta
 
