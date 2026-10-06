@@ -1096,6 +1096,41 @@ class ChatCreditTransaction(Base):
     )
 
 
+class AiUsageLog(Base):
+    """One row per AI call (chat, text generation, theme suggestion, image
+    generate/edit) — the request, the response, tokens and latency, so the
+    operator can audit what the AI actually did. See migrations/072 for the
+    per-kind shapes and why generated image bytes are not kept. Written by
+    app/ai_log.py, read only through /superadmin/ai. No TimestampMixin: a log
+    row is never edited."""
+
+    __tablename__ = "ai_usage_logs"
+
+    id: Mapped[uuid.UUID] = _pk()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    kind: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, default="ok")
+    model: Mapped[str | None] = mapped_column(Text, nullable=True)
+    input: Mapped[dict] = mapped_column(JSONB, default=dict)
+    output: Mapped[dict] = mapped_column(JSONB, default=dict)
+    meta: Mapped[dict] = mapped_column(JSONB, default=dict)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    thumbnail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    gemini_calls: Mapped[int] = mapped_column(Integer, default=0)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+
 class DemoAccessRequest(Base):
     """One row per email that's ever asked for the public demo — an
     outreach list, not a click log (see migrations/050). No TimestampMixin:

@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import ai, ai_actions, ai_forms, ai_tools, chat_credits, crud, mailer
+from app import ai, ai_actions, ai_forms, ai_log, ai_tools, chat_credits, crud, mailer
 from app.config import settings
 from app.db import get_db
 from app.models import PaymentClaim, Site, Tenant, User
@@ -67,9 +67,17 @@ async def suggest(
     # context handed to Gemini is this tenant's row, full stop.
     site = await crud.get_scoped(db, Site, user.tenant_id, site_id)
     plan = await _tenant_plan(db, user.tenant_id)
-    patch = await ai.suggest_theme_patch(
-        payload.prompt, site.theme or {}, str(user.tenant_id), plan
-    )
+    async with ai_log.track(
+        "theme_suggest",
+        tenant_id=user.tenant_id,
+        user_id=user.id,
+        input={"prompt": payload.prompt},
+        meta={"site_id": str(site_id)},
+    ) as tracker:
+        patch = await ai.suggest_theme_patch(
+            payload.prompt, site.theme or {}, str(user.tenant_id), plan
+        )
+        tracker.output = {"patch": patch}
     return AISuggestOut(patch=patch)
 
 
@@ -92,13 +100,22 @@ class ChatOut(BaseModel):
 @chat_router.post("", response_model=ChatOut)
 async def chat(payload: ChatIn, user: CurrentUser, db: DB) -> ChatOut:
     plan = await _tenant_plan(db, user.tenant_id)
-    reply, tools_used, pending_action = await ai.chat_reply(
-        payload.message,
-        [t.model_dump() for t in payload.history],
-        str(user.tenant_id),
-        db,
-        plan,
-    )
+    history = [t.model_dump() for t in payload.history]
+    async with ai_log.track(
+        "chat",
+        tenant_id=user.tenant_id,
+        user_id=user.id,
+        input={"message": payload.message, "history": history},
+        meta={"plan": plan},
+    ) as tracker:
+        reply, tools_used, pending_action = await ai.chat_reply(
+            payload.message, history, str(user.tenant_id), db, plan
+        )
+        tracker.output = {
+            "reply": reply,
+            "tools_used": tools_used,
+            "pending_action": pending_action,
+        }
     if pending_action is not None:
         # Attaches whatever the confirm card needs: the field schema + pre-
         # filled values for the generic form types (see app/ai_forms.py's
@@ -231,9 +248,21 @@ async def generate_ai_text(payload: GenerateTextIn, user: CurrentUser, db: DB) -
     typing it themselves.
     """
     plan = await _tenant_plan(db, user.tenant_id)
-    text = await ai.generate_text(
-        payload.kind, payload.context, payload.current_text, str(user.tenant_id), plan
-    )
+    async with ai_log.track(
+        "generate_text",
+        tenant_id=user.tenant_id,
+        user_id=user.id,
+        input={
+            "kind": payload.kind,
+            "context": payload.context,
+            "current_text": payload.current_text,
+        },
+        meta={"regenerate": bool((payload.current_text or "").strip())},
+    ) as tracker:
+        text = await ai.generate_text(
+            payload.kind, payload.context, payload.current_text, str(user.tenant_id), plan
+        )
+        tracker.output = {"text": text}
     return GenerateTextOut(text=text)
 
 

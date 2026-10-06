@@ -35,6 +35,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import ai_log
 from app.config import settings
 from app.models import AiImageCreditTransaction, Tenant
 
@@ -100,6 +101,7 @@ async def _post_gemini(http_client: httpx.AsyncClient, url: str, *, params: dict
 
         await asyncio.sleep(delay)
         res = await http_client.post(url, params=params, json=json)
+    ai_log.record_gemini(res)
     return res
 
 

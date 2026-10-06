@@ -18,7 +18,7 @@ from PIL import Image
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import ai_images, crud, mailer, media
+from app import ai_images, ai_log, crud, mailer, media
 from app.ai_image_presets import (
     ALWAYS_TEXT_FREE_CATEGORIES,
     FREEFORM_QUALITY_BASELINE,
@@ -201,6 +201,33 @@ async def _resolve_prompt(db: AsyncSession, tenant_id, payload: GenerateImageIn)
     return f"{context}\n\n{prompt}" if context else prompt
 
 
+def _generation_log_input(payload: GenerateImageIn, prompt: str) -> dict:
+    """What the operator needs to judge a generation: the exact prompt that
+    went to the model plus every knob the merchant set. Reference photos are
+    counted, not stored."""
+    return {
+        "prompt_sent": prompt,
+        "merchant_prompt": payload.prompt,
+        "subject": payload.subject,
+        "preset_id": payload.preset_id,
+        "headline": payload.headline,
+        "description": payload.description,
+        "button_text": payload.button_text,
+        "include_text": payload.include_text,
+        "reference_images": len(payload.reference_images),
+    }
+
+
+async def _finish_image_log(tracker: ai_log.Tracker, result: GeneratedImageOut) -> None:
+    tracker.output = {
+        "mime_type": result.mime_type,
+        "credits_charged": result.credits_charged,
+        "balance_after": result.balance,
+        "onboarding_free_remaining": result.onboarding_free_remaining,
+    }
+    tracker.thumbnail = await ai_log.make_thumbnail(base64.b64decode(result.image_base64))
+
+
 @router.post("/generate", response_model=GeneratedImageOut)
 async def generate(payload: GenerateImageIn, user: CurrentUser, db: DB) -> GeneratedImageOut:
     """Charges credits BEFORE calling Gemini, refunds them if the call
@@ -210,29 +237,42 @@ async def generate(payload: GenerateImageIn, user: CurrentUser, db: DB) -> Gener
     """
     prompt = await _resolve_prompt(db, user.tenant_id, payload)
 
-    if payload.use_onboarding_free:
-        return await _generate_with_onboarding_free(payload, prompt, user.tenant_id, db)
-
-    credits = ai_images.tier_credit_cost(payload.tier)
-    balance = await ai_images.charge_credits(
-        db, user.tenant_id, credits, reason="generate", reference=payload.preset_id or "custom"
-    )
-    try:
-        reference_images = [
-            (base64.b64decode(r.data_base64), r.mime_type) for r in payload.reference_images
-        ]
-        image_bytes, mime_type = await ai_images.generate_image(
-            prompt, payload.tier, reference_images or None, payload.aspect_ratio
-        )
-    except Exception:
-        await ai_images.refund_credits(db, user.tenant_id, credits, reference="generate-failed")
-        raise
-    return GeneratedImageOut(
-        image_base64=base64.b64encode(image_bytes).decode("ascii"),
-        mime_type=mime_type,
-        credits_charged=credits,
-        balance=balance,
-    )
+    async with ai_log.track(
+        "image_generate",
+        tenant_id=user.tenant_id,
+        user_id=user.id,
+        input=_generation_log_input(payload, prompt),
+        meta={
+            "tier": payload.tier,
+            "aspect_ratio": payload.aspect_ratio,
+            "free_onboarding": payload.use_onboarding_free,
+        },
+    ) as tracker:
+        if payload.use_onboarding_free:
+            result = await _generate_with_onboarding_free(payload, prompt, user.tenant_id, db)
+        else:
+            credits = ai_images.tier_credit_cost(payload.tier)
+            balance = await ai_images.charge_credits(
+                db, user.tenant_id, credits, reason="generate", reference=payload.preset_id or "custom"
+            )
+            try:
+                reference_images = [
+                    (base64.b64decode(r.data_base64), r.mime_type) for r in payload.reference_images
+                ]
+                image_bytes, mime_type = await ai_images.generate_image(
+                    prompt, payload.tier, reference_images or None, payload.aspect_ratio
+                )
+            except Exception:
+                await ai_images.refund_credits(db, user.tenant_id, credits, reference="generate-failed")
+                raise
+            result = GeneratedImageOut(
+                image_base64=base64.b64encode(image_bytes).decode("ascii"),
+                mime_type=mime_type,
+                credits_charged=credits,
+                balance=balance,
+            )
+        await _finish_image_log(tracker, result)
+        return result
 
 
 async def _generate_with_onboarding_free(
@@ -279,26 +319,36 @@ async def edit(payload: EditImageIn, user: CurrentUser, db: DB) -> GeneratedImag
     cheaper "just a tweak" price, so there's no way to game the tier
     pricing into a discount loop (see app/ai_images.py's top docstring).
     """
-    credits = ai_images.tier_credit_cost(payload.tier)
-    balance = await ai_images.charge_credits(db, user.tenant_id, credits, reason="edit")
-    try:
-        context = await _business_context_line(db, user.tenant_id)
-        instruction = payload.prompt
-        instruction += f" {TEXT_RENDER_QUALITY}" if payload.include_text else f" {NO_TEXT_INSTRUCTION}"
-        prompt = f"{context}\n\n{instruction}" if context else instruction
-        source_bytes = base64.b64decode(payload.source_image.data_base64)
-        image_bytes, mime_type = await ai_images.generate_image(
-            prompt, payload.tier, [(source_bytes, payload.source_image.mime_type)], payload.aspect_ratio
+    async with ai_log.track(
+        "image_edit",
+        tenant_id=user.tenant_id,
+        user_id=user.id,
+        input={"merchant_prompt": payload.prompt, "include_text": payload.include_text},
+        meta={"tier": payload.tier, "aspect_ratio": payload.aspect_ratio},
+    ) as tracker:
+        credits = ai_images.tier_credit_cost(payload.tier)
+        balance = await ai_images.charge_credits(db, user.tenant_id, credits, reason="edit")
+        try:
+            context = await _business_context_line(db, user.tenant_id)
+            instruction = payload.prompt
+            instruction += f" {TEXT_RENDER_QUALITY}" if payload.include_text else f" {NO_TEXT_INSTRUCTION}"
+            prompt = f"{context}\n\n{instruction}" if context else instruction
+            tracker.input["prompt_sent"] = prompt
+            source_bytes = base64.b64decode(payload.source_image.data_base64)
+            image_bytes, mime_type = await ai_images.generate_image(
+                prompt, payload.tier, [(source_bytes, payload.source_image.mime_type)], payload.aspect_ratio
+            )
+        except Exception:
+            await ai_images.refund_credits(db, user.tenant_id, credits, reference="edit-failed")
+            raise
+        result = GeneratedImageOut(
+            image_base64=base64.b64encode(image_bytes).decode("ascii"),
+            mime_type=mime_type,
+            credits_charged=credits,
+            balance=balance,
         )
-    except Exception:
-        await ai_images.refund_credits(db, user.tenant_id, credits, reference="edit-failed")
-        raise
-    return GeneratedImageOut(
-        image_base64=base64.b64encode(image_bytes).decode("ascii"),
-        mime_type=mime_type,
-        credits_charged=credits,
-        balance=balance,
-    )
+        await _finish_image_log(tracker, result)
+        return result
 
 
 @router.post("/save-to-gallery")

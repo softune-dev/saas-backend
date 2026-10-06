@@ -23,6 +23,7 @@ from app.api import (
     push,
     sites,
     superadmin,
+    superadmin_ai,
     trial,
 )
 from app.security import block_demo_writes
@@ -67,6 +68,7 @@ api_router.include_router(ai_images.router, dependencies=_demo_guard)
 # and this router's own SuperAdminUser dependency (app/security.py) is a
 # stricter gate than block_demo_writes anyway. See superadmin.py's docstring.
 api_router.include_router(superadmin.router)
+api_router.include_router(superadmin_ai.router)
 # NOT gated by _demo_guard — trial signup has no tenant/site at all until
 # POST /trial/complete creates one, and there's no bearer token during
 # signup for block_demo_writes (which resolves CurrentUser) to even check.

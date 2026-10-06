@@ -28,7 +28,7 @@ import httpx
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import ai_tools, cache
+from app import ai_log, ai_tools, cache
 from app.config import settings
 
 log = logging.getLogger(__name__)
@@ -90,6 +90,7 @@ async def _post_gemini(
             break
         await asyncio.sleep(delay)
         res = await http_client.post(url, params=params, json=json)
+    ai_log.record_gemini(res)
     return res
 
 # Every field the AI is allowed to suggest, and how each value is validated.
