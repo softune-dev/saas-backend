@@ -4,6 +4,7 @@ Run it with:   uvicorn app.main:app --reload
 Interactive docs:   http://localhost:8000/docs
 """
 
+import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -13,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
-from app import cache, queue
+from app import cache, metrics, queue
 from app.api import api_router
 from app.config import settings
 from app.db import engine
@@ -57,8 +58,11 @@ async def lifespan(_: FastAPI):
     except Exception:  # noqa: BLE001
         log.warning("rabbitmq: not available - jobs will be skipped")
 
+    sampler = asyncio.create_task(metrics.sampler_loop())
+
     yield
 
+    sampler.cancel()
     await cache.close()
     await queue.close()
     await engine.dispose()
@@ -279,6 +283,8 @@ async def timing_header(request: Request, call_next):
     response = await call_next(request)
     elapsed = (time.perf_counter() - started) * 1000
     response.headers["X-Response-Time-ms"] = f"{elapsed:.1f}"
+    route = request.scope.get("route")
+    metrics.observe(elapsed, response.status_code, getattr(route, "path", None))
     if elapsed > 500:
         log.warning("SLOW %s %s took %.0fms", request.method, request.url.path, elapsed)
     return response

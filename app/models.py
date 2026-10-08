@@ -1131,6 +1131,30 @@ class AiUsageLog(Base):
     )
 
 
+class SystemHealthSample(Base):
+    """One row per API process per minute: request count, 5xx count, latency
+    percentiles, slowest routes and a ping of the database / Redis / RabbitMQ.
+    Written by app/metrics.py's sampler, read only through /superadmin/health
+    to draw load and latency curves. See migrations/073."""
+
+    __tablename__ = "system_health_samples"
+
+    id: Mapped[uuid.UUID] = _pk()
+    sampled_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+    requests: Mapped[int] = mapped_column(Integer, default=0)
+    errors_5xx: Mapped[int] = mapped_column(Integer, default=0)
+    p50_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    p95_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    db_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    redis_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rabbit_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    queue_depth: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    top_routes: Mapped[list] = mapped_column(JSONB, default=list)
+
+
 class DemoAccessRequest(Base):
     """One row per email that's ever asked for the public demo — an
     outreach list, not a click log (see migrations/050). No TimestampMixin:
