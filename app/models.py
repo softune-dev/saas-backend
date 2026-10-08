@@ -1188,6 +1188,28 @@ class EmailCampaign(Base):
     )
 
 
+class AdminAuditLog(Base):
+    """One action a platform operator took in /superadmin. target_id is
+    plain text (no FK) so the row outlives what it describes. Written by
+    app/audit.py. See migrations/076. No TimestampMixin: never edited."""
+
+    __tablename__ = "admin_audit_logs"
+
+    id: Mapped[uuid.UUID] = _pk()
+    actor_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    actor_email: Mapped[str] = mapped_column(Text)
+    action: Mapped[str] = mapped_column(Text)
+    target_type: Mapped[str] = mapped_column(Text)
+    target_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    target_label: Mapped[str | None] = mapped_column(Text, nullable=True)
+    details: Mapped[dict] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+
 class DemoAccessRequest(Base):
     """One row per email that's ever asked for the public demo — an
     outreach list, not a click log (see migrations/050). No TimestampMixin:

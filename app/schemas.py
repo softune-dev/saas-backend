@@ -1197,6 +1197,11 @@ class SuperAdminSiteOut(ORMModel):
     custom_domain: str | None
     status: str
     template_key: str | None
+    # The storefront's display name and uploaded logo (theme.logoImage when
+    # logoType is "image"), so admin tables can show the brand, not initials.
+    name: str | None = None
+    logo_url: str | None = None
+    pending_custom_domain: str | None = None
 
 
 class SuperAdminTenantOut(ORMModel):
@@ -1270,6 +1275,9 @@ class SuperAdminUserOut(ORMModel):
     is_superadmin: bool
     last_login_at: datetime | None
     created_at: datetime
+    # The picture the user chose in their account settings (an upload or one of
+    # the preset avatars). None means they never picked one.
+    avatar_url: str | None = None
     # Which storefront(s) this user's tenant actually runs — see
     # SuperAdminTenantOut.sites' own comment. Duplicated onto the user here
     # (not just the tenant) because an operator looking at a user is usually
@@ -1447,6 +1455,9 @@ class SuperAdminDemoAccessOut(ORMModel):
     request_count: int
     first_requested_at: datetime
     last_requested_at: datetime
+    # True once this email belongs to a real account, i.e. the lead converted.
+    converted: bool = False
+    converted_tenant: str | None = None
 
 
 class DemoAccessIn(BaseModel):
@@ -1605,6 +1616,9 @@ class HelpTicketOut(ORMModel):
     message: str
     created_at: datetime
     updated_at: datetime
+    tenant_logo_url: str | None = None
+    user_name: str | None = None
+    user_avatar_url: str | None = None
 
     @computed_field
     @property

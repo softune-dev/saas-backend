@@ -28,7 +28,7 @@ from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import ai_images, cache, chat_credits as chat_credits_module, crud, invoices as invoices_module, mailer, media, queue, vercel
+from app import ai_images, audit, cache, chat_credits as chat_credits_module, crud, invoices as invoices_module, mailer, media, queue, vercel
 from app.config import settings
 from app.db import get_db
 from app.models import (
@@ -126,6 +126,16 @@ async def get_stats(admin: SuperAdminUser, db: DB) -> dict:
 # =============================================================================
 
 
+def site_logo_url(theme: dict | None) -> str | None:
+    """The storefront logo, if the merchant uploaded one (logoType "image").
+    A text logo has nothing to show, so it returns None."""
+    theme = theme or {}
+    url = theme.get("logoImage")
+    if theme.get("logoType") == "image" and isinstance(url, str) and url.startswith("http"):
+        return url
+    return None
+
+
 async def _sites_for_tenants(
     db: AsyncSession, tenant_ids: list[uuid.UUID]
 ) -> dict[uuid.UUID, list[SuperAdminSiteOut]]:
@@ -151,6 +161,8 @@ async def _sites_for_tenants(
             SuperAdminSiteOut(
                 id=site.id, subdomain=site.subdomain, custom_domain=site.custom_domain,
                 status=site.status, template_key=template_key,
+                name=site.name, logo_url=site_logo_url(site.theme),
+                pending_custom_domain=site.pending_custom_domain,
             )
         )
     return out
@@ -293,6 +305,10 @@ async def create_account(
         full_name=payload.full_name,
     )
     tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
+    await audit.record(
+        admin, "tenant.create", "tenant", tenant.id, tenant.name,
+        {"plan": payload.plan, "owner": payload.email, "subdomain": payload.subdomain},
+    )
     aggregates = (await _tenant_aggregates(db, [tenant.id]))[tenant.id]
     sites = (await _sites_for_tenants(db, [tenant.id]))[tenant.id]
     return _tenant_out(tenant, aggregates, sites)
@@ -306,8 +322,17 @@ async def update_tenant(
     if tenant is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Tenant not found")
     old_plan = tenant.plan
+    old_status = tenant.status
     tenant = crud.apply_updates(tenant, payload.model_dump(exclude_unset=True))
     tenant = await crud.save(db, tenant)
+    changes = {}
+    if payload.plan is not None and payload.plan != old_plan:
+        changes["plan"] = [old_plan, payload.plan]
+    if payload.status is not None and payload.status != old_status:
+        changes["status"] = [old_status, payload.status]
+    if changes:
+        action = "tenant.suspend" if changes.get("status", [None, None])[1] == "suspended" else "tenant.update"
+        await audit.record(admin, action, "tenant", tenant.id, tenant.name, changes)
 
     # A real invoice the moment the team manually switches a tenant onto a
     # (possibly different) paid plan — see migrations/053's own docstring on
@@ -393,6 +418,10 @@ async def confirm_plan_renewal(tenant_id: uuid.UUID, admin: SuperAdminUser, db: 
     if tenant.status == "payment_overdue":
         tenant.status = "active"
     tenant = await crud.save(db, tenant)
+    await audit.record(
+        admin, "tenant.renewal_confirmed", "tenant", tenant.id, tenant.name,
+        {"plan": tenant.plan, "renews_at": tenant.plan_renews_at.isoformat()},
+    )
 
     invoice = Invoice(
         tenant_id=tenant.id,
@@ -427,6 +456,10 @@ async def grant_image_credits(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Tenant not found")
 
     await ai_images.grant_credits(db, tenant.id, payload.amount, reason="grant", reference=payload.note)
+    await audit.record(
+        admin, "credits.grant_image", "tenant", tenant.id, tenant.name,
+        {"amount": payload.amount, "note": payload.note},
+    )
     await db.refresh(tenant)
 
     aggregates = (await _tenant_aggregates(db, [tenant.id]))[tenant.id]
@@ -447,6 +480,10 @@ async def grant_chat_credits(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Tenant not found")
 
     await chat_credits_module.grant_credits(db, tenant.id, payload.amount, reason="grant", reference=payload.note)
+    await audit.record(
+        admin, "credits.grant_chat", "tenant", tenant.id, tenant.name,
+        {"amount": payload.amount, "note": payload.note},
+    )
     await db.refresh(tenant)
 
     aggregates = (await _tenant_aggregates(db, [tenant.id]))[tenant.id]
@@ -485,8 +522,13 @@ async def delete_tenant(tenant_id: uuid.UUID, admin: SuperAdminUser, db: DB) -> 
     # reports as a CORS failure, since the response never got that far).
     # Same fix as this session's test-cleanup fixture hit earlier: trust
     # the database's own cascade instead of the ORM's.
+    tenant_name, tenant_plan = tenant.name, tenant.plan
     await db.execute(text("DELETE FROM tenants WHERE id = :id"), {"id": tenant_id})
     await db.commit()
+    await audit.record(
+        admin, "tenant.delete", "tenant", tenant_id, tenant_name,
+        {"plan": tenant_plan, "sites": [s.subdomain for s in sites]},
+    )
 
     for site in sites:
         await cache.invalidate_site(site.subdomain, site.custom_domain)
@@ -535,7 +577,7 @@ async def list_tickets(
     if status_filter:
         filters.append(HelpTicket.status == status_filter)
 
-    base_query = select(HelpTicket, Tenant.name, User.email).join(
+    base_query = select(HelpTicket, Tenant.name, User.email, User.full_name, User.avatar_url).join(
         Tenant, HelpTicket.tenant_id == Tenant.id
     ).join(User, HelpTicket.user_id == User.id)
 
@@ -553,13 +595,16 @@ async def list_tickets(
             .limit(limit).offset(offset)
         )
     ).all()
+    sites = await _sites_for_tenants(db, list({r[0].tenant_id for r in rows}))
     items = [
         SuperAdminTicketOut(
             id=t.id, ticket_number=t.ticket_number, tenant_id=t.tenant_id, tenant_name=tenant_name,
             user_email=user_email, subject=t.subject, category=t.category, priority=t.priority,
             status=t.status, message=t.message, created_at=t.created_at, updated_at=t.updated_at,
+            tenant_logo_url=next((s.logo_url for s in sites.get(t.tenant_id, []) if s.logo_url), None),
+            user_name=user_name, user_avatar_url=avatar_url,
         )
-        for t, tenant_name, user_email in rows
+        for t, tenant_name, user_email, user_name, avatar_url in rows
     ]
     return {"items": items, "total": total, "limit": limit, "offset": offset}
 
@@ -597,6 +642,10 @@ async def reply_to_ticket(
 
     ticket.status = "Replied"
     await crud.save(db, ticket)
+    await audit.record(
+        admin, "ticket.reply", "ticket", ticket.id, f"TKT-{ticket.ticket_number:05d}",
+        {"tenant_id": str(ticket.tenant_id)},
+    )
 
     ticket_user = (await db.execute(select(User).where(User.id == ticket.user_id))).scalar_one()
     ticket_number_display = f"TKT-{ticket.ticket_number:05d}"
@@ -626,8 +675,14 @@ async def update_ticket(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Ticket not found")
     ticket, tenant_name, user_email = row
 
+    old_ticket_status = ticket.status
     ticket = crud.apply_updates(ticket, payload.model_dump(exclude_unset=True))
     ticket = await crud.save(db, ticket)
+    if ticket.status != old_ticket_status:
+        await audit.record(
+            admin, "ticket.status", "ticket", ticket.id, f"TKT-{ticket.ticket_number:05d}",
+            {"status": [old_ticket_status, ticket.status], "tenant_id": str(ticket.tenant_id)},
+        )
     return SuperAdminTicketOut(
         id=ticket.id, ticket_number=ticket.ticket_number, tenant_id=ticket.tenant_id,
         tenant_name=tenant_name, user_email=user_email, subject=ticket.subject,
@@ -672,7 +727,7 @@ async def list_users(
             id=u.id, tenant_id=u.tenant_id, tenant_name=tenant_name, email=u.email,
             full_name=u.full_name, phone=u.phone, role=u.role, is_active=u.is_active,
             is_superadmin=u.is_superadmin, last_login_at=u.last_login_at,
-            created_at=u.created_at, sites=sites[u.tenant_id],
+            created_at=u.created_at, sites=sites[u.tenant_id], avatar_url=u.avatar_url,
         )
         for u, tenant_name in rows
     ]
@@ -701,12 +756,16 @@ async def create_user(payload: SuperAdminUserCreateIn, admin: SuperAdminUser, db
         role=payload.role,
     )
     user = await crud.save(db, user)
+    await audit.record(
+        admin, "user.create", "user", user.id, user.email,
+        {"tenant": tenant.name, "role": user.role, "tenant_id": str(tenant.id)},
+    )
     sites = (await _sites_for_tenants(db, [user.tenant_id]))[user.tenant_id]
     return SuperAdminUserOut(
         id=user.id, tenant_id=user.tenant_id, tenant_name=tenant.name, email=user.email,
         full_name=user.full_name, phone=user.phone, role=user.role, is_active=user.is_active,
         is_superadmin=user.is_superadmin, last_login_at=user.last_login_at,
-        created_at=user.created_at, sites=sites,
+        created_at=user.created_at, sites=sites, avatar_url=user.avatar_url,
     )
 
 
@@ -726,6 +785,7 @@ async def update_user(
 
     data = payload.model_dump(exclude_unset=True)
     new_password = data.pop("new_password", None)
+    before = {k: getattr(user, k) for k in data}
     user = crud.apply_updates(user, data)
     if new_password:
         user.password_hash = hash_password(new_password)
@@ -735,13 +795,21 @@ async def update_user(
     # effect immediately, not wait out the access token's own expiry — same
     # reasoning as /auth/change-password.
     await revoke_all_user_tokens(user.id)
+    user_changes = {k: [before[k], v] for k, v in data.items() if before[k] != v}
+    if new_password:
+        user_changes["password"] = "reset"
+    if user_changes:
+        await audit.record(
+            admin, "user.password_reset" if list(user_changes) == ["password"] else "user.update",
+            "user", user.id, user.email, user_changes | {"tenant_id": str(user.tenant_id)},
+        )
 
     sites = (await _sites_for_tenants(db, [user.tenant_id]))[user.tenant_id]
     return SuperAdminUserOut(
         id=user.id, tenant_id=user.tenant_id, tenant_name=tenant_name, email=user.email,
         full_name=user.full_name, phone=user.phone, role=user.role, is_active=user.is_active,
         is_superadmin=user.is_superadmin, last_login_at=user.last_login_at,
-        created_at=user.created_at, sites=sites,
+        created_at=user.created_at, sites=sites, avatar_url=user.avatar_url,
     )
 
 
@@ -773,7 +841,27 @@ async def list_demo_requests(
             .limit(limit).offset(offset)
         )
     ).scalars().all()
-    return {"items": rows, "total": total, "limit": limit, "offset": offset}
+    # A lead "converted" once their email belongs to a real account.
+    converted = {
+        email.lower(): tenant_name
+        for email, tenant_name in (
+            await db.execute(
+                select(User.email, Tenant.name)
+                .join(Tenant, Tenant.id == User.tenant_id)
+                .where(func.lower(User.email).in_([r.email.lower() for r in rows]))
+            )
+        ).all()
+    } if rows else {}
+    items = [
+        SuperAdminDemoAccessOut(
+            id=r.id, email=r.email, ip=r.ip, request_count=r.request_count,
+            first_requested_at=r.first_requested_at, last_requested_at=r.last_requested_at,
+            converted=r.email.lower() in converted,
+            converted_tenant=converted.get(r.email.lower()),
+        )
+        for r in rows
+    ]
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
 @router.post("/demo-requests/{request_id}/send-marketing-email", status_code=status.HTTP_204_NO_CONTENT)
@@ -788,6 +876,7 @@ async def send_demo_marketing_email(request_id: uuid.UUID, admin: SuperAdminUser
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Demo request not found")
 
     subject, html_body, text_body = mailer.demo_followup_email()
+    await audit.record(admin, "demo.followup_email", "demo_lead", row.id, row.email)
     await queue.publish(
         queue.JOB_SEND_EMAIL,
         {"to": row.email, "subject": subject, "html_body": html_body, "text_body": text_body},
@@ -834,4 +923,8 @@ async def detach_orphaned_vercel_domains(
     for item in payload.domains:
         ok = await vercel.remove_domain_from_project(item.domain, item.project_id)
         results.append({"domain": item.domain, "success": ok})
+    await audit.record(
+        admin, "vercel.detach", "vercel", None, f"{len(results)} domains",
+        {"domains": [r["domain"] for r in results if r["success"]]},
+    )
     return {"results": results}

@@ -22,7 +22,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import metrics
 from app.config import settings
 from app.db import get_db
-from app.models import AiUsageLog, Invoice, Order, SystemHealthSample, Tenant, User
+from app.api.superadmin import site_logo_url
+from app.models import AiUsageLog, Invoice, Order, Site, SystemHealthSample, Tenant, User
 from app.schemas import ORMModel
 from app.security import SuperAdminUser
 
@@ -62,6 +63,7 @@ class TenantBrief(ORMModel):
     id: uuid.UUID
     name: str
     plan: str
+    logo_url: str | None = None
     status: str
     created_at: datetime
     trial_expires_at: datetime | None
@@ -232,6 +234,17 @@ async def overview(
         await db.execute(select(Tenant).order_by(Tenant.created_at.desc()).limit(8))
     ).scalars().all()
 
+    listed = {t.id for t in [*recent, *expiring_rows, *attention_rows]}
+    logos: dict = {}
+    if listed:
+        for tid, theme in (
+            await db.execute(
+                select(Site.tenant_id, Site.theme).where(Site.tenant_id.in_(listed)).order_by(Site.created_at)
+            )
+        ).all():
+            if logos.get(tid) is None:
+                logos[tid] = site_logo_url(theme)
+
     plan_rows = (
         await db.execute(select(Tenant.plan, func.count(Tenant.id)).group_by(Tenant.plan))
     ).all()
@@ -253,9 +266,9 @@ async def overview(
         "series": series,
         "plans": dict(plan_rows),
         "statuses": dict(status_rows),
-        "recent_tenants": [_brief(t) for t in recent],
-        "expiring_trials": [_brief(t) for t in expiring_rows],
-        "attention": [_brief(t) for t in attention_rows],
+        "recent_tenants": [_brief(t) | {"logo_url": logos.get(t.id)} for t in recent],
+        "expiring_trials": [_brief(t) | {"logo_url": logos.get(t.id)} for t in expiring_rows],
+        "attention": [_brief(t) | {"logo_url": logos.get(t.id)} for t in attention_rows],
     }
 
 

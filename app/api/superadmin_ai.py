@@ -17,7 +17,8 @@ from sqlalchemy import Integer, Text, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
-from app.models import AiUsageLog, Tenant, User
+from app.api.superadmin import site_logo_url
+from app.models import AiUsageLog, Site, Tenant, User
 from app.schemas import ORMModel, Page
 from app.security import SuperAdminUser
 
@@ -36,6 +37,8 @@ class AiUsageItemOut(ORMModel):
     tenant_name: str
     user_id: uuid.UUID | None
     user_email: str | None
+    tenant_logo_url: str | None = None
+    user_avatar_url: str | None = None
     kind: str
     status: str
     model: str | None
@@ -128,8 +131,16 @@ def _preview(kind: str, input_: dict, output: dict) -> str:
     return text[:200]
 
 
-def _item(row: AiUsageLog, tenant_name: str, user_email: str | None) -> dict:
+def _item(
+    row: AiUsageLog,
+    tenant_name: str,
+    user_email: str | None,
+    avatar_url: str | None = None,
+    logo_url: str | None = None,
+) -> dict:
     return {
+        "tenant_logo_url": logo_url,
+        "user_avatar_url": avatar_url,
         "id": row.id,
         "created_at": row.created_at,
         "tenant_id": row.tenant_id,
@@ -194,7 +205,7 @@ async def list_usage(
     ).scalar_one()
     rows = (
         await db.execute(
-            select(AiUsageLog, Tenant.name, User.email)
+            select(AiUsageLog, Tenant.name, User.email, User.avatar_url)
             .join(Tenant, Tenant.id == AiUsageLog.tenant_id)
             .outerjoin(User, User.id == AiUsageLog.user_id)
             .where(*filters)
@@ -203,8 +214,21 @@ async def list_usage(
             .offset(offset)
         )
     ).all()
+    logos: dict[uuid.UUID, str | None] = {}
+    tenant_ids = list({r.tenant_id for r, *_ in rows})
+    if tenant_ids:
+        for tid, theme in (
+            await db.execute(
+                select(Site.tenant_id, Site.theme).where(Site.tenant_id.in_(tenant_ids)).order_by(Site.created_at)
+            )
+        ).all():
+            if logos.get(tid) is None:
+                logos[tid] = site_logo_url(theme)
     return {
-        "items": [_item(r, tenant_name, email) for r, tenant_name, email in rows],
+        "items": [
+            _item(r, tenant_name, email, avatar, logos.get(r.tenant_id))
+            for r, tenant_name, email, avatar in rows
+        ],
         "total": total,
         "limit": limit,
         "offset": offset,
@@ -215,7 +239,7 @@ async def list_usage(
 async def get_usage(log_id: uuid.UUID, admin: SuperAdminUser, db: DB) -> dict:
     row = (
         await db.execute(
-            select(AiUsageLog, Tenant.name, User.email)
+            select(AiUsageLog, Tenant.name, User.email, User.avatar_url)
             .join(Tenant, Tenant.id == AiUsageLog.tenant_id)
             .outerjoin(User, User.id == AiUsageLog.user_id)
             .where(AiUsageLog.id == log_id)
@@ -223,9 +247,9 @@ async def get_usage(log_id: uuid.UUID, admin: SuperAdminUser, db: DB) -> dict:
     ).first()
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
-    log, tenant_name, email = row
+    log, tenant_name, email, avatar = row
     return {
-        **_item(log, tenant_name, email),
+        **_item(log, tenant_name, email, avatar),
         "input": log.input or {},
         "output": log.output or {},
         "meta": log.meta or {},

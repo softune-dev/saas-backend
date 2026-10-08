@@ -69,3 +69,41 @@ def test_clip_shortens_long_strings_recursively():
     clipped = ai_log._clip({"a": [long], "b": "short"})
     assert clipped["a"][0].endswith("[truncated]")
     assert clipped["b"] == "short"
+
+
+async def test_chat_endpoint_logs_the_call_for_a_real_logged_in_user(account):
+    """Regression: the endpoint passed `user.id`, but a request's principal only
+    has `user_id`, which turned every AI call into a 500 in production. Whatever
+    the model does (here: no key, so a clean 4xx/5xx from the AI layer), the
+    request must get past the logging wrapper and leave an audit row."""
+    from sqlalchemy import select
+
+    from app.db import SessionLocal
+    from app.models import AiUsageLog
+
+    res = await account.post("/ai/chat", json={"message": "how many orders do I have?"})
+    assert res.status_code != 500 or "Principal" not in res.text
+    async with SessionLocal() as db:
+        rows = (
+            await db.execute(select(AiUsageLog).where(AiUsageLog.tenant_id == account.tenant_id))
+        ).scalars().all()
+    assert rows and rows[0].kind == "chat" and rows[0].user_id is not None
+
+
+async def test_audit_record_accepts_a_request_principal(account):
+    from sqlalchemy import select
+
+    from app import audit
+    from app.db import SessionLocal
+    from app.models import AdminAuditLog, User
+    from app.security import Principal
+
+    async with SessionLocal() as db:
+        user = (await db.execute(select(User).where(User.email == account.email))).scalar_one()
+    actor = Principal(user_id=user.id, tenant_id=user.tenant_id, role="owner", is_superadmin=True)
+    await audit.record(actor, "test.action", "tenant", account.tenant_id, "Test WS")
+    async with SessionLocal() as db:
+        row = (
+            await db.execute(select(AdminAuditLog).where(AdminAuditLog.target_id == account.tenant_id))
+        ).scalars().first()
+    assert row is not None and row.actor_email == account.email

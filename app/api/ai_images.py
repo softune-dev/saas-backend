@@ -240,7 +240,7 @@ async def generate(payload: GenerateImageIn, user: CurrentUser, db: DB) -> Gener
     async with ai_log.track(
         "image_generate",
         tenant_id=user.tenant_id,
-        user_id=user.id,
+        user_id=user.user_id,
         input=_generation_log_input(payload, prompt),
         meta={
             "tier": payload.tier,
@@ -322,7 +322,7 @@ async def edit(payload: EditImageIn, user: CurrentUser, db: DB) -> GeneratedImag
     async with ai_log.track(
         "image_edit",
         tenant_id=user.tenant_id,
-        user_id=user.id,
+        user_id=user.user_id,
         input={"merchant_prompt": payload.prompt, "include_text": payload.include_text},
         meta={"tier": payload.tier, "aspect_ratio": payload.aspect_ratio},
     ) as tracker:

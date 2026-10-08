@@ -70,7 +70,7 @@ async def suggest(
     async with ai_log.track(
         "theme_suggest",
         tenant_id=user.tenant_id,
-        user_id=user.id,
+        user_id=user.user_id,
         input={"prompt": payload.prompt},
         meta={"site_id": str(site_id)},
     ) as tracker:
@@ -104,7 +104,7 @@ async def chat(payload: ChatIn, user: CurrentUser, db: DB) -> ChatOut:
     async with ai_log.track(
         "chat",
         tenant_id=user.tenant_id,
-        user_id=user.id,
+        user_id=user.user_id,
         input={"message": payload.message, "history": history},
         meta={"plan": plan},
     ) as tracker:
@@ -251,7 +251,7 @@ async def generate_ai_text(payload: GenerateTextIn, user: CurrentUser, db: DB) -
     async with ai_log.track(
         "generate_text",
         tenant_id=user.tenant_id,
-        user_id=user.id,
+        user_id=user.user_id,
         input={
             "kind": payload.kind,
             "context": payload.context,

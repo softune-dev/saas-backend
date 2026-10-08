@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import mailer, queue
+from app import audit, mailer, queue
 from app.db import get_db
 from app.models import DemoAccessRequest, EmailCampaign, Tenant, User
 from app.schemas import ORMModel, Page
@@ -221,7 +221,7 @@ async def send_campaign(payload: SendIn, admin: SuperAdminUser, db: DB) -> dict:
 
     html_body, text_body = _render(payload)
     campaign = EmailCampaign(
-        created_by=admin.id,
+        created_by=admin.user_id,
         subject=payload.subject,
         headline=payload.headline,
         body=payload.body,
@@ -236,13 +236,17 @@ async def send_campaign(payload: SendIn, admin: SuperAdminUser, db: DB) -> dict:
     db.add(campaign)
     await db.commit()
     await db.refresh(campaign)
+    await audit.record(
+        admin, "campaign.send", "campaign", campaign.id, payload.subject,
+        {"recipients": len(emails), "audience": payload.audience.kind},
+    )
 
     for email in emails:
         await queue.publish(
             queue.JOB_SEND_EMAIL,
             {"to": email, "subject": payload.subject, "html_body": html_body, "text_body": text_body},
         )
-    return _out(campaign, admin.email)
+    return _out(campaign, await audit.email_of(admin))
 
 
 def _out(c: EmailCampaign, created_by_email: str | None) -> dict:
