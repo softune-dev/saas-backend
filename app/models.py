@@ -1155,6 +1155,33 @@ class SystemHealthSample(Base):
     top_routes: Mapped[list] = mapped_column(JSONB, default=list)
 
 
+class EmailCampaign(Base):
+    """One operator-sent marketing email (superadmin "Email campaigns").
+    audience records the filter used and recipient_count how many people it
+    resolved to at send time. Each recipient was queued as its own
+    JOB_SEND_EMAIL, so delivery per recipient is not tracked here. See
+    migrations/074. No TimestampMixin: a campaign is never edited."""
+
+    __tablename__ = "email_campaigns"
+
+    id: Mapped[uuid.UUID] = _pk()
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    subject: Mapped[str] = mapped_column(Text)
+    headline: Mapped[str] = mapped_column(Text, default="")
+    body: Mapped[str] = mapped_column(Text)
+    cta_label: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cta_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    audience: Mapped[dict] = mapped_column(JSONB, default=dict)
+    recipient_count: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(Text, default="sent")
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+
 class DemoAccessRequest(Base):
     """One row per email that's ever asked for the public demo — an
     outreach list, not a click log (see migrations/050). No TimestampMixin:

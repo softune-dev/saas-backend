@@ -1257,3 +1257,57 @@ def demo_followup_email() -> tuple[str, str, str]:
         "Softune — softunebd.com"
     )
     return subject, html_body, text_body
+
+
+def campaign_email(
+    *,
+    headline: str,
+    paragraphs: list[str],
+    cta_label: str | None,
+    cta_url: str | None,
+    escape,
+) -> tuple[str, str]:
+    """Body for an operator-written marketing campaign (superadmin "Email
+    campaigns"). Returns (html_body, text_body); the subject is chosen by the
+    caller. Everything the operator typed goes through `escape`, so a stray
+    "<" can never become markup. Marketing mail always carries a plain way to
+    opt out, since it goes to people who didn't ask for this particular email."""
+    paras_html = "".join(
+        f'<p style="margin:0 0 16px 0;font-size:15px;line-height:1.6;color:{INK};">'
+        f'{escape(p).replace(chr(10), "<br />")}</p>'
+        for p in paragraphs
+    )
+    headline_html = (
+        f'<h1 style="margin:0 0 14px 0;font-size:22px;line-height:1.3;font-weight:400;color:{INK};">'
+        f"{escape(headline)}</h1>"
+        if headline
+        else ""
+    )
+    cta_html = (
+        f'<p style="margin:6px 0 0 0;">{_btn(escape(cta_url, quote=True), escape(cta_label))}</p>'
+        if cta_url and cta_label
+        else ""
+    )
+    body_html = f"""\
+<tr>
+  <td style="padding:28px 36px 8px 36px;">
+    {headline_html}
+    {paras_html}
+    {cta_html}
+    <p style="margin:24px 0 0 0;font-size:12px;line-height:1.6;color:{MUTED};">
+      You are getting this because you have a Softune account. Reply to this email with
+      &quot;unsubscribe&quot; and we will stop sending you updates.
+    </p>
+  </td>
+</tr>
+"""
+    preheader = escape(paragraphs[0][:90]) if paragraphs else escape(headline)
+    html_body = _shell(preheader, body_html)
+    text_parts = [headline] if headline else []
+    text_parts.extend(paragraphs)
+    if cta_url and cta_label:
+        text_parts.append(f"{cta_label}: {cta_url}")
+    text_parts.append(
+        'You are getting this because you have a Softune account. Reply with "unsubscribe" to stop updates.'
+    )
+    return html_body, "\n\n".join(text_parts)
