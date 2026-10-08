@@ -251,6 +251,12 @@ class Site(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(Text)
     subdomain: Mapped[str] = mapped_column(CITEXT, unique=True)
     custom_domain: Mapped[str | None] = mapped_column(CITEXT, nullable=True)
+    # Requested but not yet connected; never used to serve a site. Promoted to
+    # custom_domain by app/domains.py once Vercel confirms it (migrations/075).
+    pending_custom_domain: Mapped[str | None] = mapped_column(CITEXT, nullable=True)
+    pending_domain_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     status: Mapped[str] = mapped_column(Text, default="draft")
     theme: Mapped[dict] = mapped_column(JSONB, default=dict)
     business: Mapped[dict] = mapped_column(JSONB, default=dict)

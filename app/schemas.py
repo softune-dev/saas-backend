@@ -380,6 +380,8 @@ class SiteCreate(BaseModel):
 
 class SiteUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
+    # A REQUEST for a custom domain, not the live value: PATCH /sites/{id} stores it
+    # as pending_custom_domain until it is connected (app/domains.py).
     custom_domain: str | None = None
     theme: dict[str, Any] | None = None
     business: dict[str, Any] | None = None
@@ -390,6 +392,13 @@ class SiteUpdate(BaseModel):
     legal: dict[str, Any] | None = None
     fraud_rules: dict[str, Any] | None = None
     courier_rules: dict[str, Any] | None = None
+
+    @field_validator("custom_domain")
+    @classmethod
+    def _valid_domain(cls, v: str | None) -> str | None:
+        from app.domains import normalize_domain
+
+        return normalize_domain(v)
 
 
 class SiteSwitchTheme(BaseModel):
@@ -410,6 +419,7 @@ class SiteOut(ORMModel):
     name: str
     subdomain: str
     custom_domain: str | None
+    pending_custom_domain: str | None = None
     status: str
     theme: dict
     business: dict
@@ -436,6 +446,8 @@ class DomainStatusOut(BaseModel):
 
     domain: str
     connected: bool | None
+    # True while this is a requested domain that has not connected yet.
+    pending: bool = False
 
 
 class ProvisionStatusOut(BaseModel):

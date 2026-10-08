@@ -140,7 +140,12 @@ async def handle_attach_domain(payload: dict) -> None:
         )
         return
 
-    host = site.custom_domain or f"{site.subdomain}.{settings.site_base_domain}"
+    requested = payload.get("domain")
+    if requested and requested not in (site.custom_domain, site.pending_custom_domain):
+        # The request was cancelled or replaced while this job waited.
+        log.info("attach_domain: %s is no longer requested for site %s", requested, site_id)
+        return
+    host = requested or site.custom_domain or f"{site.subdomain}.{settings.site_base_domain}"
     await vercel.add_domain_to_project(host, project_id)
 
 
@@ -768,6 +773,25 @@ async def cleanup_old_notifications() -> None:
             )
 
 
+PENDING_DOMAIN_SWEEP_SECONDS = 5 * 60
+
+
+async def pending_domain_sweep_loop() -> None:
+    """Promote custom domains that have connected since the merchant asked for
+    them, and drop requests that never connected (app/domains.py)."""
+    from app import domains
+
+    while True:
+        try:
+            async with SessionLocal() as db:
+                promoted, expired = await domains.sweep_pending(db)
+            if promoted or expired:
+                log.info("domain sweep: %d promoted, %d expired", promoted, expired)
+        except Exception:  # noqa: BLE001 - a failed sweep must not kill the worker
+            log.exception("pending domain sweep failed")
+        await asyncio.sleep(PENDING_DOMAIN_SWEEP_SECONDS)
+
+
 async def notification_cleanup_loop() -> None:
     # Runs once immediately on startup (so a long-idle worker catches up),
     # then once a day thereafter.
@@ -1261,6 +1285,7 @@ async def main() -> None:
         log.info("listening on '%s'. Ctrl+C to stop.", settings.queue_name)
         await q.consume(on_message)
         asyncio.create_task(notification_cleanup_loop())
+        asyncio.create_task(pending_domain_sweep_loop())
         asyncio.create_task(trial_end_notify_loop())
         asyncio.create_task(trial_sweep_loop())
         asyncio.create_task(plan_renewal_notify_loop())

@@ -9,7 +9,7 @@ from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import cache, crud, media, notifications, plans, queue, vercel
+from app import cache, crud, domains, media, notifications, plans, queue, vercel
 from app.db import get_db
 from app.models import Site, SitePage, Template, Tenant
 from app.config import settings
@@ -111,12 +111,15 @@ async def get_domain_status(site_id: uuid.UUID, user: CurrentUser, db: DB) -> Do
     looking at their Domains settings, wrong to pay on every site fetch.
     """
     site = await crud.get_scoped(db, Site, user.tenant_id, site_id)
-    if not site.custom_domain:
+    domain = site.pending_custom_domain or site.custom_domain
+    if not domain:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "No custom domain set on this site.")
-    connected = await vercel.check_domain_connected(
-        site.custom_domain, site.template.vercel_project_id or ""
-    )
-    return DomainStatusOut(domain=site.custom_domain, connected=connected)
+    connected = await vercel.check_domain_connected(domain, site.template.vercel_project_id or "")
+    pending = bool(site.pending_custom_domain)
+    if pending and connected is True:
+        # Connected at last: this is the moment it becomes the site's real domain.
+        pending = not await domains.promote(db, site)
+    return DomainStatusOut(domain=domain, connected=connected, pending=pending)
 
 
 @router.get("/sites/{site_id}/provision-status", response_model=ProvisionStatusOut)
@@ -142,9 +145,36 @@ async def update_site(
 ) -> Site:
     site = await crud.get_scoped(db, Site, user.tenant_id, site_id)
     old_domain = site.custom_domain
+    old_pending = site.pending_custom_domain
     old_theme = site.theme or {}
 
-    crud.apply_updates(site, payload.model_dump(exclude_unset=True))
+    changes = payload.model_dump(exclude_unset=True)
+    # A domain is a request, never a direct write: it waits in
+    # pending_custom_domain until it is connected (see app/domains.py).
+    domain_requested = "custom_domain" in changes
+    requested = changes.pop("custom_domain", None)
+    crud.apply_updates(site, changes)
+    if domain_requested:
+        if requested is None:
+            site.custom_domain = None
+            site.pending_custom_domain = None
+            site.pending_domain_requested_at = None
+        elif requested == site.custom_domain:
+            site.pending_custom_domain = None
+            site.pending_domain_requested_at = None
+        else:
+            taken = (
+                await db.execute(
+                    select(Site.id).where(Site.custom_domain == requested, Site.id != site.id)
+                )
+            ).first()
+            if taken:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT, "That domain is already connected to another site."
+                )
+            if requested != site.pending_custom_domain:
+                site.pending_domain_requested_at = datetime.now(UTC)
+            site.pending_custom_domain = requested
     site = await crud.save(db, site)
 
     # Any change to theme/business/seo changes what visitors see, so the cached
@@ -171,13 +201,19 @@ async def update_site(
 
     if site.status == "published":
         await queue.publish(queue.JOB_REVALIDATE_SITE, {"site_id": str(site.id)})
-        if old_domain != site.custom_domain:
-            # A custom domain (or removing one, falling back to the
-            # subdomain) needs the same Vercel attach as publish_site does —
-            # see queue.JOB_ATTACH_DOMAIN and app/vercel.py. Only meaningful
-            # once the site is actually live; an unpublished site has
-            # nothing for a domain to point at yet.
-            await queue.publish(queue.JOB_ATTACH_DOMAIN, {"site_id": str(site.id)})
+        if site.pending_custom_domain and site.pending_custom_domain != old_pending:
+            # Attach the requested domain to the Vercel project now, so the
+            # merchant can point their DNS at it and it can connect. It is NOT
+            # this site's domain yet; that happens in app/domains.py.
+            await queue.publish(
+                queue.JOB_ATTACH_DOMAIN,
+                {"site_id": str(site.id), "domain": site.pending_custom_domain},
+            )
+    if old_pending and old_pending != site.pending_custom_domain and old_pending != site.custom_domain:
+        # A request that was replaced or cancelled: free it on Vercel.
+        await queue.publish(
+            queue.JOB_DETACH_DOMAIN, {"site_id": str(site.id), "domain": old_pending}
+        )
     if old_domain and old_domain != site.custom_domain:
         # The OLD custom domain is now unused — detach it from Vercel too,
         # not just cleared from our own database, or it would silently
