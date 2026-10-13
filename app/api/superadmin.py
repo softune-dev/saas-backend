@@ -28,7 +28,7 @@ from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import ai_images, audit, cache, chat_credits as chat_credits_module, crud, invoices as invoices_module, mailer, media, queue, vercel
+from app import ai_images, audit, cache, contacts as contacts_module, chat_credits as chat_credits_module, crud, invoices as invoices_module, mailer, media, queue, vercel
 from app.config import settings
 from app.db import get_db
 from app.models import (
@@ -514,6 +514,10 @@ async def delete_tenant(tenant_id: uuid.UUID, admin: SuperAdminUser, db: DB) -> 
     sites = (
         await db.execute(select(Site).where(Site.tenant_id == tenant_id))
     ).scalars().all()
+
+    # Keep the people in the permanent marketing contact list before their
+    # rows are erased (app/contacts.py). A failure here stops the delete.
+    await contacts_module.upsert_tenants(db, [tenant_id], deleted=True)
 
     # Raw SQL, not db.delete(tenant): Tenant.users is a relationship() with
     # no passive_deletes, so the ORM tries to UPDATE users SET tenant_id =

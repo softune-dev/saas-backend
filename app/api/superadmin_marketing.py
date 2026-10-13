@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import audit, mailer, queue
 from app.db import get_db
-from app.models import DemoAccessRequest, EmailCampaign, Tenant, User
+from app.models import DemoAccessRequest, EmailCampaign, MarketingContact, Tenant, User
 from app.schemas import ORMModel, Page
 from app.security import SuperAdminUser
 
@@ -39,10 +39,12 @@ STATUSES = ("active", "suspended", "cancelled", "payment_overdue")
 
 
 class AudienceIn(BaseModel):
-    kind: Literal["owners", "demo_leads", "custom"] = "owners"
+    kind: Literal["owners", "demo_leads", "contacts", "custom"] = "owners"
     # Only for kind="owners". Empty means "any".
     plans: list[str] = Field(default_factory=list)
     statuses: list[str] = Field(default_factory=list)
+    # Only for kind="contacts": which saved-contact groups (empty means all of them).
+    lifecycles: list[str] = Field(default_factory=list)
     # Only for kind="custom".
     emails: list[str] = Field(default_factory=list, max_length=MAX_RECIPIENTS)
 
@@ -52,6 +54,15 @@ class AudienceIn(BaseModel):
         bad = [p for p in v if p not in PLANS]
         if bad:
             raise ValueError(f"Unknown plan: {bad[0]}")
+        return v
+
+    @field_validator("lifecycles")
+    @classmethod
+    def _lifecycles(cls, v: list[str]) -> list[str]:
+        ok = {"lead", "trial", "customer", "churned", "former_customer"}
+        bad = [x for x in v if x not in ok]
+        if bad:
+            raise ValueError(f"Unknown contact group: {bad[0]}")
         return v
 
     @field_validator("statuses")
@@ -101,6 +112,9 @@ class AudienceCountsOut(BaseModel):
     paid_owners: int
     overdue_owners: int
     demo_leads: int
+    expired_trials: int
+    former_customers: int
+    all_contacts: int
     max_recipients: int
 
 
@@ -131,6 +145,11 @@ async def _resolve(db: AsyncSession, audience: AudienceIn) -> list[str]:
     emails: set[str] = set()
     if audience.kind == "custom":
         emails.update(filter(None, (_clean_email(e) for e in audience.emails)))
+    elif audience.kind == "contacts":
+        query = select(MarketingContact.email)
+        if audience.lifecycles:
+            query = query.where(MarketingContact.lifecycle.in_(audience.lifecycles))
+        emails.update(e.lower() for e in (await db.execute(query)).scalars().all())
     elif audience.kind == "demo_leads":
         rows = (await db.execute(select(DemoAccessRequest.email))).scalars().all()
         emails.update(e.lower() for e in rows)
@@ -145,6 +164,17 @@ async def _resolve(db: AsyncSession, audience: AudienceIn) -> list[str]:
         if audience.statuses:
             query = query.where(Tenant.status.in_(audience.statuses))
         emails.update(e.lower() for e in (await db.execute(query)).scalars().all())
+    # Never email anyone who opted out, whatever audience this came from.
+    if emails:
+        opted_out = {
+            e.lower()
+            for e in (
+                await db.execute(
+                    select(MarketingContact.email).where(MarketingContact.unsubscribed_at.is_not(None))
+                )
+            ).scalars()
+        }
+        emails -= opted_out
     return sorted(emails)
 
 
@@ -173,6 +203,12 @@ async def audience_counts(admin: SuperAdminUser, db: DB) -> dict:
             )
         ).scalar_one()
 
+    async def contact_count(lifecycle: str | None) -> int:
+        q = select(func.count(MarketingContact.id)).where(MarketingContact.unsubscribed_at.is_(None))
+        if lifecycle:
+            q = q.where(MarketingContact.lifecycle == lifecycle)
+        return (await db.execute(q)).scalar_one()
+
     demo = (await db.execute(select(func.count(DemoAccessRequest.id)))).scalar_one()
     return {
         "owners": await owners(),
@@ -180,6 +216,9 @@ async def audience_counts(admin: SuperAdminUser, db: DB) -> dict:
         "paid_owners": await owners(Tenant.plan.in_(("starter", "growth", "business"))),
         "overdue_owners": await owners(Tenant.status == "payment_overdue"),
         "demo_leads": demo,
+        "expired_trials": await contact_count("churned"),
+        "former_customers": await contact_count("former_customer"),
+        "all_contacts": await contact_count(None),
         "max_recipients": MAX_RECIPIENTS,
     }
 

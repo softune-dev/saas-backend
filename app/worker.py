@@ -774,6 +774,24 @@ async def cleanup_old_notifications() -> None:
 
 
 PENDING_DOMAIN_SWEEP_SECONDS = 5 * 60
+CONTACT_SYNC_SECONDS = 6 * 60 * 60
+
+
+async def contact_sync_loop() -> None:
+    """Keep the permanent marketing contact list current: plan changes, new
+    phone numbers, demo-page leads. Also the first run after deploy picks up
+    anyone the migration's backfill missed."""
+    from app import contacts
+
+    while True:
+        try:
+            async with SessionLocal() as db:
+                result = await contacts.sync_all(db)
+            log.info("contact sync: %s", result)
+        except Exception:  # noqa: BLE001 - a failed sync must not kill the worker
+            log.exception("contact sync failed")
+        await asyncio.sleep(CONTACT_SYNC_SECONDS)
+
 
 
 async def pending_domain_sweep_loop() -> None:
@@ -871,7 +889,7 @@ async def trial_end_notify_loop() -> None:
 async def sweep_expired_trials() -> None:
     from fastapi.concurrency import run_in_threadpool
 
-    from app import cache, media, vercel
+    from app import cache, contacts, media, vercel
 
     cutoff = datetime.now(UTC) - timedelta(days=settings.trial_grace_days)
     async with SessionLocal() as db:
@@ -896,6 +914,15 @@ async def sweep_expired_trials() -> None:
             await db.execute(select(Site).where(Site.tenant_id.in_(expiring_tenant_ids)))
         ).scalars().all()
 
+        # Save these people to the permanent contact list FIRST. If that
+        # fails, nothing is deleted this round (the next sweep retries), so
+        # a contact is never lost.
+        try:
+            await contacts.upsert_tenants(db, list(expiring_tenant_ids), deleted=True)
+        except Exception:  # noqa: BLE001
+            await db.rollback()
+            log.exception("couldn't save contacts before deleting; skipping this sweep")
+            return
         result = await db.execute(delete(Tenant).where(Tenant.id.in_(expiring_tenant_ids)))
         await db.commit()
         if result.rowcount:
@@ -1192,7 +1219,7 @@ async def sweep_abandoned_paid_accounts() -> None:
     """
     from fastapi.concurrency import run_in_threadpool
 
-    from app import cache, media, vercel
+    from app import cache, contacts, media, vercel
 
     cutoff = datetime.now(UTC) - timedelta(days=PLAN_DELETION_GRACE_DAYS)
     async with SessionLocal() as db:
@@ -1215,6 +1242,15 @@ async def sweep_abandoned_paid_accounts() -> None:
             await db.execute(select(Site).where(Site.tenant_id.in_(expiring_tenant_ids)))
         ).scalars().all()
 
+        # Save these people to the permanent contact list FIRST. If that
+        # fails, nothing is deleted this round (the next sweep retries), so
+        # a contact is never lost.
+        try:
+            await contacts.upsert_tenants(db, list(expiring_tenant_ids), deleted=True)
+        except Exception:  # noqa: BLE001
+            await db.rollback()
+            log.exception("couldn't save contacts before deleting; skipping this sweep")
+            return
         result = await db.execute(delete(Tenant).where(Tenant.id.in_(expiring_tenant_ids)))
         await db.commit()
         if result.rowcount:
@@ -1286,6 +1322,7 @@ async def main() -> None:
         await q.consume(on_message)
         asyncio.create_task(notification_cleanup_loop())
         asyncio.create_task(pending_domain_sweep_loop())
+        asyncio.create_task(contact_sync_loop())
         asyncio.create_task(trial_end_notify_loop())
         asyncio.create_task(trial_sweep_loop())
         asyncio.create_task(plan_renewal_notify_loop())

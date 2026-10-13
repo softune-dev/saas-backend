@@ -1210,6 +1210,40 @@ class AdminAuditLog(Base):
     )
 
 
+class MarketingContact(Base):
+    """A person we may contact again, kept forever (migrations/077). Has NO
+    foreign keys on purpose: deleting a tenant cascades through every table
+    except this one, so the person survives their account. tenant_id is only a
+    remembered pointer. Written by app/contacts.py. unsubscribed_at is an
+    opt-out that no sync may clear."""
+
+    __tablename__ = "marketing_contacts"
+
+    id: Mapped[uuid.UUID] = _pk()
+    email: Mapped[str] = mapped_column(CITEXT, unique=True)
+    full_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    phone: Mapped[str | None] = mapped_column(Text, nullable=True)
+    shop_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    subdomain: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source: Mapped[str] = mapped_column(Text, default="signup")
+    lifecycle: Mapped[str] = mapped_column(Text, default="trial")
+    plan: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ever_paid: Mapped[bool] = mapped_column(Boolean, default=False)
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    signed_up_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    converted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    account_deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    unsubscribed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+
 class DemoAccessRequest(Base):
     """One row per email that's ever asked for the public demo — an
     outreach list, not a click log (see migrations/050). No TimestampMixin:

@@ -453,6 +453,11 @@ async def create_tenant_owner_and_site(
     await db.commit()
     await db.refresh(user)
     await db.refresh(site)
+    # Remember this person permanently for future outreach (app/contacts.py);
+    # best-effort, never fails the signup.
+    from app import contacts
+
+    await contacts.upsert_tenant(db, tenant.id)
     return user, site
 
 

@@ -82,7 +82,7 @@ async def list_sites(
     status_filter: Annotated[Literal["published", "draft"] | None, Query(alias="status")] = None,
     template: str | None = None,
     domain: Literal["custom", "pending", "none"] | None = None,
-    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    limit: Annotated[int, Query(ge=1, le=500)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> dict:
     filters = []

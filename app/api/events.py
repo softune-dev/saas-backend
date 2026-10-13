@@ -10,6 +10,7 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -190,7 +191,7 @@ async def update_event(
     await cache.invalidate_site(site.subdomain, site.custom_domain)
     await cache.invalidate_dashboard(str(site.id))
     if old_image_url and old_image_url != event.image_url:
-        media.delete_by_url(old_image_url, site.subdomain)
+        await run_in_threadpool(media.delete_by_url, old_image_url, site.subdomain)
     return _event_out(event)
 
 
@@ -206,4 +207,4 @@ async def delete_event(site_id: uuid.UUID, event_id: uuid.UUID, user: CurrentUse
     await cache.invalidate_site(site.subdomain, site.custom_domain)
     await cache.invalidate_dashboard(str(site.id))
     if image_url:
-        media.delete_by_url(image_url, site.subdomain)
+        await run_in_threadpool(media.delete_by_url, image_url, site.subdomain)

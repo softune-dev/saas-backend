@@ -25,6 +25,7 @@ from app.api import (
     superadmin,
     superadmin_ai,
     superadmin_billing,
+    superadmin_contacts,
     superadmin_ops,
     superadmin_marketing,
     superadmin_overview,
@@ -74,6 +75,7 @@ api_router.include_router(ai_images.router, dependencies=_demo_guard)
 api_router.include_router(superadmin.router)
 api_router.include_router(superadmin_ai.router)
 api_router.include_router(superadmin_billing.router)
+api_router.include_router(superadmin_contacts.router)
 api_router.include_router(superadmin_ops.router)
 api_router.include_router(superadmin_marketing.router)
 api_router.include_router(superadmin_overview.router)

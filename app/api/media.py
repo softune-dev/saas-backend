@@ -5,6 +5,7 @@ editor) just store the returned URL string directly in theme JSON, the same
 way they already store the bundled /assets/*.jpg paths it replaces.
 """
 
+import asyncio
 import io
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -161,7 +162,8 @@ async def list_media(
     category: Category,
 ) -> list[dict]:
     site = await crud.get_scoped(db, Site, user.tenant_id, site_id)
-    return media.list_images(site.subdomain, category)
+    # Synchronous Cloudinary call: off the event loop, or every other request waits on it.
+    return await run_in_threadpool(media.list_images, site.subdomain, category)
 
 
 @router.delete("/{public_id:path}", status_code=status.HTTP_204_NO_CONTENT)
@@ -176,7 +178,7 @@ async def delete_media(
         # Not this site's folder — 404, not 403, same reasoning as
         # crud.get_scoped: don't confirm whether the id is real.
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Media not found")
-    media.delete_image(public_id)
+    await run_in_threadpool(media.delete_image, public_id)
 
 
 # Anything uploaded more recently than this is left alone even if nothing
@@ -239,8 +241,13 @@ async def list_all_media(site_id: uuid.UUID, user: CurrentUser, db: DB) -> dict:
 
     images: list[dict] = []
     by_category: dict[str, dict] = {}
-    for category in sorted(VALID_CATEGORIES):
-        resources = media.list_images(site.subdomain, category)
+    categories = sorted(VALID_CATEGORIES)
+    # One Cloudinary round trip per category, in parallel threads, instead of
+    # one after another on the event loop.
+    listings = await asyncio.gather(
+        *(run_in_threadpool(media.list_images, site.subdomain, c) for c in categories)
+    )
+    for category, resources in zip(categories, listings):
         by_category[category] = {
             "count": len(resources),
             "bytes": sum(r.get("bytes") or 0 for r in resources),

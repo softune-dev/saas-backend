@@ -9,6 +9,7 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -130,9 +131,9 @@ async def update_category(
     await cache.invalidate_dashboard(str(site.id))
 
     if old_image_url and old_image_url != category.image_url:
-        media.delete_by_url(old_image_url, site.subdomain)
+        await run_in_threadpool(media.delete_by_url, old_image_url, site.subdomain)
     if old_banner_url and old_banner_url != category.banner_url:
-        media.delete_by_url(old_banner_url, site.subdomain)
+        await run_in_threadpool(media.delete_by_url, old_banner_url, site.subdomain)
     return category
 
 
@@ -151,9 +152,9 @@ async def delete_category(
     await crud.delete(db, category)
     await cache.invalidate_dashboard(str(site.id))
     if image_url:
-        media.delete_by_url(image_url, site.subdomain)
+        await run_in_threadpool(media.delete_by_url, image_url, site.subdomain)
     if banner_url:
-        media.delete_by_url(banner_url, site.subdomain)
+        await run_in_threadpool(media.delete_by_url, banner_url, site.subdomain)
 
 
 # =============================================================================
@@ -288,7 +289,7 @@ async def update_product(
     # the moment this save actually lands — that's when it's safe to delete.
     if "images" in data:
         for url in old_image_urls - _product_image_urls(product):
-            media.delete_by_url(url, site.subdomain)
+            await run_in_threadpool(media.delete_by_url, url, site.subdomain)
     return product
 
 
@@ -307,7 +308,7 @@ async def delete_product(
     await cache.invalidate_site(site.subdomain, site.custom_domain)
     await cache.invalidate_dashboard(str(site.id))
     for url in image_urls:
-        media.delete_by_url(url, site.subdomain)
+        await run_in_threadpool(media.delete_by_url, url, site.subdomain)
 
 
 # =============================================================================
