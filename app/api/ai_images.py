@@ -55,28 +55,16 @@ async def list_presets(user: CurrentUser) -> dict:
     }
 
 
-async def _onboarding_allowance_open(db: AsyncSession, tenant_id) -> bool:
-    """The free allowance only exists while a site is still mid-onboarding
-    (onboarding_completed_at IS NULL). Checked server-side, not just by the
-    dashboard hiding the step: once the merchant has finished onboarding,
-    any leftover units are dead — "one time, during setup" is the rule, not
-    "5 free images forever"."""
-    open_site = (
-        await db.execute(
-            select(Site.id).where(Site.tenant_id == tenant_id, Site.onboarding_completed_at.is_(None)).limit(1)
-        )
-    ).scalar_one_or_none()
-    return open_site is not None
-
-
 @router.get("/balance")
 async def get_balance(user: CurrentUser, db: DB) -> dict:
-    free_remaining = 0
-    if await _onboarding_allowance_open(db, user.tenant_id):
-        free_remaining = await ai_images.get_onboarding_free_remaining(db, user.tenant_id)
+    # The 5 free images used to be spendable only inside the onboarding
+    # "Site images" step and died once setup was finished. Nobody found them
+    # there (all 132 tenants of the Oct 2026 campaign still had all 5) while
+    # every Image-mode attempt failed on "you have 0 credits" — so they are
+    # now one shared gift, usable anywhere until spent.
     return {
         "balance": await ai_images.get_balance(db, user.tenant_id),
-        "onboarding_free_remaining": free_remaining,
+        "onboarding_free_remaining": await ai_images.get_onboarding_free_remaining(db, user.tenant_id),
     }
 
 
@@ -201,6 +189,21 @@ async def _resolve_prompt(db: AsyncSession, tenant_id, payload: GenerateImageIn)
     return f"{context}\n\n{prompt}" if context else prompt
 
 
+async def build_generation_prompt(db: AsyncSession, tenant_id, payload: GenerateImageIn) -> str:
+    """Public entry to the exact prompt pipeline /generate uses (preset +
+    copy + business context), so the AI store setup (app/ai_site_setup.py)
+    produces images the same way a merchant's own generation would."""
+    return await _resolve_prompt(db, tenant_id, payload)
+
+
+async def _should_use_free(db: AsyncSession, tenant_id, tier: str, requested: bool = False) -> bool:
+    """Standard-quality generations spend the free allowance first, wherever
+    they're asked for — the merchant never has to know a flag exists."""
+    if requested:
+        return True
+    return tier == "standard" and await ai_images.get_onboarding_free_remaining(db, tenant_id) > 0
+
+
 def _generation_log_input(payload: GenerateImageIn, prompt: str) -> dict:
     """What the operator needs to judge a generation: the exact prompt that
     went to the model plus every knob the merchant set. Reference photos are
@@ -236,6 +239,7 @@ async def generate(payload: GenerateImageIn, user: CurrentUser, db: DB) -> Gener
     docstrings for why the ordering is this way round, not the reverse).
     """
     prompt = await _resolve_prompt(db, user.tenant_id, payload)
+    use_free = await _should_use_free(db, user.tenant_id, payload.tier, payload.use_onboarding_free)
 
     async with ai_log.track(
         "image_generate",
@@ -245,10 +249,10 @@ async def generate(payload: GenerateImageIn, user: CurrentUser, db: DB) -> Gener
         meta={
             "tier": payload.tier,
             "aspect_ratio": payload.aspect_ratio,
-            "free_onboarding": payload.use_onboarding_free,
+            "free_onboarding": use_free,
         },
     ) as tracker:
-        if payload.use_onboarding_free:
+        if use_free:
             result = await _generate_with_onboarding_free(payload, prompt, user.tenant_id, db)
         else:
             credits = ai_images.tier_credit_cost(payload.tier)
@@ -278,20 +282,14 @@ async def generate(payload: GenerateImageIn, user: CurrentUser, db: DB) -> Gener
 async def _generate_with_onboarding_free(
     payload: GenerateImageIn, prompt: str, tenant_id, db: AsyncSession
 ) -> GeneratedImageOut:
-    """The onboarding "Site images" step's free path: standard tier only,
-    only while a site is still mid-onboarding, one atomic claim per image
-    (see ai_images.claim_onboarding_free), released again if Gemini fails.
-    Never touches ai_image_credits — credits_charged is always 0 here.
+    """The free-allowance path: standard tier only, one atomic claim per
+    image (see ai_images.claim_onboarding_free), released again if Gemini
+    fails. Never touches ai_image_credits — credits_charged is always 0 here.
     """
     if payload.tier != "standard":
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
-            "Free onboarding images are generated at standard quality.",
-        )
-    if not await _onboarding_allowance_open(db, tenant_id):
-        raise HTTPException(
-            status.HTTP_402_PAYMENT_REQUIRED,
-            "Your free onboarding images are used up. Upload your own, or buy image credits to keep generating.",
+            "Free images are generated at standard quality.",
         )
     free_remaining = await ai_images.claim_onboarding_free(db, tenant_id)
     try:
@@ -326,8 +324,18 @@ async def edit(payload: EditImageIn, user: CurrentUser, db: DB) -> GeneratedImag
         input={"merchant_prompt": payload.prompt, "include_text": payload.include_text},
         meta={"tier": payload.tier, "aspect_ratio": payload.aspect_ratio},
     ) as tracker:
-        credits = ai_images.tier_credit_cost(payload.tier)
-        balance = await ai_images.charge_credits(db, user.tenant_id, credits, reason="edit")
+        # An edit is a new image too, so standard-quality edits also come out
+        # of the free allowance first (same rule as /generate).
+        use_free = await _should_use_free(db, user.tenant_id, payload.tier)
+        tracker.meta["free_onboarding"] = use_free
+        free_remaining: int | None = None
+        if use_free:
+            free_remaining = await ai_images.claim_onboarding_free(db, user.tenant_id)
+            credits = 0
+            balance = await ai_images.get_balance(db, user.tenant_id)
+        else:
+            credits = ai_images.tier_credit_cost(payload.tier)
+            balance = await ai_images.charge_credits(db, user.tenant_id, credits, reason="edit")
         try:
             context = await _business_context_line(db, user.tenant_id)
             instruction = payload.prompt
@@ -339,13 +347,17 @@ async def edit(payload: EditImageIn, user: CurrentUser, db: DB) -> GeneratedImag
                 prompt, payload.tier, [(source_bytes, payload.source_image.mime_type)], payload.aspect_ratio
             )
         except Exception:
-            await ai_images.refund_credits(db, user.tenant_id, credits, reference="edit-failed")
+            if use_free:
+                await ai_images.release_onboarding_free(db, user.tenant_id)
+            else:
+                await ai_images.refund_credits(db, user.tenant_id, credits, reference="edit-failed")
             raise
         result = GeneratedImageOut(
             image_base64=base64.b64encode(image_bytes).decode("ascii"),
             mime_type=mime_type,
             credits_charged=credits,
             balance=balance,
+            onboarding_free_remaining=free_remaining,
         )
         await _finish_image_log(tracker, result)
         return result

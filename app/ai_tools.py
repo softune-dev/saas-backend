@@ -14,6 +14,7 @@ silently.
 
 import json
 import logging
+import math
 import uuid
 from datetime import UTC, date, datetime, timedelta
 
@@ -21,7 +22,7 @@ from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import cache, crud, media, risk_score as risk_score_module
+from app import cache, crud, invoices as invoices_module, media, risk_score as risk_score_module
 from app.config import settings
 from app.models import (
     Category,
@@ -142,12 +143,13 @@ TOOL_DECLARATIONS = [
     {
         "name": "get_billing_status",
         "description": (
-            "The merchant's current plan, today's AI assistant usage against "
-            "the plan's daily cap, and storage usage against the plan's "
-            "limit. Call this for any question about their plan, billing, or "
-            "usage limits. No pricing figures are available here — if asked "
-            "about upgrade cost, say you don't have real pricing to quote and "
-            "point them to the Billing page or support."
+            "The merchant's current plan, how long their free trial has left "
+            "(exact expiry date and days remaining) or when their paid plan "
+            "renews, the real monthly price of each plan, today's AI "
+            "assistant usage against the plan's daily cap, and storage usage "
+            "against the plan's limit. Call this for any question about "
+            "their plan, trial length, what happens when it ends, billing, "
+            "price, or usage limits."
         ),
         "parameters": {"type": "OBJECT", "properties": {}},
     },
@@ -451,17 +453,36 @@ async def _get_billing_status(db: AsyncSession, tenant_id: uuid.UUID) -> dict:
         except Exception as exc:  # noqa: BLE001
             log.warning("get_billing_status: media lookup failed: %s", exc)
 
-    return {
+    result: dict = {
         "plan": plan,
         "account_status": tenant.status,
         "ai_requests_used_today": ai_used,
         "ai_requests_daily_limit": ai_cap,
         "storage_used_mb": storage_used_mb,
         "storage_limit_mb": storage_limit_mb,
-        # No real pricing source exists in this backend (no PLAN_PRICE
-        # table) — never invented here. The system prompt is told to say so
-        # plainly rather than guess a number if asked about upgrade cost.
+        # Same source the invoices use, so a price the assistant quotes can
+        # never drift from what the merchant is actually invoiced.
+        "plan_prices_bdt_per_month": {
+            key: invoices_module.PLAN_PRICES_CENTS[key] // 100
+            for key in ("starter", "growth", "business")
+        },
     }
+    # The assistant used to get none of this, so asked "how long do I have /
+    # will I be charged?" it guessed — and told a worried merchant a 7-day
+    # trial had no time limit. Login is blocked at trial_expires_at
+    # (app/api/auth.py) and the tenant is hard-deleted trial_grace_days later
+    # (app/worker.py's sweep_expired_trials), so give it the real dates.
+    if plan == "trial" and tenant.trial_expires_at is not None:
+        remaining = tenant.trial_expires_at - datetime.now(UTC)
+        result["trial_expires_at"] = tenant.trial_expires_at.date().isoformat()
+        result["trial_days_left"] = max(0, math.ceil(remaining.total_seconds() / 86400))
+        result["trial_ended"] = remaining.total_seconds() <= 0
+        result["data_permanently_deleted_on"] = (
+            tenant.trial_expires_at + timedelta(days=settings.trial_grace_days)
+        ).date().isoformat()
+    elif tenant.plan_renews_at is not None:
+        result["plan_renews_on"] = tenant.plan_renews_at.date().isoformat()
+    return result
 
 
 async def _list_products(

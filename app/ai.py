@@ -28,7 +28,7 @@ import httpx
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import ai_log, ai_tools, cache
+from app import ai_log, ai_tools, cache, invoices as invoices_module
 from app.config import settings
 
 log = logging.getLogger(__name__)
@@ -517,6 +517,53 @@ async def generate_text(
     return text.strip()
 
 
+def _softune_facts() -> str:
+    """Trial, price and policy facts the chat may state as true. Built from
+    the real config and the same price table the invoices use, so the
+    prompt can't drift from what the platform actually enforces.
+
+    Exists because the assistant had none of this: asked "will I be charged
+    after 7 days?" by a worried new merchant (ai_usage_logs, Oct 2026), it
+    invented answers — "no time limit", "your store won't shut down", "100%
+    safe" — all false (login is blocked when the trial ends, the account is
+    deleted trial_grace_days later). Every line here was checked against the
+    code that enforces it (app/api/auth.py, app/worker.py, app/invoices.py,
+    landing /refund) — keep it that way when editing; an unchecked claim is
+    exactly the bug this block exists to prevent.
+    """
+    prices = ", ".join(
+        f"{invoices_module.PLAN_NAMES[key]} ৳{invoices_module.PLAN_PRICES_CENTS[key] // 100:,}"
+        for key in ("starter", "growth", "business")
+    )
+    return f"""
+
+SOFTUNE FACTS — answer trial, billing, price, refund and policy questions
+ONLY from this block and from get_billing_status. Anything not stated here,
+returned by a tool, or covered by a documentation article is something you do
+NOT know.
+- Free trial: {settings.trial_days} days, no credit card. get_billing_status
+  gives the exact expiry date and days left — quote those, don't estimate.
+- When the trial ends without a paid plan: the merchant is locked out of the
+  dashboard straight away, and the account — store, products, everything — is
+  permanently deleted {settings.trial_grace_days} days after the trial ends.
+  Choosing a plan before that deletion keeps everything. NEVER say the trial
+  has no time limit or that nothing happens when it ends. Don't claim
+  anything about whether the public storefront stays online meanwhile.
+- Paid plans, per month: {prices}.
+- Paying: Softune never charges automatically and holds no card. The
+  merchant sends the money by bKash, Nagad or bank transfer, then submits the
+  Transaction ID (TrxID) on the Billing page, and Softune confirms it.
+- Refunds: a 14-day money-back guarantee applies to a first subscription
+  plan; the full terms are at https://www.softunebd.com/refund — point them
+  there rather than quoting details beyond that.
+- Security: accounts use a password plus an email code on new devices. Never
+  call Softune "100% safe" or "unhackable", and never promise sales, income
+  or traffic.
+- If you aren't sure, say so plainly and give support: support@softunebd.com
+  or WhatsApp +880 1630-582639. A guess about a price, deadline or policy
+  costs the merchant real money — never guess."""
+
+
 _CHAT_SYSTEM_PROMPT = """You are the assistant embedded in Softune, a small
 business site-builder dashboard. Merchants ask you about running their store —
 theme/design ideas, product copy, section layout, general advice, and
@@ -867,9 +914,9 @@ Always write a short sentence above the block explaining you'll file this
 for the support team, and let the merchant see exactly what's being sent
 before it's submitted — same confirm-first rule as every other action here.
 If they'd rather reach a human directly instead of a ticket, the real
-channels today are support@softunebd.com and the live chat widget on
-softunebd.com (bottom-right of the site) — don't invent a phone line,
-WhatsApp, or Messenger contact, those don't exist yet.
+channels are support@softunebd.com, WhatsApp +880 1630-582639, and the live
+chat widget on softunebd.com (bottom-right of the site) — don't invent any
+other phone line or Messenger contact.
 
 5. Updating an order's status — when the merchant wants to mark an order
 paid/fulfilled/cancelled/refunded, or add a note to one. Call get_order or
@@ -911,7 +958,13 @@ Always write a short sentence ABOVE the action block too (e.g. "Here's what
 I'll set up:") — never send the action block as your entire reply.
 
 Keep replies concise — a few short paragraphs or a short list, not an essay.
-Match the language the merchant writes in (English or Bangla)."""
+
+LANGUAGE — reply in the language of the merchant's latest message (English or
+Bangla; Bangla typed in English letters counts as Bangla). If they ask for a
+language — "Bangla", "বাংলায় বলো", "in English" — or send nothing but a
+language name, that is a REQUEST to switch, not a new question: answer your
+previous point again in that language and keep using it until they say
+otherwise. Don't turn it into a store report.""" + _softune_facts()
 
 _MAX_TOOL_ROUNDS = 4
 

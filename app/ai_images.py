@@ -244,7 +244,7 @@ async def claim_onboarding_free(db: AsyncSession, tenant_id: uuid.UUID) -> int:
         await db.rollback()
         raise HTTPException(
             status.HTTP_402_PAYMENT_REQUIRED,
-            "Your free onboarding images are used up. Upload your own, or buy image credits to keep generating.",
+            "Your 5 free AI images are used up. Upload your own photo, or buy image credits to keep generating.",
         )
     await db.commit()
     return remaining

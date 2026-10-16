@@ -164,6 +164,14 @@ class Settings(BaseSettings):
     # migrations/071's one-off backfill hardcodes the same 5 — change both.
     onboarding_free_images: int = 5
 
+    # --- AI store setup (app/ai_site_setup.py) ---
+    # Writes every word of a new storefront in one call, so it gets a
+    # stronger model than the chat's Flash-Lite. One call per setup run and
+    # runs are capped per tenant (ai_site_setup_max_runs), so the cost stays
+    # small. Falls back to gemini_model if Google rejects this id.
+    ai_site_builder_model: str = "gemini-flash-latest"
+    ai_site_setup_max_runs: int = 3
+
     # --- trial signup / demo access (app/api/trial.py, app/api/public.py) ---
     # Real SMTP send via Hostinger's mail server — the OTP email is the
     # first thing this codebase actually sends (see app/mailer.py); nothing
