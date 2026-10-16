@@ -211,14 +211,18 @@ class SuggestedPromptsOut(BaseModel):
 
 
 @usage_router.get("/suggested-prompts", response_model=SuggestedPromptsOut)
-async def get_suggested_prompts(user: CurrentUser, db: DB, context: str = "default") -> SuggestedPromptsOut:
+async def get_suggested_prompts(
+    user: CurrentUser, db: DB, context: str = "default", lang: str = "en"
+) -> SuggestedPromptsOut:
     """Powers the chat sidebar's empty-state suggestion chips — real,
     per-merchant prompts built from the same read-only signals the
     assistant's own tools expose (low stock, missing About/FAQs/SEO, no
     sales yet), not a fixed "honey store" placeholder list. Plain DB reads,
     no Gemini call — never counts against the AI daily cap.
     """
-    suggestions = await ai_tools.get_suggested_prompts(db, user.tenant_id, context)
+    suggestions = await ai_tools.get_suggested_prompts(
+        db, user.tenant_id, context, "bn" if lang == "bn" else "en"
+    )
     return SuggestedPromptsOut(suggestions=suggestions)
 
 

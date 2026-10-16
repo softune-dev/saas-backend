@@ -694,7 +694,7 @@ _ICON = {
 
 
 async def get_suggested_prompts(
-    db: AsyncSession, tenant_id: uuid.UUID, context: str = "default"
+    db: AsyncSession, tenant_id: uuid.UUID, context: str = "default", lang: str = "en"
 ) -> list[dict]:
     """Suggestion chips shown before the merchant has typed anything — real,
     per-merchant prompts instead of a fixed "honey store" placeholder list.
@@ -716,21 +716,27 @@ async def get_suggested_prompts(
 
     candidates: list[dict] = []
 
+    # Chips are clickable and the text is sent as the merchant's own message,
+    # so a Bangla-UI merchant gets Bangla chips (and, via the assistant's
+    # reply-in-the-user's-language rule, a Bangla answer).
+    def T(en: str, bn: str) -> str:
+        return bn if lang == "bn" else en
+
     if context == "theme_editor":
         if not info.get("about_us_written"):
-            candidates.append({"text": f"Write an About Us story for {name}", "icon": _ICON["content"]})
+            candidates.append({"text": T(f"Write an About Us story for {name}", f"{name} এর জন্য ‘আমাদের সম্পর্কে’ লিখে দাও"), "icon": _ICON["content"]})
         candidates.append(
-            {"text": f"Suggest a modern color palette that fits {niche}", "icon": _ICON["theme"]}
+            {"text": T(f"Suggest a modern color palette that fits {niche}", f"{niche} এর সাথে মানানসই একটি আধুনিক কালার প্যালেট দাও"), "icon": _ICON["theme"]}
         )
         candidates.append(
-            {"text": f"Write a high-converting Hero headline for {name}", "icon": _ICON["content"]}
+            {"text": T(f"Write a high-converting Hero headline for {name}", f"{name} এর জন্য বিক্রি বাড়ানোর মতো একটি হিরো হেডলাইন লিখে দাও"), "icon": _ICON["content"]}
         )
         if not info.get("faqs"):
-            candidates.append({"text": "Draft FAQs based on what I sell", "icon": _ICON["content"]})
+            candidates.append({"text": T("Draft FAQs based on what I sell", "আমি যা বিক্রি করি তার ওপর ভিত্তি করে সাধারণ প্রশ্নোত্তর লিখে দাও"), "icon": _ICON["content"]})
         candidates.append(
-            {"text": "Recommend the best section order for my storefront", "icon": _ICON["org"]}
+            {"text": T("Recommend the best section order for my storefront", "আমার স্টোরের সেকশনগুলো কোন ক্রমে সাজালে ভালো হবে বলে দাও"), "icon": _ICON["org"]}
         )
-        candidates.append({"text": "Generate an announcement banner for a sale", "icon": _ICON["sales"]})
+        candidates.append({"text": T("Generate an announcement banner for a sale", "সেলের জন্য একটি ঘোষণা ব্যানারের লেখা তৈরি করে দাও"), "icon": _ICON["sales"]})
         return candidates[:4]
 
     # Default (general chat sidebar) — ranked by "what's actually worth this
@@ -738,20 +744,20 @@ async def get_suggested_prompts(
     low_stock = overview.get("low_stock_products") or 0
     if low_stock > 0:
         candidates.append(
-            {"text": f"Which of my {low_stock} low-stock products need restocking?", "icon": _ICON["stock"]}
+            {"text": T(f"Which of my {low_stock} low-stock products need restocking?", f"আমার {low_stock}টি কম স্টকের পণ্যের মধ্যে কোনগুলো আগে স্টক করা দরকার?"), "icon": _ICON["stock"]}
         )
     if not info.get("about_us_written"):
-        candidates.append({"text": f"Write an About Us story for {name}", "icon": _ICON["content"]})
+        candidates.append({"text": T(f"Write an About Us story for {name}", f"{name} এর জন্য ‘আমাদের সম্পর্কে’ লিখে দাও"), "icon": _ICON["content"]})
     if not info.get("faqs"):
-        candidates.append({"text": "Draft FAQs based on what I sell", "icon": _ICON["content"]})
+        candidates.append({"text": T("Draft FAQs based on what I sell", "আমি যা বিক্রি করি তার ওপর ভিত্তি করে সাধারণ প্রশ্নোত্তর লিখে দাও"), "icon": _ICON["content"]})
     if not info.get("meta_description"):
-        candidates.append({"text": "Write an SEO meta description for my store", "icon": _ICON["content"]})
+        candidates.append({"text": T("Write an SEO meta description for my store", "আমার স্টোরের জন্য একটি SEO মেটা বিবরণ লিখে দাও"), "icon": _ICON["content"]})
     if (overview.get("orders_last_30_days") or 0) == 0 and (overview.get("total_products") or 0) > 0:
-        candidates.append({"text": "Suggest ways to get my first sales this month", "icon": _ICON["sales"]})
+        candidates.append({"text": T("Suggest ways to get my first sales this month", "এই মাসে প্রথম বিক্রি পাওয়ার উপায়গুলো বলো"), "icon": _ICON["sales"]})
     if not info.get("custom_domain"):
-        candidates.append({"text": "How do I connect my own domain to my store?", "icon": _ICON["org"]})
+        candidates.append({"text": T("How do I connect my own domain to my store?", "আমার নিজের ডোমেইন স্টোরে কীভাবে যুক্ত করব?"), "icon": _ICON["org"]})
     if 0 < (overview.get("total_products") or 0) < 5:
-        candidates.append({"text": "Help me write descriptions for a few products", "icon": _ICON["stock"]})
+        candidates.append({"text": T("Help me write descriptions for a few products", "কয়েকটি পণ্যের বিবরণ লিখতে সাহায্য করো"), "icon": _ICON["stock"]})
 
     # Always-available fallbacks, personalized, appended only to fill out to
     # 4 — skipped if a gap-based suggestion above already covers that same
@@ -759,9 +765,9 @@ async def get_suggested_prompts(
     # inventory" twice just phrased two different ways.
     used_icons = {c["icon"] for c in candidates}
     for fallback in (
-        {"text": "Analyze my store's sales & conversion trends", "icon": _ICON["sales"]},
-        {"text": f"Suggest modern theme styles for {niche}", "icon": _ICON["theme"]},
-        {"text": "Check which products are low on inventory", "icon": _ICON["stock"]},
+        {"text": T("Analyze my store's sales & conversion trends", "আমার স্টোরের বিক্রি ও কনভার্সনের ধারা বিশ্লেষণ করো"), "icon": _ICON["sales"]},
+        {"text": T(f"Suggest modern theme styles for {niche}", f"{niche} এর জন্য আধুনিক থিম স্টাইল সাজেস্ট করো"), "icon": _ICON["theme"]},
+        {"text": T("Check which products are low on inventory", "কোন পণ্যগুলোর স্টক কম তা দেখাও"), "icon": _ICON["stock"]},
     ):
         if len(candidates) >= 4:
             break
