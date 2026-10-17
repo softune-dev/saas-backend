@@ -4,7 +4,10 @@ apply) so the merchant watches the store fill in, and a closed tab can
 resume: GET returns exactly where the last run stopped.
 """
 
+import asyncio
+import functools
 import uuid
+from contextlib import asynccontextmanager
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -31,6 +34,37 @@ from app.security import CurrentUser
 
 router = APIRouter(prefix="/ai/site-setup", tags=["ai-setup"])
 DB = Annotated[AsyncSession, Depends(get_db)]
+
+# One setup call at a time per store. Two parallel runs (e.g. the panel closed
+# and reopened mid-run, then "Continue" clicked while the first run was still
+# going) each saw "no image yet" / "nothing created yet" and BOTH did the work:
+# duplicate categories and products, and the 5 free images spent twice. The
+# second request now waits, then re-reads the saved state and finds the work
+# done. In-process on purpose: the API runs a single uvicorn worker (see
+# sites.py), so no cross-process lock is needed.
+_LOCKS: dict[uuid.UUID, list] = {}  # tenant_id -> [asyncio.Lock, waiters]
+
+
+@asynccontextmanager
+async def _tenant_lock(tenant_id: uuid.UUID):
+    entry = _LOCKS.setdefault(tenant_id, [asyncio.Lock(), 0])
+    entry[1] += 1
+    try:
+        async with entry[0]:
+            yield
+    finally:
+        entry[1] -= 1
+        if entry[1] == 0:
+            _LOCKS.pop(tenant_id, None)
+
+
+def _one_at_a_time(handler):
+    @functools.wraps(handler)  # keeps the signature FastAPI reads its params from
+    async def wrapper(*args, **kwargs):
+        async with _tenant_lock(kwargs["user"].tenant_id):
+            return await handler(*args, **kwargs)
+
+    return wrapper
 
 
 class SiteSetupIn(BaseModel):
@@ -63,6 +97,7 @@ async def get_setup(user: CurrentUser, db: DB) -> dict:
 
 
 @router.post("/plan")
+@_one_at_a_time
 async def plan_site(payload: SiteSetupIn, user: CurrentUser, db: DB) -> dict:
     tenant = await setup.load_tenant(db, user.tenant_id)
     state = setup.get_state(tenant)
@@ -118,6 +153,7 @@ async def plan_site(payload: SiteSetupIn, user: CurrentUser, db: DB) -> dict:
 
 
 @router.post("/image")
+@_one_at_a_time
 async def generate_slot_image(payload: ImageSlotIn, user: CurrentUser, db: DB) -> dict:
     tenant = await setup.load_tenant(db, user.tenant_id)
     state = setup.get_state(tenant)
@@ -203,6 +239,7 @@ async def _create_with_unique_slug(create, payload_cls, data: dict):
 
 
 @router.post("/apply")
+@_one_at_a_time
 async def apply_site(user: CurrentUser, db: DB) -> dict:
     tenant = await setup.load_tenant(db, user.tenant_id)
     state = setup.get_state(tenant)

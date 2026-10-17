@@ -105,7 +105,15 @@ async def save_state(db: AsyncSession, tenant: Tenant, state: dict) -> None:
 
 
 async def load_tenant(db: AsyncSession, tenant_id: uuid.UUID) -> Tenant:
-    return (await db.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one()
+    # populate_existing: this is called AFTER waiting on the per-store lock, and
+    # the request's session may already hold an older copy of the tenant from
+    # authentication — without this the saved setup state read here could be
+    # stale (a previous request's images / created ids missing).
+    return (
+        await db.execute(
+            select(Tenant).where(Tenant.id == tenant_id).execution_options(populate_existing=True)
+        )
+    ).scalar_one()
 
 
 async def first_site(db: AsyncSession, tenant_id: uuid.UUID) -> Site:

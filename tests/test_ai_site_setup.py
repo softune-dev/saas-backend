@@ -78,3 +78,33 @@ async def test_apply_creates_bangla_categories_and_product(account, site):
     async with SessionLocal() as db:
         n = (await db.execute(select(Category).where(Category.tenant_id == account.tenant_id))).scalars().all()
     assert len(n) == 2
+
+
+async def test_two_parallel_applies_do_not_duplicate(account, site):
+    """The real-world failure: a second run started while the first was still
+    going, and every category and the product were created twice."""
+    import asyncio
+
+    inputs = {
+        "shop_name": "দেবটেস্ট", "sells": "মেয়েদের কুর্তি",
+        "category_names": ["কুর্তি", "পায়জামা"], "product_name": "লাল মোহনী কুর্তি",
+        "product_price_taka": 1500, "product_photo_url": None, "language": "bn", "notes": "",
+    }
+    async with SessionLocal() as db:
+        tenant = (await db.execute(select(Tenant).where(Tenant.id == account.tenant_id))).scalar_one()
+        await setup.save_state(
+            db, tenant,
+            {"status": "planned", "runs": 1, "inputs": inputs, "plan": PLAN,
+             "images": {}, "skipped": [], "created": {}},
+        )
+
+    first, second = await asyncio.gather(
+        account.post("/ai/site-setup/apply"), account.post("/ai/site-setup/apply")
+    )
+    assert first.status_code == 200 and second.status_code == 200, (first.text, second.text)
+
+    async with SessionLocal() as db:
+        cats = (await db.execute(select(Category).where(Category.tenant_id == account.tenant_id))).scalars().all()
+        prods = (await db.execute(select(Product).where(Product.tenant_id == account.tenant_id))).scalars().all()
+    assert len(cats) == 2, f"expected 2 categories, got {len(cats)}"
+    assert len(prods) == 1, f"expected 1 product, got {len(prods)}"
