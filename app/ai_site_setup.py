@@ -29,6 +29,7 @@ instead of spending free images twice.
 """
 
 import asyncio
+import copy
 import html
 import json
 import logging
@@ -41,6 +42,7 @@ from fastapi import HTTPException, status
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from app import ai_images, ai_log, media
 from app.config import settings
@@ -92,7 +94,13 @@ async def save_state(db: AsyncSession, tenant: Tenant, state: dict) -> None:
     # Reassign the whole JSONB value: SQLAlchemy doesn't see in-place edits
     # to a dict column, so mutating tenant.settings[...] would silently not save.
     state["updated_at"] = datetime.now(UTC).isoformat()
-    tenant.settings = {**(tenant.settings or {}), STATE_KEY: state}
+    # Store a COPY and flag the column. If the caller's own `state` dict is the
+    # object kept in tenant.settings, a later in-place edit of it makes the
+    # "old" and "new" values compare equal, SQLAlchemy sees no change and
+    # silently skips the UPDATE — apply() saves several times per request, so
+    # created ids and the final "done" status were being lost.
+    tenant.settings = {**(tenant.settings or {}), STATE_KEY: copy.deepcopy(state)}
+    flag_modified(tenant, "settings")
     await db.commit()
 
 

@@ -85,7 +85,7 @@ async def test_exhausted_allowance_answers_402_and_never_charges_credits(account
     response = await account.post("/ai/images/generate", json=FREE_BODY)
 
     assert response.status_code == 402
-    assert response.json()["detail"].startswith("Your free onboarding images")
+    assert response.json()["detail"].startswith("Your 5 free AI images")
     assert (await _balance(account))["balance"] == 100, "paid credits must not be used as a fallback"
 
 
@@ -120,7 +120,9 @@ async def test_two_racing_claims_cannot_both_take_the_last_unit(account):
         assert await ai_images.get_onboarding_free_remaining(db, account.tenant_id) == 0
 
 
-async def test_allowance_closes_once_onboarding_is_completed(account, fake_gemini):
+async def test_allowance_stays_open_after_onboarding_is_completed(account, fake_gemini):
+    # The free images are usable in the AI panel's Image tab too, so finishing
+    # onboarding no longer closes them (it used to).
     async with SessionLocal() as db:
         await db.execute(
             update(Site)
@@ -129,9 +131,10 @@ async def test_allowance_closes_once_onboarding_is_completed(account, fake_gemin
         )
         await db.commit()
 
-    assert (await _balance(account))["onboarding_free_remaining"] == 0
+    assert (await _balance(account))["onboarding_free_remaining"] == settings.onboarding_free_images
     response = await account.post("/ai/images/generate", json=FREE_BODY)
-    assert response.status_code == 402
+    assert response.status_code == 200
+    assert response.json()["credits_charged"] == 0
 
 
 async def test_one_tenants_free_images_do_not_touch_anothers(two_accounts, fake_gemini):
@@ -142,14 +145,29 @@ async def test_one_tenants_free_images_do_not_touch_anothers(two_accounts, fake_
     assert (await _balance(b))["onboarding_free_remaining"] == settings.onboarding_free_images
 
 
-async def test_normal_generation_never_spends_the_free_allowance(account, fake_gemini):
+async def test_standard_generation_uses_free_images_first(account, fake_gemini):
+    # No explicit flag: a standard-quality image from the Image tab spends a
+    # free image while any are left, and never touches paid credits.
     await _set_credits(account.tenant_id, 50)
     body = {k: v for k, v in FREE_BODY.items() if k != "use_onboarding_free"}
 
     response = await account.post("/ai/images/generate", json=body)
 
     assert response.status_code == 200
-    assert response.json()["credits_charged"] == 5
+    assert response.json()["credits_charged"] == 0
+    after = await _balance(account)
+    assert after["onboarding_free_remaining"] == settings.onboarding_free_images - 1
+    assert after["balance"] == 50
+
+
+async def test_higher_quality_never_spends_the_free_allowance(account, fake_gemini):
+    await _set_credits(account.tenant_id, 50)
+    body = {k: v for k, v in FREE_BODY.items() if k != "use_onboarding_free"}
+
+    response = await account.post("/ai/images/generate", json={**body, "tier": "high_res"})
+
+    assert response.status_code == 200
+    assert response.json()["credits_charged"] == settings.ai_image_credits_high_res
     assert (await _balance(account))["onboarding_free_remaining"] == settings.onboarding_free_images
 
 

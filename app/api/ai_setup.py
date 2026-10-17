@@ -173,17 +173,33 @@ async def generate_slot_image(payload: ImageSlotIn, user: CurrentUser, db: DB) -
     return {"slot": slot, "url": url, "skipped": False, **await _state_out(db, user.tenant_id, state)}
 
 
+def _slug_for(name: str, fallback: str) -> str:
+    """An explicit, collision-proof slug. crud.slugify keeps only a-z0-9, so
+    every Bangla name ("কুর্তি", "পায়জামা") collapses to the same fallback and
+    a second one hits the unique constraint — and Bangla is the default
+    language here, so that would break most setups. A name with no usable
+    ASCII gets a short random suffix up front."""
+    base = crud.slugify(name, fallback)
+    return f"{fallback}-{uuid.uuid4().hex[:6]}" if base == fallback else base
+
+
 async def _create_with_unique_slug(create, payload_cls, data: dict):
-    """A merchant may already own a category/product with the same name —
-    retry once with a short suffix instead of failing the whole setup on a
-    409 slug clash."""
+    """Create with a safe slug, and retry once with a suffix if it still
+    clashes (the merchant may already own an "Aurora Shirt" slug).
+
+    A 409 means crud.save rolled the session back, which expires EVERY loaded
+    ORM object — so `create` must not read attributes off a site/tenant object
+    loaded before the call (async SQLAlchemy can't lazy-load them and raises
+    MissingGreenlet, which is the 500 this used to cause). Callers pass plain
+    ids, and re-load rows after this returns."""
+    fallback = "category" if payload_cls is CategoryCreate else "product"
+    slug = _slug_for(data["name"], fallback)
     try:
-        return await create(payload_cls(**data))
+        return await create(payload_cls(**{**data, "slug": slug}))
     except HTTPException as exc:
         if exc.status_code != status.HTTP_409_CONFLICT:
             raise
-        base = crud.slugify(data["name"], "item")
-        return await create(payload_cls(**{**data, "slug": f"{base}-{uuid.uuid4().hex[:4]}"}))
+        return await create(payload_cls(**{**data, "slug": f"{slug}-{uuid.uuid4().hex[:4]}"}))
 
 
 @router.post("/apply")
@@ -196,31 +212,36 @@ async def apply_site(user: CurrentUser, db: DB) -> dict:
     images = state.get("images") or {}
     created = dict(state.get("created") or {})
     site = await setup.first_site(db, user.tenant_id)
+    # Plain values, not ORM attributes: a rolled-back create (slug clash)
+    # expires `site` and `tenant`, and reading them again would raise.
+    site_id = site.id
 
-    # Categories — saved to state right away, so a retry after a later
-    # failure reuses them instead of creating duplicates.
+    # Categories — each saved to state as soon as it exists, so a retry after
+    # a later failure reuses it instead of creating a duplicate.
     category_ids: list[str] = list(created.get("category_ids") or [])
-    if not category_ids:
-        for i, cat in enumerate(plan["categories"]):
-            row = await _create_with_unique_slug(
-                lambda p: commerce.create_category(site.id, p, user, db),
-                CategoryCreate,
-                {
-                    "name": cat["name"],
-                    "description": cat["description"] or None,
-                    "image_url": images.get(f"category_{i}"),
-                },
-            )
-            category_ids.append(str(row.id))
+    for i, cat in enumerate(plan["categories"]):
+        if i < len(category_ids):
+            continue
+        row = await _create_with_unique_slug(
+            lambda p: commerce.create_category(site_id, p, user, db),
+            CategoryCreate,
+            {
+                "name": cat["name"],
+                "description": cat["description"] or None,
+                "image_url": images.get(f"category_{i}"),
+            },
+        )
+        category_ids.append(str(row.id))
         created["category_ids"] = category_ids
         state["created"] = created
+        tenant = await setup.load_tenant(db, user.tenant_id)
         await setup.save_state(db, tenant, state)
 
     product_id: str | None = created.get("product_id")
     if not product_id:
         product = plan["product"]
         row = await _create_with_unique_slug(
-            lambda p: commerce.create_product(site.id, p, user, db),
+            lambda p: commerce.create_product(site_id, p, user, db),
             ProductCreate,
             {
                 "name": product["name"],
@@ -241,7 +262,12 @@ async def apply_site(user: CurrentUser, db: DB) -> dict:
         product_id = str(row.id)
         created["product_id"] = product_id
         state["created"] = created
+        tenant = await setup.load_tenant(db, user.tenant_id)
         await setup.save_state(db, tenant, state)
+
+    # Re-load: any rolled-back create above left these objects expired.
+    tenant = await setup.load_tenant(db, user.tenant_id)
+    site = await setup.first_site(db, user.tenant_id)
 
     # A store with no way to pay can't take its first order — Cash on
     # Delivery needs no account or keys, so it's the safe default.
