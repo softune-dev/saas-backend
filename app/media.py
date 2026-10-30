@@ -60,7 +60,7 @@ PLAN_STORAGE_LIMIT_BYTES: dict[str, int] = {
     "trial": 500 * 1024 * 1024,       # 500 MB — same as starter, a trial previews it exactly
     "starter": 500 * 1024 * 1024,     # 500 MB
     "growth": 2 * 1024 * 1024 * 1024,  # 2 GB
-    "business": 5 * 1024 * 1024 * 1024,  # 5 GB
+    "business": 3 * 1024 * 1024 * 1024,  # 3 GB
 }
 DEFAULT_STORAGE_LIMIT_BYTES = PLAN_STORAGE_LIMIT_BYTES["starter"]
 

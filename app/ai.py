@@ -55,7 +55,7 @@ PLAN_AI_DAILY_CAP: dict[str, int] = {
     "trial": 15,
     "starter": 15,
     "growth": 80,
-    "business": 250,
+    "business": 120,
 }
 DEFAULT_AI_DAILY_CAP = 80
 

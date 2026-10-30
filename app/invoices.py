@@ -20,9 +20,9 @@ from app.mailer import BRAND, INK, LINE, MUTED, SURFACE
 PLAN_PRICES_CENTS: dict[str, int] = {
     "trial": 0,
     "demo": 0,
-    "starter": 119_000,
-    "growth": 299_000,
-    "business": 699_000,
+    "starter": 49_900,
+    "growth": 149_900,
+    "business": 399_900,
 }
 
 PLAN_NAMES: dict[str, str] = {

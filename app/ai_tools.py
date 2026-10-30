@@ -418,7 +418,7 @@ async def _get_media_stats(db: AsyncSession, tenant_id: uuid.UUID) -> dict:
 # app/ai.py imports THIS module (ai_tools), so importing back would be
 # circular. Same tradeoff this codebase already makes between app/media.py's
 # and app/ai.py's own separate per-plan dicts — keep in sync if it changes.
-_PLAN_AI_DAILY_CAP: dict[str, int] = {"demo": 50, "starter": 15, "growth": 80, "business": 250}
+_PLAN_AI_DAILY_CAP: dict[str, int] = {"demo": 50, "starter": 15, "growth": 80, "business": 120}
 _DEFAULT_AI_DAILY_CAP = 80
 
 
