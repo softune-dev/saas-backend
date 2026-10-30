@@ -17,6 +17,7 @@ image on the storefront goes through the existing set_* tools, which do.
 
 import io
 import logging
+import re
 from urllib.parse import urlparse
 
 import httpx
@@ -38,7 +39,9 @@ def _allowed_host(url: str) -> bool:
     host = (parsed.hostname or "").lower()
     if parsed.scheme != "https" or parsed.port not in (None, 443) or not host:
         return False
-    return any(host == h or host.endswith("." + h) for h in settings.mcp_image_hosts)
+    return any(host == h or host.endswith("." + h) for h in settings.mcp_image_hosts) or any(
+        re.match(pattern, host) for pattern in settings.mcp_image_host_patterns
+    )
 
 
 async def _download(url: str) -> bytes:

@@ -66,7 +66,9 @@ def test_image_downloads_only_from_openai_hosts_over_https():
     ok = mcp_images._allowed_host
     assert ok("https://files.oaiusercontent.com/file-abc")
     assert ok("https://oaisdmntprcentralus.blob.core.windows.net/files/x?sig=1")
+    assert ok("https://oaisdmntprnznorth.blob.core.windows.net/files/x?sig=1")
     assert not ok("https://evilaccount.blob.core.windows.net/files/x")
+    assert not ok("https://oaisdmntprnznorth.blob.core.windows.net.evil.example/x")
     assert not ok("http://files.oaiusercontent.com/file-abc")
     assert not ok("https://evil.example.com/oaiusercontent.com")
     assert not ok("https://oaiusercontent.com.evil.example/x")
