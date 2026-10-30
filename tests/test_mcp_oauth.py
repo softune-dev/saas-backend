@@ -15,7 +15,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 from sqlalchemy import select, update
 
-from app import mcp_server, oauth_server
+from app import mcp_images, mcp_server, oauth_server
 from app.db import SessionLocal
 from app.models import OAuthToken, Site
 
@@ -50,6 +50,23 @@ def test_no_billing_customer_pii_or_destructive_tools_are_exposed():
                  "propose_order_status"}
     assert not (names & forbidden)
     assert not any(n.startswith(("delete_", "remove_", "refund")) for n in names)
+
+
+def test_image_tool_declares_a_file_param_and_only_adds():
+    tool = next(t for t in mcp_server.TOOL_DEFS if t["name"] == "add_image_to_gallery")
+    assert tool["_meta"]["openai/fileParams"] == ["image"]
+    assert tool["annotations"]["destructiveHint"] is False
+    assert tool["securitySchemes"][0]["scopes"] == ["store.write"]
+
+
+def test_image_downloads_only_from_openai_hosts_over_https():
+    ok = mcp_images._allowed_host
+    assert ok("https://files.oaiusercontent.com/file-abc")
+    assert not ok("http://files.oaiusercontent.com/file-abc")
+    assert not ok("https://evil.example.com/oaiusercontent.com")
+    assert not ok("https://oaiusercontent.com.evil.example/x")
+    assert not ok("https://127.0.0.1/x") and not ok("https://localhost/x")
+    assert not ok("https://files.oaiusercontent.com:8443/x")
 
 
 def test_schema_types_are_json_schema_not_gemini_uppercase():

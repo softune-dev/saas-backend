@@ -36,7 +36,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import ai_agent_tools, ai_agent_undo, ai_log, ai_tools, cache, oauth_server
+from app import ai_agent_media, ai_agent_tools, ai_agent_undo, ai_log, ai_tools, cache, mcp_images, oauth_server
 from app.config import settings
 from app.models import AiAgentChange, OAuthToken
 
@@ -68,8 +68,35 @@ _WRITE_TOOLS: dict[str, tuple[str, dict]] = {
     "create_product": ("Add product", _ADD),
     "update_product": ("Edit product", _OVERWRITE),
     "create_discount_event": ("Create sale event", _ADD),
+    "set_homepage_image": ("Set homepage image", _OVERWRITE),
+    "set_category_image": ("Set category image", _OVERWRITE),
+    "add_product_image": ("Add product photo", _OVERWRITE),
 }
+_HANDLERS = {**ai_agent_tools.HANDLERS, **ai_agent_media.HANDLERS}
 _OWN_TOOLS = {
+    "add_image_to_gallery": {
+        "title": "Add image to media library",
+        "description": (
+            "Save an image the merchant attached or that was generated in this chat into the store's media library. "
+            "Returns an image_url to then place on the store with set_homepage_image, set_category_image or add_product_image."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "image": {
+                    "type": "object",
+                    "description": "The image file (provided by ChatGPT).",
+                    "properties": {"download_url": {"type": "string"}, "file_id": {"type": "string"}},
+                    "required": ["download_url", "file_id"],
+                },
+            },
+            "required": ["image"],
+        },
+        "annotations": _ADD,
+        # Tells ChatGPT to pass the file itself (a temporary download link) for this argument.
+        "_meta": {"openai/fileParams": ["image"]},
+        "scope": "store.write",
+    },
     "list_recent_changes": {
         "title": "List recent changes",
         "description": "List the changes made to this store through connected apps (newest first) with their ids, so one can be undone.",
@@ -97,7 +124,10 @@ def _json_schema(node: Any) -> Any:
 
 
 def _tool_defs() -> list[dict]:
-    decls = {d["name"]: d for d in ai_tools.TOOL_DECLARATIONS + ai_agent_tools.DECLARATIONS}
+    decls = {
+        d["name"]: d
+        for d in ai_tools.TOOL_DECLARATIONS + ai_agent_tools.DECLARATIONS + ai_agent_media.DECLARATIONS
+    }
     out: list[dict] = []
     for name, title in _READ_TOOLS.items():
         out.append(_entry(decls[name], title, _READ, "store.read"))
@@ -105,12 +135,15 @@ def _tool_defs() -> list[dict]:
         scope = "store.read" if annotations is _READ else "store.write"
         out.append(_entry(decls[name], title, annotations, scope))
     for name, spec in _OWN_TOOLS.items():
-        scope = "store.read" if spec["annotations"] is _READ else "store.write"
-        out.append({
+        scope = spec.get("scope") or ("store.read" if spec["annotations"] is _READ else "store.write")
+        entry = {
             "name": name, "title": spec["title"], "description": spec["description"],
             "inputSchema": spec["inputSchema"], "annotations": spec["annotations"],
             "securitySchemes": [{"type": "oauth2", "scopes": [scope]}],
-        })
+        }
+        if spec.get("_meta"):
+            entry["_meta"] = spec["_meta"]
+        out.append(entry)
     return out
 
 
@@ -197,9 +230,12 @@ async def _execute(name: str, args: dict, db: AsyncSession, tenant_id: uuid.UUID
         except ValueError:
             return {"error": "change_id isn't valid."}
         return {"ok": True, "reverted": out.get("summary")}
+    if name == "add_image_to_gallery":
+        # Adds a file, never overwrites, so no Undo and no change record.
+        return await mcp_images.add_image_to_gallery(db, tenant_id, args.get("image"))
     if name in _READ_TOOLS:
         return await ai_tools.execute_tool(name, args, db, tenant_id)
-    result = await ai_agent_tools.run(name, args, db, tenant_id)
+    result = await ai_agent_tools.run(name, args, db, tenant_id, _HANDLERS)
     return result if "error" in result else _shape_write(result)
 
 

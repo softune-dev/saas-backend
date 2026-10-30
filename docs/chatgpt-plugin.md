@@ -26,6 +26,13 @@ categories, sale events, store settings, storefront design, recent changes.
 Change, all reversible: store colors/fonts, homepage text, add category, add
 or edit a product, create a sale event, undo a change.
 
+Images: `add_image_to_gallery` saves an image from the chat (one ChatGPT made or
+the merchant attached) into the media library; `set_homepage_image`,
+`set_category_image` and `add_product_image` then place it (these have Undo).
+ChatGPT passes the file as a temporary download link (`openai/fileParams`);
+`app/mcp_images.py` only fetches it from `mcp_image_hosts` over https, with no
+redirects and a 10MB cap, then applies the normal size and storage checks.
+
 Deliberately not included: deleting, refunds, order status, replacing all
 categories, customer phone numbers, fraud data, courier/payment details,
 billing and plans. OpenAI's rules forbid showing plans or promoting upgrades,
@@ -80,4 +87,6 @@ guidelines then, they change.
 - Verified in real ChatGPT (Oct 2026, store Veila): sign-in, store overview read, and a
   homepage-tagline write with ChatGPT's confirmation prompt and read-back, and Undo.
   The other write tools and other ChatGPT plans are not tested yet.
+- Image upload from ChatGPT is untested live: check the real download link's host
+  against `mcp_image_hosts` and that ChatGPT really passes the file.
 - Whether other MCP apps (Claude, etc.) work with this OAuth setup.

@@ -70,6 +70,10 @@ class Settings(BaseSettings):
     # looping model) can't hammer the database. Writes are far fewer.
     mcp_calls_per_minute: int = 60
     mcp_writes_per_hour: int = 60
+    # Hosts a connected ChatGPT's image download links may come from
+    # (app/mcp_images.py). Suffix match, https only. Check a real link's host
+    # in the logs after the first live test and tighten if it is narrower.
+    mcp_image_hosts: list[str] = ["oaiusercontent.com", "openai.com", "chatgpt.com"]
 
     # --- Vercel domain automation (app/vercel.py) ---
     # Blank-able like Cloudinary above: attaching a site's subdomain to the
