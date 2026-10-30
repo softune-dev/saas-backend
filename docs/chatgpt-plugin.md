@@ -46,6 +46,17 @@ so ChatGPT asks the merchant to confirm each one.
    authentication OAuth. Connect, approve on the dashboard page, then ask
    ChatGPT something like "how are my sales this month?".
 
+## Signed out vs signed in
+
+`initialize`, `ping` and `tools/list` work WITHOUT a token on purpose: ChatGPT
+has to read the tool list and each tool's `securitySchemes` before it can offer
+to link an account (OpenAI: the linking prompt needs both the per-tool
+`securitySchemes` and a tool-level `_meta["mcp/www_authenticate"]` challenge).
+The list contains no store data. `tools/call` without a token answers with that
+challenge. A token that IS presented but is expired, revoked or wrong gets a
+real HTTP 401. If ChatGPT shows "This app does not provide a browser setup URL",
+delete the connector and add it again so it re-reads the tools.
+
 ## Limits
 
 - 60 tool calls per minute and 60 changes per hour per store (`mcp_calls_per_minute`,

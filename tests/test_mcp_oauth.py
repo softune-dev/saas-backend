@@ -176,11 +176,24 @@ async def test_read_only_connection_cannot_write(account, site):
     assert (theme or {}).get("tagline") != "nope"
 
 
-async def test_missing_or_garbage_token_is_401_with_a_challenge(account):
-    for headers in ({}, {"Authorization": "Bearer not-a-real-token"}):
-        res = await account.client.post("/mcp", headers=headers, json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
-        assert res.status_code == 401
-        assert "resource_metadata" in res.headers["www-authenticate"]
+async def test_discovery_is_public_but_tool_calls_need_a_sign_in(account):
+    http = account.client
+    ping = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+    listed = await http.post("/mcp", json=ping)
+    assert listed.status_code == 200 and "resource_metadata" in listed.headers["www-authenticate"]
+    tools = listed.json()["result"]["tools"]
+    assert tools and all(t["securitySchemes"][0]["type"] == "oauth2" for t in tools)
+
+    call = await http.post("/mcp", json={"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                                         "params": {"name": "get_business_overview", "arguments": {}}})
+    result = call.json()["result"]
+    assert result["isError"] is True and "mcp/www_authenticate" in result["_meta"]
+
+
+async def test_a_presented_but_invalid_token_is_401(account):
+    res = await account.client.post("/mcp", headers={"Authorization": "Bearer not-a-real-token"},
+                                    json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
+    assert res.status_code == 401 and "resource_metadata" in res.headers["www-authenticate"]
 
 
 async def test_wrong_pkce_verifier_is_refused(account):

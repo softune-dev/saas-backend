@@ -223,9 +223,16 @@ def _tool_result(payload: dict, *, is_error: bool = False, meta: dict | None = N
     return out
 
 
-async def call_tool(db: AsyncSession, token: OAuthToken, name: str, args: Any) -> dict:
+async def call_tool(db: AsyncSession, token: OAuthToken | None, name: str, args: Any) -> dict:
     if name not in _TOOL_SCOPE:
         return _tool_result({"error": f"Unknown tool {name}."}, is_error=True)
+    if token is None:
+        # Not signed in. This answer (with the challenge in _meta) is what makes
+        # ChatGPT show its "connect your account" prompt; an HTTP 401 alone does not.
+        return _tool_result(
+            {"error": "Sign in to SoftuneBD to use this."}, is_error=True,
+            meta=_challenge("insufficient_scope", "You need to login to continue"),
+        )
     args = args if isinstance(args, dict) else {}
     needed = _TOOL_SCOPE[name]
     if needed not in token.scope.split():
@@ -267,8 +274,13 @@ def _rpc_error(msg_id: Any, code: int, message: str) -> dict:
     return {"jsonrpc": "2.0", "id": msg_id, "error": {"code": code, "message": message}}
 
 
-async def handle(message: Any, token: OAuthToken, db: AsyncSession) -> dict | None:
-    """One JSON-RPC message in, its reply out (None for notifications)."""
+async def handle(message: Any, token: OAuthToken | None, db: AsyncSession) -> dict | None:
+    """One JSON-RPC message in, its reply out (None for notifications).
+
+    `token` is None for a caller who isn't signed in. Discovery (initialize,
+    ping, tools/list) works without one on purpose: ChatGPT has to read the
+    tool list, and each tool's securitySchemes, BEFORE it can offer to link
+    an account. The list holds no store data. Only tools/call needs a token."""
     if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
         return _rpc_error(None, -32600, "Invalid request")
     msg_id, method = message.get("id"), message.get("method")

@@ -23,14 +23,17 @@ DB = Annotated[AsyncSession, Depends(get_db)]
 _ORIGINS = {"https://chatgpt.com", "https://chat.openai.com"}
 
 
-def _unauthorized() -> JSONResponse:
-    challenge = (
+def _challenge_header() -> str:
+    return (
         f'Bearer resource_metadata="{oauth_server.issuer()}/.well-known/oauth-protected-resource", '
         f'scope="{" ".join(oauth_server.SCOPES)}"'
     )
+
+
+def _unauthorized() -> JSONResponse:
     return JSONResponse(
         {"error": "invalid_token", "error_description": "Missing, expired or invalid access token."},
-        status_code=401, headers={"WWW-Authenticate": challenge},
+        status_code=401, headers={"WWW-Authenticate": _challenge_header()},
     )
 
 
@@ -42,9 +45,16 @@ async def mcp(request: Request, db: DB):
 
     auth = request.headers.get("authorization", "")
     raw = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
-    token = await oauth_server.authenticate_bearer(db, raw)
-    if token is None:
-        return _unauthorized()
+    token = None
+    if raw:
+        # A token that was presented must be good: an expired or revoked one
+        # gets a 401 so ChatGPT refreshes it or asks the merchant to sign in again.
+        token = await oauth_server.authenticate_bearer(db, raw)
+        if token is None:
+            return _unauthorized()
+    # No token at all = anonymous (discovery only, see mcp_server.handle). The
+    # challenge header tells ChatGPT where our sign-in metadata lives.
+    extra = {} if token else {"WWW-Authenticate": _challenge_header()}
 
     try:
         body = await request.json()
@@ -54,9 +64,9 @@ async def mcp(request: Request, db: DB):
         )
     if isinstance(body, list):  # older protocol versions allowed batches
         replies = [r for r in [await mcp_server.handle(m, token, db) for m in body] if r is not None]
-        return JSONResponse(replies) if replies else Response(status_code=202)
+        return JSONResponse(replies, headers=extra) if replies else Response(status_code=202, headers=extra)
     reply = await mcp_server.handle(body, token, db)
-    return JSONResponse(reply) if reply is not None else Response(status_code=202)
+    return JSONResponse(reply, headers=extra) if reply is not None else Response(status_code=202, headers=extra)
 
 
 @router.get("/mcp")
