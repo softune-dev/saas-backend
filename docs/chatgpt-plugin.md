@@ -87,6 +87,11 @@ guidelines then, they change.
 - Verified in real ChatGPT (Oct 2026, store Veila): sign-in, store overview read, and a
   homepage-tagline write with ChatGPT's confirmation prompt and read-back, and Undo.
   The other write tools and other ChatGPT plans are not tested yet.
-- Image upload from ChatGPT is untested live: check the real download link's host
-  against `mcp_image_hosts` and that ChatGPT really passes the file.
+- Image upload verified live (Oct 2026): a ChatGPT-generated hero was added to the media
+  library and set as the desktop hero. Needed (1) the full four-property file schema
+  (`download_url`, `file_id`, `mime_type`, `file_name`) or ChatGPT passes file ids
+  instead of links, and (2) allowing OpenAI's regional Azure hosts
+  (`oaisdmntpr<region>.blob.core.windows.net`, by pattern, see `mcp_image_host_patterns`).
+  If uploads break again, grep the api log for `mcp image link rejected` to see the host.
+  The mobile hero slot (`hero_mobile`) is not tested live yet.
 - Whether other MCP apps (Claude, etc.) work with this OAuth setup.
