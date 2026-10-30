@@ -78,6 +78,6 @@ guidelines then, they change.
 - The database-backed tests in `tests/test_mcp_oauth.py` need migration 080 on the
   database `DATABASE_URL` points at.
 - Verified in real ChatGPT (Oct 2026, store Veila): sign-in, store overview read, and a
-  homepage-tagline write with ChatGPT's confirmation prompt and read-back. Undo from
-  ChatGPT, the other write tools, and other ChatGPT plans are not tested yet.
+  homepage-tagline write with ChatGPT's confirmation prompt and read-back, and Undo.
+  The other write tools and other ChatGPT plans are not tested yet.
 - Whether other MCP apps (Claude, etc.) work with this OAuth setup.
