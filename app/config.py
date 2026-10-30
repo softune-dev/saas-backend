@@ -73,7 +73,12 @@ class Settings(BaseSettings):
     # Hosts a connected ChatGPT's image download links may come from
     # (app/mcp_images.py). Suffix match, https only. Check a real link's host
     # in the logs after the first live test and tighten if it is narrower.
-    mcp_image_hosts: list[str] = ["oaiusercontent.com", "openai.com", "chatgpt.com"]
+    mcp_image_hosts: list[str] = [
+        "oaiusercontent.com", "openai.com", "chatgpt.com",
+        # What a real link used in the first live test (Oct 2026). Exact host,
+        # not blob.core.windows.net: anyone can create a storage account there.
+        "oaisdmntprcentralus.blob.core.windows.net",
+    ]
 
     # --- Vercel domain automation (app/vercel.py) ---
     # Blank-able like Cloudinary above: attaching a site's subdomain to the
