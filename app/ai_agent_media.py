@@ -88,11 +88,11 @@ async def load_for_model(site: Site, images: list[dict]) -> tuple[list[dict], li
 DECLARATIONS: list[dict] = [
     {
         "name": "set_homepage_image",
-        "description": "Put an attached image on the homepage: the main hero banner or the why-choose-us section. Applied immediately; undo restores it.",
+        "description": "Put an attached image on the homepage: the main hero banner (wide, for desktop), the mobile hero (square or portrait, shown on phones) or the why-choose-us section. Applied immediately; undo restores it.",
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "slot": {"type": "STRING", "enum": ["hero", "why"]},
+                "slot": {"type": "STRING", "enum": ["hero", "hero_mobile", "why"]},
                 "image_url": {"type": "STRING", "description": "Exact hosted URL from the attached image note."},
             },
             "required": ["slot", "image_url"],
@@ -132,10 +132,14 @@ async def set_homepage_image(db: AsyncSession, tenant_id: uuid.UUID, slot: str, 
         # when it's empty, and a merchant-set mobile image is theirs to keep.
         patch = {"heroMediaType": "image", "heroImages": [url]}
         summary = "Set the hero banner image"
+    elif slot == "hero_mobile":
+        # The square/portrait set phones use instead of the wide banner.
+        patch = {"heroImagesSquare": [url]}
+        summary = "Set the mobile hero image"
     elif slot == "why":
         patch, summary = {"whyImage": url}, "Set the why-choose-us image"
     else:
-        return {"error": "slot must be hero or why"}
+        return {"error": "slot must be hero, hero_mobile or why"}
     return await ai_agent_tools._theme_change(db, tenant_id, "set_homepage_image", patch, summary)
 
 
