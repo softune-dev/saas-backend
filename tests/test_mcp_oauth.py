@@ -57,6 +57,9 @@ def test_image_tool_declares_a_file_param_and_only_adds():
     assert tool["_meta"]["openai/fileParams"] == ["image"]
     assert tool["annotations"]["destructiveHint"] is False
     assert tool["securitySchemes"][0]["scopes"] == ["store.write"]
+    file_schema = tool["inputSchema"]["properties"]["image"]
+    assert set(file_schema["properties"]) == {"download_url", "file_id", "mime_type", "file_name"}
+    assert set(file_schema["required"]) == {"download_url", "file_id"}
 
 
 def test_image_downloads_only_from_openai_hosts_over_https():

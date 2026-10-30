@@ -86,7 +86,14 @@ _OWN_TOOLS = {
                 "image": {
                     "type": "object",
                     "description": "The image file (provided by ChatGPT).",
-                    "properties": {"download_url": {"type": "string"}, "file_id": {"type": "string"}},
+                    # OpenAI only treats this as a file when all four properties are
+                    # declared, with just the first two required.
+                    "properties": {
+                        "download_url": {"type": "string", "description": "Temporary download link for the file."},
+                        "file_id": {"type": "string", "description": "ChatGPT's id for the file."},
+                        "mime_type": {"type": "string"},
+                        "file_name": {"type": "string"},
+                    },
                     "required": ["download_url", "file_id"],
                 },
             },
