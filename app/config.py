@@ -175,6 +175,12 @@ class Settings(BaseSettings):
     # claim_onboarding_free). 5 = the three core slots plus two retries.
     # migrations/071's one-off backfill hardcodes the same 5 — change both.
     onboarding_free_images: int = 5
+    # Art-director step (app/ai_art_director.py): a cheap text call that turns a
+    # vague request ("make it nicer") into a concrete design brief before the
+    # image model sees it. Measured on one banner: flat colour block without it,
+    # editorial layout with it. Costs a fraction of a cent per image.
+    ai_art_director_enabled: bool = True
+    ai_art_director_model: str = "gemini-2.5-flash"
 
     # --- AI store setup (app/ai_site_setup.py) ---
     # Writes every word of a new storefront in one call: a "big task", so it

@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import ai_images, ai_log, crud, mailer, media
+from app.ai_art_director import art_direct
 from app.ai_image_presets import (
     ALWAYS_TEXT_FREE_CATEGORIES,
     FREEFORM_QUALITY_BASELINE,
@@ -189,6 +190,21 @@ async def _resolve_prompt(db: AsyncSession, tenant_id, payload: GenerateImageIn)
     return f"{context}\n\n{prompt}" if context else prompt
 
 
+async def _art_directed(
+    request: str, context: str, *, aspect_ratio: str, include_text: bool,
+    reference: tuple[bytes, str] | None, copy: str = "",
+) -> str | None:
+    """The art director's brief plus the same text-rendering guard every other
+    path ends with, or None to fall back to the merchant's own prompt."""
+    brief = await art_direct(
+        f"{request} {copy}".strip(), context=context, aspect_ratio=aspect_ratio,
+        include_text=include_text, reference=reference,
+    )
+    if not brief:
+        return None
+    return f"{brief} {TEXT_RENDER_QUALITY if include_text else NO_TEXT_INSTRUCTION}"
+
+
 async def build_generation_prompt(db: AsyncSession, tenant_id, payload: GenerateImageIn) -> str:
     """Public entry to the exact prompt pipeline /generate uses (preset +
     copy + business context), so the AI store setup (app/ai_site_setup.py)
@@ -239,6 +255,16 @@ async def generate(payload: GenerateImageIn, user: CurrentUser, db: DB) -> Gener
     docstrings for why the ordering is this way round, not the reverse).
     """
     prompt = await _resolve_prompt(db, user.tenant_id, payload)
+    if not payload.preset_id:
+        # Freeform words get a real design brief; presets are already authored.
+        first = payload.reference_images[0] if payload.reference_images else None
+        directed = await _art_directed(
+            payload.prompt or "", await _business_context_line(db, user.tenant_id),
+            aspect_ratio=payload.aspect_ratio, include_text=payload.include_text,
+            reference=(base64.b64decode(first.data_base64), first.mime_type) if first else None,
+            copy=_copy_instruction(payload) if payload.include_text else "",
+        )
+        prompt = directed or prompt
     use_free = await _should_use_free(db, user.tenant_id, payload.tier, payload.use_onboarding_free)
 
     async with ai_log.track(
@@ -338,11 +364,20 @@ async def edit(payload: EditImageIn, user: CurrentUser, db: DB) -> GeneratedImag
             balance = await ai_images.charge_credits(db, user.tenant_id, credits, reason="edit")
         try:
             context = await _business_context_line(db, user.tenant_id)
-            instruction = payload.prompt
-            instruction += f" {TEXT_RENDER_QUALITY}" if payload.include_text else f" {NO_TEXT_INSTRUCTION}"
-            prompt = f"{context}\n\n{instruction}" if context else instruction
-            tracker.input["prompt_sent"] = prompt
             source_bytes = base64.b64decode(payload.source_image.data_base64)
+            # The director sees the current image, so "make it nicer" becomes a
+            # concrete redesign instead of a near-identical re-render.
+            instruction = await _art_directed(
+                payload.prompt, context, aspect_ratio=payload.aspect_ratio,
+                include_text=payload.include_text, reference=(source_bytes, payload.source_image.mime_type),
+            )
+            if instruction:
+                prompt = instruction
+            else:
+                instruction = payload.prompt
+                instruction += f" {TEXT_RENDER_QUALITY}" if payload.include_text else f" {NO_TEXT_INSTRUCTION}"
+                prompt = f"{context}\n\n{instruction}" if context else instruction
+            tracker.input["prompt_sent"] = prompt
             image_bytes, mime_type = await ai_images.generate_image(
                 prompt, payload.tier, [(source_bytes, payload.source_image.mime_type)], payload.aspect_ratio
             )
