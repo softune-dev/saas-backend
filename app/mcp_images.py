@@ -16,6 +16,7 @@ image on the storefront goes through the existing set_* tools, which do.
 """
 
 import io
+import logging
 from urllib.parse import urlparse
 
 import httpx
@@ -29,6 +30,8 @@ from app import ai_agent_tools, media
 from app.config import settings
 from app.models import Tenant
 
+log = logging.getLogger(__name__)
+
 
 def _allowed_host(url: str) -> bool:
     parsed = urlparse(url)
@@ -40,6 +43,8 @@ def _allowed_host(url: str) -> bool:
 
 async def _download(url: str) -> bytes:
     if not _allowed_host(url):
+        # Host only, never the full link (it can carry a signed token).
+        log.warning("mcp image link rejected: scheme=%s host=%s", urlparse(url).scheme, urlparse(url).hostname)
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "That image link isn't from ChatGPT, so I can't use it.")
     limit = media.IMAGE_MAX_BYTES
     chunks: list[bytes] = []
