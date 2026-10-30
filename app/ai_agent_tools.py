@@ -484,11 +484,11 @@ HANDLERS = {
 }
 
 
-async def run(name: str, args: dict, db: AsyncSession, tenant_id: uuid.UUID) -> dict:
+async def run(name: str, args: dict, db: AsyncSession, tenant_id: uuid.UUID, handlers: dict | None = None) -> dict:
     """Runs one agent tool. A business-rule failure (plan limit, bad value,
     not found) comes back to the model as {"error": ...} so it can explain or
     adjust, instead of crashing the whole reply."""
-    handler = HANDLERS[name]
+    handler = (handlers or HANDLERS)[name]
     try:
         return await handler(db, tenant_id, **args)
     except HTTPException as exc:

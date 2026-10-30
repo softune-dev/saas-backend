@@ -28,12 +28,21 @@ class AgentTurn(BaseModel):
     content: str = Field(max_length=8000)
 
 
+class AgentImage(BaseModel):
+    url: str = Field(max_length=600)
+    name: str | None = Field(default=None, max_length=120)
+
+
 class AgentChatIn(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
     history: list[AgentTurn] = Field(default_factory=list, max_length=40)
     # A dashboard context tag ("focus on my orders") — sent apart from the
     # message so chat history and logs keep only what the merchant typed.
     context_hint: str | None = Field(default=None, max_length=500)
+    # Pictures the merchant attached, already uploaded to their own media
+    # library by the dashboard. Each URL is checked against THIS store's
+    # folder before it is fetched or used (ai_agent_media.own_image_url).
+    images: list[AgentImage] = Field(default_factory=list, max_length=4)
 
 
 @router.post("/agent/chat")
@@ -51,6 +60,7 @@ async def agent_chat(payload: AgentChatIn, user: CurrentUser, db: DB) -> Streami
         tenant_id=user.tenant_id,
         user_id=user.user_id,
         plan=plan,
+        images=[i.model_dump() for i in payload.images],
     )
     return StreamingResponse(
         stream,

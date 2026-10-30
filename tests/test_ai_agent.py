@@ -135,3 +135,83 @@ async def test_agent_stream_applies_change_and_emits_events(account, site, monke
     text = "".join(e["text"] for e in events if e["type"] == "delta")
     assert "Let me write that.\n\nDone" in text
     assert (await _theme(account.tenant_id))["ctaTitle"] == "Winter Collection"
+
+
+# --- images: the agent may only use THIS store's own uploads -----------------
+
+from types import SimpleNamespace  # noqa: E402
+
+import pytest  # noqa: E402
+from fastapi import HTTPException  # noqa: E402
+
+from app import ai_agent_media  # noqa: E402
+from app.config import settings  # noqa: E402
+
+
+def _url(sub: str, cloud: str | None = None, path: str = "other/a1b2.jpg") -> str:
+    cloud = cloud or settings.cloudinary_cloud_name or "democloud"
+    return f"https://res.cloudinary.com/{cloud}/image/upload/v1700000000/{settings.cloudinary_root_folder}/{sub}/{path}"
+
+
+def test_own_image_url_accepts_this_stores_upload(monkeypatch):
+    monkeypatch.setattr(settings, "cloudinary_cloud_name", "democloud")
+    site = SimpleNamespace(subdomain="elara")
+    assert ai_agent_media.own_image_url(site, _url("elara")) == _url("elara")
+
+
+@pytest.mark.parametrize("bad", [
+    "https://evil.example.com/x.jpg",                                   # not Cloudinary at all
+    "http://res.cloudinary.com/democloud/image/upload/v1/softune/elara/a.jpg",  # not https
+    "https://res.cloudinary.com/otherCloud/image/upload/v1/softune/elara/a.jpg",  # someone else's cloud
+    "https://res.cloudinary.com/democloud/image/upload/v1/softune/other-store/a.jpg",  # another store's folder
+    "https://res.cloudinary.com/democloud/image/upload/v1/softune/elara/../other-store/a.jpg",  # path trick
+    "https://res.cloudinary.com/democloud/image/upload/v1/softune/elara/a.jpg?x=https://evil",  # query smuggling
+    "",
+])
+def test_own_image_url_rejects_everything_else(monkeypatch, bad):
+    monkeypatch.setattr(settings, "cloudinary_cloud_name", "democloud")
+    with pytest.raises(HTTPException) as exc:
+        ai_agent_media.own_image_url(SimpleNamespace(subdomain="elara"), bad)
+    assert exc.value.status_code == 422
+
+
+async def test_placing_a_foreign_image_is_refused_and_changes_nothing(account, site):
+    before = await _theme(account.tenant_id)
+    result = await _tool(account.tenant_id, "set_homepage_image", slot="hero",
+                         image_url="https://evil.example.com/x.jpg")
+    assert "error" in result
+    assert await _theme(account.tenant_id) == before
+
+
+async def test_image_placement_and_undo(account, site, monkeypatch):
+    monkeypatch.setattr(settings, "cloudinary_cloud_name", "democloud")
+    sub = site["subdomain"]
+    photo = _url(sub)
+
+    hero = await _tool(account.tenant_id, "set_homepage_image", slot="hero", image_url=photo)
+    assert hero["ok"], hero
+    assert (await _theme(account.tenant_id))["heroImages"] == [photo]
+    await _undo(account.tenant_id, hero["change"]["id"])
+    assert (await _theme(account.tenant_id)).get("heroImages") != [photo]
+
+    await _tool(account.tenant_id, "add_category", name="Serums")
+    cat = await _tool(account.tenant_id, "set_category_image", category_name="serums", image_url=photo)
+    assert cat["ok"], cat
+    async with SessionLocal() as db:
+        row = (await db.execute(select(Category).where(Category.tenant_id == uuid.UUID(account.tenant_id)))).scalars().first()
+        assert row.image_url == photo
+    await _undo(account.tenant_id, cat["change"]["id"])
+    async with SessionLocal() as db:
+        row = (await db.execute(select(Category).where(Category.tenant_id == uuid.UUID(account.tenant_id)))).scalars().first()
+        assert row.image_url is None
+
+    prod = await _tool(account.tenant_id, "create_product", name="Centella Serum", price_taka=1450)
+    added = await _tool(account.tenant_id, "add_product_image", product_id=prod["product"]["id"], image_url=photo)
+    assert added["ok"], added
+    async with SessionLocal() as db:
+        row = (await db.execute(select(Product).where(Product.id == uuid.UUID(prod["product"]["id"])))).scalar_one()
+        assert [i["url"] for i in row.images] == [photo]
+    await _undo(account.tenant_id, added["change"]["id"])
+    async with SessionLocal() as db:
+        row = (await db.execute(select(Product).where(Product.id == uuid.UUID(prod["product"]["id"])))).scalar_one()
+        assert row.images == []

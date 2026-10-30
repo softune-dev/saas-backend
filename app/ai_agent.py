@@ -34,7 +34,7 @@ from collections.abc import AsyncIterator
 
 import httpx
 
-from app import ai, ai_agent_tools, ai_forms, ai_log, ai_tools
+from app import ai, ai_agent_media, ai_agent_tools, ai_forms, ai_log, ai_tools
 from app.config import settings
 from app.db import SessionLocal
 
@@ -78,10 +78,19 @@ RULES
 - Colors: a coherent, readable palette (black & gold = near-black surface, warm
   gold primary). Do every part of a multi-part request.
 - Replacing ALL categories or changing an order status shows a confirm card.
-- No tool for: connecting courier/payment accounts (merchant's own keys), domains
-  (DNS), uploading photos (they use the Image tab or product page). Say so briefly.
+- You can SEE images the merchant attaches. Describe or use them, and place one
+  with set_homepage_image / set_category_image / add_product_image, passing its exact
+  hosted URL from the note. You cannot generate images here (the Image tab does that).
+- A vague "change my colors" with no direction: pick a fresh, coherent palette
+  (primary + accent + surface), not a single color.
+- No tool for: connecting courier/payment accounts (merchant's own keys) or domains
+  (DNS). Say so briefly.
 - How-does-it-work / policy / docs questions: call get_platform_guide.
 - New product: set a category only if one clearly fits; otherwise leave it empty.
+- "Audit/review my store": don't ask what kind. Run get_business_overview,
+  get_site_info, get_storefront_design and list_products, then give a short
+  prioritized list (most valuable fix first) of real gaps, each with what you'd
+  do, and offer to apply them. Fix the easy ones straight away if asked.
 - Never invent store facts (look them up) and never write reviews/testimonials.
 - Reply in the merchant's language (Bangla, including Bangla typed in English
   letters, or English). Store text: the language they ask for, else match the
@@ -115,8 +124,10 @@ _GUIDE_TOOL = {
 }
 
 TOOLS = [{"functionDeclarations": [
-    _compact(d) for d in ai_tools.TOOL_DECLARATIONS + ai_agent_tools.DECLARATIONS
+    _compact(d)
+    for d in ai_tools.TOOL_DECLARATIONS + ai_agent_tools.DECLARATIONS + ai_agent_media.DECLARATIONS
 ] + [_GUIDE_TOOL]}]
+_AGENT_HANDLERS = {**ai_agent_tools.HANDLERS, **ai_agent_media.HANDLERS}
 
 # Status lines shown while a tool runs, so the merchant sees the agent work.
 _LABELS: dict[str, tuple[str, str]] = {
@@ -145,6 +156,9 @@ _LABELS: dict[str, tuple[str, str]] = {
     "propose_replace_all_categories": ("Preparing the change", "পরিবর্তন প্রস্তুত করছি"),
     "propose_order_status": ("Preparing the change", "পরিবর্তন প্রস্তুত করছি"),
     "get_platform_guide": ("Checking the guide", "গাইড দেখছি"),
+    "set_homepage_image": ("Placing the image", "ছবি বসাচ্ছি"),
+    "set_category_image": ("Setting the category picture", "ক্যাটাগরির ছবি দিচ্ছি"),
+    "add_product_image": ("Adding the product photo", "প্রোডাক্টের ছবি যোগ করছি"),
 }
 _BANGLA = re.compile(r"[ঀ-৿]")
 
@@ -221,14 +235,14 @@ async def _stream_round(
 async def _run_tool(name: str, args: dict, db, tenant_id: uuid.UUID) -> dict:
     if name == "get_platform_guide":
         return {"guide": _PLATFORM}
-    if name in ai_agent_tools.HANDLERS:
-        return await ai_agent_tools.run(name, args, db, tenant_id)
+    if name in _AGENT_HANDLERS:
+        return await ai_agent_tools.run(name, args, db, tenant_id, _AGENT_HANDLERS)
     return await ai_tools.execute_tool(name, args, db, tenant_id)
 
 
 async def run(
     *, message: str, history: list[dict], context_hint: str | None,
-    tenant_id: uuid.UUID, user_id: uuid.UUID, plan: str,
+    tenant_id: uuid.UUID, user_id: uuid.UUID, plan: str, images: list[dict] | None = None,
 ) -> AsyncIterator[str]:
     """The whole agent turn as SSE strings. Opens its own DB session: a
     streaming response outlives the request-scoped one."""
@@ -241,7 +255,19 @@ async def run(
     # The context tag (e.g. "focus on my orders") steers tool choice but is
     # never shown back as if the merchant had typed it.
     user_text = f"{context_hint}\n\n{message}" if context_hint else message
-    contents.append({"role": "user", "parts": [{"text": user_text[:6000]}]})
+    user_parts: list[dict] = [{"text": user_text[:6000]}]
+    seen_images = 0
+    if images:
+        # Only this turn's images go to the model (history stays text, so a
+        # long chat doesn't keep re-paying for old pictures); each image's
+        # hosted URL is in its message text, so "put that on my hero" works
+        # in a later turn without seeing it again.
+        async with SessionLocal() as img_db:
+            site = await ai_agent_tools._site(img_db, tenant_id)
+            image_parts, notes = await ai_agent_media.load_for_model(site, images)
+        user_parts = image_parts + [{"text": user_text[:6000] + "\n\n" + "\n".join(notes)}]
+        seen_images = len(image_parts)
+    contents.append({"role": "user", "parts": user_parts})
 
     reply_text: list[str] = []
     tools_used: list[str] = []
@@ -255,7 +281,7 @@ async def run(
     tracker = ai_log.Tracker(
         kind="chat", tenant_id=tenant_id, user_id=user_id,
         input={"message": message, "history": history[-20:], "context_hint": context_hint},
-        meta={"plan": plan, "agent": True},
+        meta={"plan": plan, "agent": True, "images": seen_images},
     )
     started = time.monotonic()
     async with SessionLocal() as db:

@@ -10,6 +10,7 @@ from typing import Any
 
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from app import cache, crud
 from app.ai_agent_tools import _forget_tool_cache, _template_key, _write_theme
@@ -51,12 +52,21 @@ async def undo(db: AsyncSession, tenant_id: uuid.UUID, change_id: uuid.UUID) -> 
             await db.commit()
         await cache.invalidate_site(site.subdomain, site.custom_domain)
         await cache.invalidate_dashboard(str(site.id))
+    elif kind == "restore_category":
+        row = await crud.get_scoped(db, Category, tenant_id, uuid.UUID(spec["category_id"]))
+        for field, value in (spec.get("before") or {}).items():
+            setattr(row, field, value)
+        await crud.save(db, row)
+        await cache.invalidate_site(site.subdomain, site.custom_domain)
+        await cache.invalidate_dashboard(str(site.id))
     elif kind == "restore_product":
         row = await crud.get_scoped(db, Product, tenant_id, uuid.UUID(spec["product_id"]))
         for field, value in (spec.get("before") or {}).items():
             if field == "category_id":
                 value = uuid.UUID(value) if value else None
             setattr(row, field, value)
+        if "images" in (spec.get("before") or {}):
+            flag_modified(row, "images")
         await crud.save(db, row)
         await cache.invalidate_site(site.subdomain, site.custom_domain)
         await cache.invalidate_dashboard(str(site.id))
