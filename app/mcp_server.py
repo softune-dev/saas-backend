@@ -78,7 +78,8 @@ _OWN_TOOLS = {
         "title": "Add image to media library",
         "description": (
             "Save an image the merchant attached or that was generated in this chat into the store's media library. "
-            "Returns an image_url to then place on the store with set_homepage_image, set_category_image or add_product_image."
+            "Returns an image_url to then place on the store with set_homepage_image, set_category_image or add_product_image. "
+            "For a hero image, generate a clean background photo with NO text, buttons, logo or navigation in it (the store adds its own text on top)."
         ),
         "inputSchema": {
             "type": "object",

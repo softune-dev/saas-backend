@@ -88,7 +88,10 @@ async def load_for_model(site: Site, images: list[dict]) -> tuple[list[dict], li
 DECLARATIONS: list[dict] = [
     {
         "name": "set_homepage_image",
-        "description": "Put an attached image on the homepage: the main hero banner (wide, for desktop), the mobile hero (square or portrait, shown on phones) or the why-choose-us section. Applied immediately; undo restores it.",
+        "description": "Put an attached image on the homepage: the main hero banner (wide, for desktop), the mobile hero (square or portrait, shown on phones) or the why-choose-us section. Applied immediately; undo restores it. "
+        "The image must be a clean background photo only: NO text, headline, button, logo, navigation bar or icons drawn in, "
+        "because the store lays its own live text and button over it; keep the left third calm and uncluttered. "
+        "Desktop hero: wide 16:9. Mobile hero: square 1:1 or portrait 4:5.",
         "parameters": {
             "type": "OBJECT",
             "properties": {
