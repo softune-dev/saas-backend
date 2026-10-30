@@ -17,8 +17,10 @@ from app.api import (
     fraud,
     help_desk,
     marketing,
+    mcp,
     media,
     notifications,
+    oauth,
     pages,
     payments,
     public,
@@ -73,6 +75,13 @@ api_router.include_router(ai.usage_router, dependencies=_demo_guard)
 api_router.include_router(ai_images.router, dependencies=_demo_guard)
 api_router.include_router(ai_setup.router, dependencies=_demo_guard)
 api_router.include_router(ai_agent.router, dependencies=_demo_guard)
+# NOT gated by _demo_guard: ChatGPT and the merchant's browser call these with
+# no dashboard login (the guard demands one). /mcp has its own OAuth bearer
+# auth; the OAuth public routes are protocol endpoints; the user routes below
+# them carry the dashboard login as normal.
+api_router.include_router(oauth.public_router)
+api_router.include_router(mcp.router)
+api_router.include_router(oauth.user_router, dependencies=_demo_guard)
 # NOT gated by _demo_guard — a superadmin's own tenant is never "demo" plan
 # and this router's own SuperAdminUser dependency (app/security.py) is a
 # stricter gate than block_demo_writes anyway. See superadmin.py's docstring.

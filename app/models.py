@@ -29,7 +29,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import CITEXT, INET, JSONB, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, CITEXT, INET, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -1097,6 +1097,74 @@ class ChatCreditTransaction(Base):
     reason: Mapped[str] = mapped_column(Text)
     balance_after: Mapped[int] = mapped_column(Integer)
     reference: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+
+class OAuthClient(Base):
+    """An app allowed to ask merchants for access (ChatGPT registers itself
+    with Dynamic Client Registration). Global, not tenant-owned. See
+    migrations/080 and app/oauth_server.py."""
+
+    __tablename__ = "oauth_clients"
+
+    id: Mapped[uuid.UUID] = _pk()
+    client_id: Mapped[str] = mapped_column(Text, unique=True)
+    client_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    redirect_uris: Mapped[list[str]] = mapped_column(ARRAY(Text))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+
+class OAuthCode(Base):
+    """One-time authorization code (hash only), single use, 10 minutes."""
+
+    __tablename__ = "oauth_codes"
+
+    id: Mapped[uuid.UUID] = _pk()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE")
+    )
+    client_id: Mapped[str] = mapped_column(Text)
+    code_hash: Mapped[str] = mapped_column(Text, unique=True)
+    redirect_uri: Mapped[str] = mapped_column(Text)
+    code_challenge: Mapped[str] = mapped_column(Text)
+    resource: Mapped[str] = mapped_column(Text)
+    scope: Mapped[str] = mapped_column(Text)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+
+class OAuthToken(Base):
+    """An access/refresh token pair a merchant approved (hashes only), bound
+    to one tenant and to the MCP address it was issued for."""
+
+    __tablename__ = "oauth_tokens"
+
+    id: Mapped[uuid.UUID] = _pk()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE")
+    )
+    client_id: Mapped[str] = mapped_column(Text)
+    access_hash: Mapped[str] = mapped_column(Text, unique=True)
+    refresh_hash: Mapped[str] = mapped_column(Text, unique=True)
+    resource: Mapped[str] = mapped_column(Text)
+    scope: Mapped[str] = mapped_column(Text)
+    access_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    refresh_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")
     )

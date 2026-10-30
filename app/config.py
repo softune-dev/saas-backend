@@ -59,6 +59,18 @@ class Settings(BaseSettings):
     # init/callback endpoints.
     api_base_url: str = "https://api.softunebd.com"
 
+    # --- ChatGPT plugin / MCP server (app/mcp_server.py, app/oauth_server.py) ---
+    # Where the merchant is sent to approve a connection (the consent page).
+    dashboard_url: str = "https://dashboard.softunebd.com"
+    # Short access tokens limit what a leaked one is worth; ChatGPT silently
+    # swaps in a new one with the refresh token.
+    mcp_access_token_minutes: int = 60
+    mcp_refresh_token_days: int = 30
+    # Per-store ceiling on tool calls, so one connected account (or a
+    # looping model) can't hammer the database. Writes are far fewer.
+    mcp_calls_per_minute: int = 60
+    mcp_writes_per_hour: int = 60
+
     # --- Vercel domain automation (app/vercel.py) ---
     # Blank-able like Cloudinary above: attaching a site's subdomain to the
     # right Vercel project on publish is a nice-to-have, not a hard
