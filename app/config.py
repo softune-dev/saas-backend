@@ -165,12 +165,37 @@ class Settings(BaseSettings):
     onboarding_free_images: int = 5
 
     # --- AI store setup (app/ai_site_setup.py) ---
-    # Writes every word of a new storefront in one call, so it gets a
-    # stronger model than the chat's Flash-Lite. One call per setup run and
-    # runs are capped per tenant (ai_site_setup_max_runs), so the cost stays
-    # small. Falls back to gemini_model if Google rejects this id.
-    ai_site_builder_model: str = "gemini-flash-latest"
+    # Writes every word of a new storefront in one call: a "big task", so it
+    # gets 2.5 Flash WITH thinking — strong, and ~$0.30/$2.50 per 1M tokens.
+    # It used to be "gemini-flash-latest", which now resolves to 3.8 Flash at
+    # 2.5x the input price and 1.5x the output price for no gain here. One
+    # call per setup run, runs capped per tenant (ai_site_setup_max_runs).
+    # Falls back to gemini_model if Google rejects this id.
+    ai_site_builder_model: str = "gemini-2.5-flash"
     ai_site_setup_max_runs: int = 3
+
+    # --- AI agent (app/ai_agent.py) ---
+    # Picked by measurement, not by name (Oct 2026): the real agent loop was
+    # run on the real merchant scenarios with each candidate model and real
+    # token usage priced from ai.google.dev. 2.5 Flash with thinking off
+    # handled 7/7 and was the CHEAPEST at ~$0.0013 per message, because
+    # Gemini implicitly caches the repeated prompt+tools prefix on it (cached
+    # input bills at a tenth). A Starter store using all 15 messages/day for
+    # a month costs ~$0.57 (~৳70) — sustainable against a ৳499 plan. 3.8
+    # Flash cost ~6.5x that and wasn't better. Thinking tokens bill as output,
+    # so chat runs with thinking off; reasoning-heavy work (store setup, the
+    # audit) uses ai_site_builder_model / ai_audit_model instead.
+    ai_chat_model: str = "gemini-2.5-flash"
+    # None = the model's default; 0 = no thinking (2.5 models only).
+    ai_chat_thinking_budget: int | None = 0
+    # Used if Google rejects ai_chat_model (2.5 Flash-Lite was already closed
+    # to new accounts, so this can happen): 3.1 Flash-Lite also handled 7/7 in
+    # the same test at ~$0.0018 per message.
+    ai_chat_fallback_model: str = "gemini-3.1-flash-lite"
+    # The deep store audit (not built yet): a big task, same reasoning as the
+    # store setup — never Argon or 3.8 for this.
+    ai_audit_model: str = "gemini-2.5-flash"
+    ai_chat_max_tool_rounds: int = 6
 
     # --- trial signup / demo access (app/api/trial.py, app/api/public.py) ---
     # Real SMTP send via Hostinger's mail server — the OTP email is the

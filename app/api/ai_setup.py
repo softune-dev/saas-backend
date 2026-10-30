@@ -215,6 +215,8 @@ def _slug_for(name: str, fallback: str) -> str:
     a second one hits the unique constraint — and Bangla is the default
     language here, so that would break most setups. A name with no usable
     ASCII gets a short random suffix up front."""
+    # crud.slugify already gives Bangla names a distinct hashed slug; the
+    # fallback branch only remains for an empty name.
     base = crud.slugify(name, fallback)
     return f"{fallback}-{uuid.uuid4().hex[:6]}" if base == fallback else base
 

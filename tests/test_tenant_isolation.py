@@ -337,3 +337,23 @@ async def test_other_tenant_cannot_see_abandoned_checkouts(two_accounts, templat
     assert captured.status_code == 204
 
     assert (await b.get(f"/sites/{site['id']}/abandoned-checkouts")).status_code == 404
+
+
+async def test_other_tenant_cannot_undo_ai_agent_change(two_accounts, template_id):
+    """An AI agent change id from another tenant is a 404 (never 403, never
+    applied) — the undo endpoint must not let one store revert another's."""
+    import uuid
+
+    from app import ai_agent_tools
+    from app.db import SessionLocal
+
+    a, b = two_accounts
+    await _make_site(a, template_id)
+    async with SessionLocal() as db:
+        result = await ai_agent_tools.run(
+            "update_homepage_text", {"tagline": "A's tagline"}, db, uuid.UUID(a.tenant_id)
+        )
+    change_id = result["change"]["id"]
+
+    assert (await b.post(f"/ai/changes/{change_id}/undo")).status_code == 404
+    assert (await a.post(f"/ai/changes/{change_id}/undo")).status_code == 200

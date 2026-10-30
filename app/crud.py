@@ -16,6 +16,7 @@ TWO JOBS:
 """
 
 import asyncio
+import hashlib
 import re
 import uuid
 from typing import Any, Callable, TypeVar
@@ -199,9 +200,21 @@ def _explain(exc: IntegrityError) -> str:
 
 
 def slugify(text: str, fallback: str = "item") -> str:
-    """URL-safe slug. Deliberately boring — no unicode transliteration library."""
+    """URL-safe slug. Deliberately boring — no unicode transliteration library.
+
+    A name with no a-z0-9 at all (every Bangla name: "কুর্তি", "পায়জামা")
+    used to collapse to the bare fallback, so the SECOND such category or
+    product on a store hit the unique constraint and failed with a 409. It now
+    gets the fallback plus a short hash of the name: different names get
+    different slugs, while the same name still maps to the same slug, so a
+    genuine duplicate is still caught as one."""
     slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
-    return slug[:60] or fallback
+    if slug:
+        return slug[:60]
+    cleaned = text.strip().lower()
+    if not cleaned:
+        return fallback
+    return f"{fallback}-{hashlib.sha1(cleaned.encode('utf-8')).hexdigest()[:6]}"
 
 
 def normalize_phone(raw: str) -> str:

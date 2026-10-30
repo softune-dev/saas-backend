@@ -1102,6 +1102,29 @@ class ChatCreditTransaction(Base):
     )
 
 
+class AiAgentChange(Base):
+    """One change the AI assistant made to a store, kept so it can be undone.
+    See migrations/078 for the `undo` shapes; written and read only by
+    app/ai_agent_tools.py."""
+
+    __tablename__ = "ai_agent_changes"
+
+    id: Mapped[uuid.UUID] = _pk()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    site_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("sites.id", ondelete="CASCADE")
+    )
+    tool: Mapped[str] = mapped_column(Text)
+    summary: Mapped[str] = mapped_column(Text)
+    undo: Mapped[dict] = mapped_column(JSONB, default=dict)
+    undone_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+
 class AiUsageLog(Base):
     """One row per AI call (chat, text generation, theme suggestion, image
     generate/edit) — the request, the response, tokens and latency, so the
