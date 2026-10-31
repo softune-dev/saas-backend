@@ -384,6 +384,11 @@ class SiteUpdate(BaseModel):
     # as pending_custom_domain until it is connected (app/domains.py).
     custom_domain: str | None = None
     theme: dict[str, Any] | None = None
+    # The sites.theme_rev the client's theme was built on. When sent with
+    # `theme`, the write is refused with 409 if the theme has changed since —
+    # see migrations/081. Optional so older dashboard tabs and server-side
+    # writers (AI setup) keep working.
+    theme_rev: int | None = None
     business: dict[str, Any] | None = None
     about: dict[str, Any] | None = None
     seo: dict[str, Any] | None = None
@@ -422,6 +427,7 @@ class SiteOut(ORMModel):
     pending_custom_domain: str | None = None
     status: str
     theme: dict
+    theme_rev: int = 0
     business: dict
     about: dict
     seo: dict

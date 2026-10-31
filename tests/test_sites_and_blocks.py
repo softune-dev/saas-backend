@@ -67,6 +67,42 @@ async def test_patch_only_changes_sent_fields(account, site):
     assert response.json()["theme"] == original_theme
 
 
+async def test_theme_rev_moves_only_when_theme_changes(account, site):
+    """The trigger in migrations/081 owns theme_rev: a non-theme save, or a
+    theme save that writes back the same theme, must not look like an edit."""
+    rev = site["theme_rev"]
+    renamed = await account.patch(f"/sites/{site['id']}", json={"name": "Renamed"})
+    assert renamed.json()["theme_rev"] == rev
+
+    same = await account.patch(f"/sites/{site['id']}", json={"theme": site["theme"]})
+    assert same.json()["theme_rev"] == rev
+
+    changed = await account.patch(
+        f"/sites/{site['id']}", json={"theme": {**site["theme"], "ctaTitle": "New"}}
+    )
+    assert changed.json()["theme_rev"] == rev + 1
+
+
+async def test_stale_theme_write_is_refused(account, site):
+    """Two devices read the same theme; the second to publish must not
+    silently overwrite the first one's work (elarabd.store incident)."""
+    url = f"/sites/{site['id']}"
+    rev = site["theme_rev"]
+    phone = await account.patch(
+        url, json={"theme": {**site["theme"], "ctaTitle": "From phone"}, "theme_rev": rev}
+    )
+    assert phone.status_code == 200
+
+    laptop = await account.patch(
+        url, json={"theme": {**site["theme"], "footerNote": "From laptop"}, "theme_rev": rev}
+    )
+    assert laptop.status_code == 409
+    assert laptop.json()["detail"]["code"] == "theme_conflict"
+
+    current = (await account.get(url)).json()
+    assert current["theme"]["ctaTitle"] == "From phone"
+
+
 async def test_publish_flow(account, site):
     response = await account.post(f"/sites/{site['id']}/publish")
     assert response.status_code == 200

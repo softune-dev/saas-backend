@@ -259,6 +259,10 @@ class Site(Base, TimestampMixin):
     )
     status: Mapped[str] = mapped_column(Text, default="draft")
     theme: Mapped[dict] = mapped_column(JSONB, default=dict)
+    # Goes up on every theme change, bumped by a database trigger
+    # (migrations/081) — never assigned from Python. The editor sends back
+    # the rev it read so a stale copy can't overwrite a newer theme.
+    theme_rev: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     business: Mapped[dict] = mapped_column(JSONB, default=dict)
     # Dedicated About Us page content — {heading, image, paragraphs: str[]}.
     # Deliberately separate from theme.tagline (short strapline shown site-

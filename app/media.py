@@ -23,6 +23,7 @@ prefix instead of a table we'd have to keep in sync.
 
 import logging
 import re
+from typing import Any
 
 import cloudinary
 import cloudinary.api
@@ -302,26 +303,30 @@ def public_id_from_url(url: str) -> str | None:
 
 
 def theme_image_urls(theme: dict) -> set[str]:
-    """Every image URL a theme JSON blob references — the fields the
-    dashboard's theme editor lets a merchant upload into (logo, hero image
-    sets, the Why Choose Us image, testimonial photos). Used to diff old vs
-    new theme on save so a replaced/removed image can be cleaned up, and by
-    the reconciliation sweep to know what's still "in use". Kept as one
-    function so both call sites stay in sync with editor-types.ts's actual
-    image fields instead of drifting apart.
+    """Every Cloudinary URL anywhere in a theme JSON blob, at any depth.
+
+    Used by the reconciliation sweep and the gallery's "in use" badge to know
+    what a theme still points at. It walks the whole blob instead of listing
+    editor fields by name: the named list drifted behind editor-types.ts
+    (feature1-3Image, testimonialsCards, testimonialsScreenshots were all
+    missing), and a field this function doesn't know about is an image the
+    sweep would delete while the live site still shows it. Over-matching
+    only keeps a file a little longer; under-matching destroys it.
     """
     urls: set[str] = set()
-    if theme.get("logoImage"):
-        urls.add(theme["logoImage"])
-    if theme.get("whyImage"):
-        urls.add(theme["whyImage"])
-    for key in ("heroImages", "heroImagesSquare"):
-        for url in theme.get(key) or []:
-            if url:
-                urls.add(url)
-    for t in theme.get("testimonials") or []:
-        if isinstance(t, dict) and t.get("image"):
-            urls.add(t["image"])
+
+    def walk(value: Any) -> None:
+        if isinstance(value, str):
+            if "res.cloudinary.com" in value:
+                urls.add(value)
+        elif isinstance(value, dict):
+            for v in value.values():
+                walk(v)
+        elif isinstance(value, list):
+            for v in value:
+                walk(v)
+
+    walk(theme)
     return urls
 
 

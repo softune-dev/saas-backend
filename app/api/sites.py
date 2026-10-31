@@ -5,11 +5,10 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import cache, crud, domains, media, notifications, plans, queue, vercel
+from app import cache, crud, domains, notifications, plans, queue, vercel
 from app.db import get_db
 from app.models import Site, SitePage, Template, Tenant
 from app.config import settings
@@ -146,9 +145,22 @@ async def update_site(
     site = await crud.get_scoped(db, Site, user.tenant_id, site_id)
     old_domain = site.custom_domain
     old_pending = site.pending_custom_domain
-    old_theme = site.theme or {}
 
     changes = payload.model_dump(exclude_unset=True)
+    # theme_rev is the client's claim about which theme it edited, not a value
+    # to store (the trigger in migrations/081 owns the column). A mismatch
+    # means another device or the AI assistant saved a newer theme since this
+    # client read it; writing anyway would replace that newer work wholesale.
+    base_rev = changes.pop("theme_rev", None)
+    if "theme" in changes and base_rev is not None and base_rev != site.theme_rev:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            {
+                "code": "theme_conflict",
+                "message": "This store was changed from another device. Reload the editor and try again.",
+                "theme_rev": site.theme_rev,
+            },
+        )
     # A domain is a request, never a direct write: it waits in
     # pending_custom_domain until it is connected (see app/domains.py).
     domain_requested = "custom_domain" in changes
@@ -184,20 +196,14 @@ async def update_site(
     if old_domain and old_domain != site.custom_domain:
         await cache.drop(cache.site_key(old_domain))
 
-    # Cloudinary has no idea a URL stopped being referenced the moment this
-    # save overwrote theme JSON with a new logo/hero/testimonial image list —
-    # clean up anything the old theme pointed at that the new one doesn't,
-    # best-effort, after the save itself has already succeeded.
-    if "theme" in payload.model_fields_set:
-        dropped = media.theme_image_urls(old_theme) - media.theme_image_urls(site.theme or {})
-        # media.delete_by_url is a synchronous Cloudinary SDK call — awaiting
-        # it directly blocks the event loop (and every other concurrent
-        # request on this process, since uvicorn runs a single worker) for
-        # the full round trip, times however many images the theme edit
-        # dropped. Threadpool moves that blocking off the loop; still
-        # best-effort (delete_by_url already swallows its own failures).
-        for url in dropped:
-            await run_in_threadpool(media.delete_by_url, url, site.subdomain)
+    # A theme save deliberately deletes NO images. It used to delete every
+    # image the old theme had and the new one lacked — so when a stale copy
+    # of the theme was published (laptop holding an older draft than the
+    # phone), the merchant's newer images were destroyed permanently, not
+    # just unlinked (elarabd.store incident). An unlinked image costs a little
+    # storage; a deleted one can't be brought back. Unreferenced files are
+    # left to the media cleanup sweep, which has a grace window and reasons
+    # from what is referenced right now (app/api/media.py's cleanup_media).
 
     if site.status == "published":
         await queue.publish(queue.JOB_REVALIDATE_SITE, {"site_id": str(site.id)})
