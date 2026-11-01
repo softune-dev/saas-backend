@@ -119,10 +119,18 @@ async def update_category(
     site = await _owned_site(db, user.tenant_id, site_id)
     category = await crud.get_scoped(db, Category, user.tenant_id, category_id)
 
+    if category.site_id != site_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Category not found")
     if payload.parent_id == category_id:
         # A category that is its own parent creates an infinite loop the moment
         # anything tries to walk the tree.
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "A category cannot be its own parent")
+    if payload.parent_id:
+        # Same check as create_category: a parent id from another tenant or
+        # site must never be accepted just because it is a valid UUID.
+        parent = await crud.get_scoped(db, Category, user.tenant_id, payload.parent_id)
+        if parent.site_id != site_id:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Parent is on another site")
 
     old_image_url = category.image_url
     old_banner_url = category.banner_url
@@ -270,8 +278,17 @@ async def update_product(
 ) -> Product:
     site = await _owned_site(db, user.tenant_id, site_id)
     product = await crud.get_scoped(db, Product, user.tenant_id, product_id)
+    if product.site_id != site_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Product not found")
 
     data = payload.model_dump(exclude_unset=True)
+    if data.get("category_id"):
+        # create_product already verifies this; the update path didn't, so a
+        # product could be pointed at another tenant's category (CLAUDE.md
+        # rule 2 — references come from verified rows, not the request).
+        category = await crud.get_scoped(db, Category, user.tenant_id, data["category_id"])
+        if category.site_id != site_id:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Category is on another site")
     if "attributes" in data:
         try:
             data["attributes"] = products.validate_attributes(data["attributes"])

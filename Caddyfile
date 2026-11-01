@@ -1,4 +1,21 @@
 api.softunebd.com {
+	# Neither uvicorn nor Caddy caps request bodies by default, so one
+	# client could stream gigabytes into the API and exhaust memory/disk.
+	# 110MB = the largest legitimate upload (app/media.py VIDEO_MAX_BYTES,
+	# 100MB) plus multipart overhead; everything else is far smaller.
+	request_body {
+		max_size 110MB
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		X-Frame-Options "DENY"
+		# Don't advertise the server software/version.
+		-Server
+	}
+
 	reverse_proxy api:8000
 }
 

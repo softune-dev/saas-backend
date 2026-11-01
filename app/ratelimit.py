@@ -95,7 +95,7 @@ async def demo_access_rate_limit(request: Request) -> None:
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001 - see module docstring
-        log.warning("demo access rate limit check failed for %s: %s (allowing request)", ip, exc)
+        log.warning("demo access rate limit check failed for %s: %s (allowing request)", email, exc)
         return
 
 

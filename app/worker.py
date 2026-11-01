@@ -554,7 +554,9 @@ async def handle_generate_invoice_pdf(payload: dict) -> None:
                 pdf_bytes = await page.pdf(format="A4", print_background=True)
             finally:
                 await browser.close()
-        uploaded = media.upload_invoice_pdf(pdf_bytes, invoice_number=invoice.invoice_number)
+        uploaded = media.upload_invoice_pdf(
+            pdf_bytes, invoice_number=invoice.invoice_number, tenant_id=str(invoice.tenant_id)
+        )
     except Exception as exc:  # noqa: BLE001 — Playwright/Cloudinary both raise a wide variety of exception types
         log.warning("invoice pdf: could not generate %s (%s)", invoice.invoice_number, exc)
         return

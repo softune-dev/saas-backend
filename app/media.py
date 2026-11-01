@@ -23,6 +23,7 @@ prefix instead of a table we'd have to keep in sync.
 
 import logging
 import re
+import secrets
 from typing import Any
 
 import cloudinary
@@ -181,21 +182,30 @@ def upload_video(file_bytes: bytes, *, subdomain: str, category: str) -> dict:
     }
 
 
-def upload_invoice_pdf(file_bytes: bytes, *, invoice_number: str) -> dict:
+def upload_invoice_pdf(file_bytes: bytes, *, invoice_number: str, tenant_id: str) -> dict:
     """Invoices aren't scoped to a storefront subdomain (a tenant can have
     zero or several sites) — separate folder scheme from folder_for's
-    per-site layout, resource_type="raw" since a PDF isn't an image/video."""
+    per-site layout, resource_type="raw" since a PDF isn't an image/video.
+
+    The public_id is per-tenant AND unguessable. Invoice numbers restart at
+    INV-1001 for every tenant (crud.next_invoice_number), so the old
+    "{invoice_number}.pdf" name made every tenant's first invoice the SAME
+    file: each new one overwrote the last, and the stored pdf_url showed
+    another business's legal name, TIN and phone. And because the file is
+    public and the cloud name is in every image URL, anyone could fetch
+    INV-1001.pdf, INV-1002.pdf, ... The random suffix makes the URL itself
+    the access token, the same model Cloudinary images already use."""
     _ensure_configured()
     root = settings.cloudinary_root_folder.strip("/")
     try:
         result = cloudinary.uploader.upload(
             file_bytes,
-            folder=f"{root}/_invoices",
+            folder=f"{root}/_invoices/{tenant_id}",
             # resource_type="raw" serves the file byte-for-byte with no
             # Cloudinary-side content sniffing, so the URL's own extension
             # is what tells a browser/PDF viewer what it just downloaded —
             # without ".pdf" here the file opens with no format at all.
-            public_id=f"{invoice_number}.pdf",
+            public_id=f"{invoice_number}-{secrets.token_urlsafe(18)}.pdf",
             resource_type="raw",
             unique_filename=False,
             overwrite=True,

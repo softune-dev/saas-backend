@@ -186,27 +186,26 @@ async def ip_block(request: Request, call_next):
     try:
         cached = await cache.get_json(cache.ip_block_key(host))
         if cached is None:
-            from sqlalchemy import or_, select
+            from sqlalchemy import select
 
+            from app.api.public import published_site_by_host
             from app.db import SessionLocal
             from app.models import FraudIpBlocklistEntry, Site
 
-            # ONE query (LEFT JOIN), not two — halves the DB round trips on
-            # a cache miss. Every /public/* endpoint a single page load
-            # fires (config, categories, products, events, pageview) runs
-            # this middleware independently, so a cold cache pays this cost
+            # ONE round trip (the site lookup is a scalar subquery), not
+            # two — every /public/* endpoint a single page load fires
+            # (config, categories, products, events, pageview) runs this
+            # middleware independently, so a cold cache pays this cost
             # several times over for one visitor — worth keeping tight.
+            # Resolved exactly like the route handlers resolve the site
+            # (published_site_by_host), so a host that matches two sites
+            # never merges their blocklists.
+            site_id = published_site_by_host(host).with_only_columns(Site.id).scalar_subquery()
             async with SessionLocal() as session:
                 rows = (
                     await session.execute(
-                        select(FraudIpBlocklistEntry.ip_address)
-                        .select_from(Site)
-                        .outerjoin(
-                            FraudIpBlocklistEntry, FraudIpBlocklistEntry.site_id == Site.id
-                        )
-                        .where(
-                            or_(Site.custom_domain == host, Site.subdomain == host.split(".")[0]),
-                            Site.status == "published",
+                        select(FraudIpBlocklistEntry.ip_address).where(
+                            FraudIpBlocklistEntry.site_id == site_id
                         )
                     )
                 ).scalars().all()
@@ -237,14 +236,18 @@ async def ip_block(request: Request, call_next):
         # to this API got overwritten with Vercel's own server IP, not the
         # original visitor's) — Caddy has no special handling for a custom
         # header name, so it passes through untouched. Never trust this
-        # header from an arbitrary public request; it only ever matters for
-        # /public/* routes, and any caller COULD forge it, but the worst a
-        # forged value does here is fail to match a real block entry (fail
-        # open, same as everything else in this function) — it can never
-        # grant access to anything a real request couldn't already reach.
-        request_ip = request.headers.get("x-original-client-ip") or _client_ip(request)
-        if request_ip in set(cached.get("ips") or []):
-            blocked_ip = request_ip
+        # header from an arbitrary public request: any caller can forge it,
+        # and using it INSTEAD of the connection's own IP meant a blocked
+        # visitor bypassed the block just by sending this header with any
+        # other address. So both are checked — a block on either one holds.
+        # The SSR pre-check still works (Vercel's server IP isn't blocked,
+        # the forwarded visitor IP is), and a forged header can only ever
+        # add a match, never remove one.
+        blocked_set = set(cached.get("ips") or [])
+        for candidate in (request.headers.get("x-original-client-ip"), _client_ip(request)):
+            if candidate and candidate.strip() in blocked_set:
+                blocked_ip = candidate.strip()
+                break
     except Exception as exc:  # noqa: BLE001 - fail open, never break a request
         log.warning("ip_block check failed for host=%s: %s", host, exc)
 

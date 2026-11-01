@@ -94,16 +94,31 @@ def _variant_snapshot_text(combo: dict) -> str:
     return ", ".join(f"{k}: {v}" for k, v in combo["optionValues"].items())
 
 
-async def _find_published_site(host: str, db: AsyncSession) -> Site:
+def published_site_by_host(host: str):
+    """SELECT for the one published site a storefront `host` refers to.
+
+    A host can match TWO rows: site A's custom domain "elarabd.store" and
+    site B's subdomain "elarabd" (the first label). scalar_one_or_none()
+    then raised MultipleResultsFound — a 500 on every request to site A's
+    custom domain, which anyone could trigger by opening a free trial whose
+    shop name equals that first label. An exact custom-domain match is the
+    stronger claim, so it wins; the subdomain match is only the fallback.
+    Shared with main.py's ip_block middleware so both resolve the same site.
+    """
     bare = host.split(".")[0]
-    site = (
-        await db.execute(
-            select(Site).where(
-                or_(Site.custom_domain == host, Site.subdomain == bare),
-                Site.status == "published",
-            )
+    return (
+        select(Site)
+        .where(
+            or_(Site.custom_domain == host, Site.subdomain == bare),
+            Site.status == "published",
         )
-    ).scalar_one_or_none()
+        .order_by((Site.custom_domain == host).desc().nulls_last())
+        .limit(1)
+    )
+
+
+async def _find_published_site(host: str, db: AsyncSession) -> Site:
+    site = (await db.execute(published_site_by_host(host))).scalars().first()
     if site is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Site not found or not published")
     return site
@@ -1301,9 +1316,52 @@ async def _connected_gateway(site_id, provider: str, db: AsyncSession) -> Paymen
     ).scalar_one_or_none()
 
 
-def _storefront_redirect(host: str, order_number: str, ok: bool) -> str:
+def _storefront_redirect(site: Site, host: str, order_number: str, ok: bool) -> str:
+    """Where the customer's browser lands after a gateway round trip.
+
+    `host` comes from the URL path, which anyone can type, so it is only
+    reused when it really is one of this site's own hostnames. Anything else
+    (e.g. "evil.com", which still resolves to a site whose subdomain is
+    "evil" — see _find_published_site) falls back to the site's canonical
+    host, so this endpoint can't be used as an open redirect off our API
+    domain."""
+    own_hosts = {f"{site.subdomain}.{settings.site_base_domain}"}
+    if site.custom_domain:
+        own_hosts.add(site.custom_domain)
+    target = host if host in own_hosts else (site.custom_domain or f"{site.subdomain}.{settings.site_base_domain}")
     outcome = "success" if ok else "failed"
-    return f"https://{host}/checkout/{outcome}?order={order_number}"
+    return f"https://{target}/checkout/{outcome}?order={order_number}"
+
+
+def _to_cents(raw: Any) -> int | None:
+    """A gateway's decimal amount string ("1250.00") as integer cents, or
+    None if it isn't a number. Decimal, not float — CLAUDE.md rule 7."""
+    from decimal import Decimal, InvalidOperation
+
+    try:
+        return int((Decimal(str(raw).replace(",", "")) * 100).to_integral_value())
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+
+
+def _gateway_record_matches(
+    order: Order, *, reference: Any, amount: Any, currency: Any | None = None
+) -> bool:
+    """The server-to-server check proves SOME payment is genuine; this proves
+    it is a payment FOR THIS ORDER, for the full amount.
+
+    Without it, a val_id/paymentID/payment_ref_id from a cheap order (or, for
+    Nagad, from any merchant at all) could be replayed against an expensive
+    order's callback URL and mark it paid. Fails closed: a missing field is a
+    mismatch, never a pass."""
+    if str(reference or "") != order.order_number:
+        return False
+    paid_cents = _to_cents(amount)
+    if paid_cents is None or paid_cents < order.total_cents:
+        return False
+    if currency is not None and str(currency).upper() != (order.currency or "").upper():
+        return False
+    return True
 
 
 async def _finalize_gateway_payment(
@@ -1312,10 +1370,17 @@ async def _finalize_gateway_payment(
 ) -> None:
     """Idempotent: SSLCommerz can hit this twice for the same order (IPN
     AND the browser redirect both land here) — once the order is off
-    "pending", every later call is a no-op, not a double-charge/refund."""
-    if order.status != "pending":
+    "pending", every later call is a no-op, not a double-charge/refund.
+
+    A failed check leaves the order "pending" — it never cancels. These
+    callback URLs are public and order numbers are sequential (ORD-1001,
+    ORD-1002, ...), so cancelling on any unverifiable callback let anyone
+    cancel every pending order (COD ones included) of every store with a
+    gateway connected, just by hitting the URL with a junk id. Pending also
+    lets the customer retry payment, which init_gateway_payment requires."""
+    if order.status != "pending" or not ok:
         return
-    order.status = "paid" if ok else "cancelled"
+    order.status = "paid"
     order.meta = {
         **order.meta,
         f"{provider}_transaction_id": transaction_ref,
@@ -1441,11 +1506,21 @@ async def sslcommerz_callback(host: str, order_number: str, request: Request, db
             ok, data, _error = await sslcommerz.validate_transaction(
                 store_id, store_passwd, sandbox=sandbox, val_id=str(val_id)
             )
+            # currency_amount/currency_type are what the order was created
+            # in; amount/currency are SSLCommerz's settled BDT figures. Prefer
+            # the former, fall back to the latter.
+            data = data or {}
+            ok = ok and _gateway_record_matches(
+                order,
+                reference=data.get("tran_id"),
+                amount=data.get("currency_amount") or data.get("amount"),
+                currency=data.get("currency_type") or data.get("currency"),
+            )
             await _finalize_gateway_payment(db, site, order, "sslcommerz", ok, str(val_id), data)
 
     if request.method == "POST":
         return {"status": "ok"}
-    return RedirectResponse(_storefront_redirect(host, order_number, ok))
+    return RedirectResponse(_storefront_redirect(site, host, order_number, ok))
 
 
 @router.get("/site/{host}/orders/{order_number}/pay/bkash/callback")
@@ -1455,7 +1530,12 @@ async def bkash_callback(host: str, order_number: str, request: Request, db: DB)
     payment_id = request.query_params.get("paymentID")
     status_param = request.query_params.get("status")
     ok = False
-    if payment_id and status_param == "success":
+    # Only the paymentID init_gateway_payment created for THIS order may
+    # settle it — otherwise a customer could pay a cheap order on bKash's
+    # page, then hand that (not yet executed) paymentID to an expensive
+    # order's callback URL instead.
+    expected_payment_id = (order.meta or {}).get("bkash_payment_id")
+    if payment_id and status_param == "success" and payment_id == expected_payment_id:
         conn = await _connected_gateway(site.id, "bkash", db)
         if conn:
             app_key = courier_crypto.decrypt(conn.api_key_encrypted)
@@ -1469,9 +1549,16 @@ async def bkash_callback(host: str, order_number: str, request: Request, db: DB)
                 ok, data, _error = await bkash.execute_payment(
                     app_key, token, sandbox=sandbox, payment_id=payment_id
                 )
+                data = data or {}
+                ok = ok and _gateway_record_matches(
+                    order,
+                    reference=data.get("merchantInvoiceNumber"),
+                    amount=data.get("amount"),
+                    currency=data.get("currency"),
+                )
                 await _finalize_gateway_payment(db, site, order, "bkash", ok, payment_id, data)
 
-    return RedirectResponse(_storefront_redirect(host, order_number, ok))
+    return RedirectResponse(_storefront_redirect(site, host, order_number, ok))
 
 
 @router.get("/site/{host}/orders/{order_number}/pay/nagad/callback")
@@ -1485,9 +1572,21 @@ async def nagad_callback(host: str, order_number: str, request: Request, db: DB)
         if conn:
             sandbox = bool((conn.config or {}).get("sandbox", True))
             ok, data, _error = await nagad.verify_payment(payment_ref_id, sandbox=sandbox)
+            # Nagad's verify endpoint takes no merchant credentials, so a
+            # "Success" alone only proves that SOME Nagad payment happened —
+            # possibly ৳1 to a completely different merchant. It must be this
+            # store's merchant id, this order, and the full amount.
+            data = data or {}
+            merchant_id = str((conn.config or {}).get("merchant_id") or "")
+            ok = (
+                ok
+                and bool(merchant_id)
+                and str(data.get("merchantId") or "") == merchant_id
+                and _gateway_record_matches(order, reference=data.get("orderId"), amount=data.get("amount"))
+            )
             await _finalize_gateway_payment(db, site, order, "nagad", ok, payment_ref_id, data)
 
-    return RedirectResponse(_storefront_redirect(host, order_number, ok))
+    return RedirectResponse(_storefront_redirect(site, host, order_number, ok))
 
 
 @router.post(
@@ -1515,9 +1614,36 @@ async def demo_access(payload: DemoAccessIn, request: Request, db: DB) -> dict:
         )
     )
 
-    demo_user = (
-        await db.execute(select(User).where(User.email == settings.demo_user_email))
-    ).scalar_one_or_none()
+    # This endpoint hands out a real login to anyone, so it must only ever be
+    # able to mint one for a genuinely read-only account. Re-checked here on
+    # every call rather than trusted from DEMO_USER_EMAIL alone: if that
+    # setting ever points at a real account (a typo, an env copied between
+    # deployments, the demo tenant being upgraded to a paid plan, or a
+    # superadmin who shares the address), the public would otherwise get
+    # full write — or superadmin — access to it.
+    row = (
+        await db.execute(
+            select(User, Tenant)
+            .join(Tenant, User.tenant_id == Tenant.id)
+            .where(User.email == settings.demo_user_email)
+        )
+    ).first()
+    demo_user = None
+    if row is not None:
+        user, tenant = row
+        if (
+            tenant.plan == "demo"
+            and tenant.status == "active"
+            and user.is_active
+            and not user.is_superadmin
+        ):
+            demo_user = user
+        else:
+            log.error(
+                "demo-access refused: DEMO_USER_EMAIL is not a safe demo account "
+                "(plan=%s status=%s superadmin=%s)",
+                tenant.plan, tenant.status, user.is_superadmin,
+            )
     if demo_user is None:
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
