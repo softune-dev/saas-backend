@@ -38,6 +38,19 @@ async def lifespan(_: FastAPI):
     """
     log.info("starting in %s mode", settings.app_env)
 
+    # Several protections switch themselves OFF when their secret is blank
+    # (reCAPTCHA skips verification entirely; see app/recaptcha.py), which is
+    # right for local dev and silently wrong in production. Shout at boot so
+    # a missing line in .env is noticed in the first log read, not after an
+    # incident. Logged, not fatal: refusing to boot would take every store
+    # down over one optional integration.
+    if not settings.is_dev:
+        if settings.debug:
+            log.critical("SECURITY: DEBUG=true outside development")
+        for name in ("recaptcha_secret_key", "courier_credentials_key", "revalidate_secret"):
+            if not getattr(settings, name):
+                log.critical("SECURITY: %s is not set — the protection it enables is OFF", name.upper())
+
     try:
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
