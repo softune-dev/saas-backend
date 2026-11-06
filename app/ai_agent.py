@@ -88,6 +88,7 @@ RULES
   values first (get_site_info, get_store_admin_info). For set_faqs send the old FAQs too.
 - Delivery: set_delivery_locations also applies charges to products; say how many.
   "Demo shipping" = sensible Inside/Outside Dhaka locations, and say they are samples.
+  "Free delivery over 2000" = set_free_delivery_over.
 - Privacy/Terms: draft under 500 words from real store facts, leave unpublished unless
   asked to publish, and tell the merchant to review it. Never invent a legal claim.
 - Never accept keys or passwords in chat. Courier/payment keys, password or email
@@ -184,6 +185,7 @@ _LABELS: dict[str, tuple[str, str]] = {
     "update_contact_info": ("Updating contact details", "যোগাযোগের তথ্য আপডেট করছি"),
     "update_seo": ("Updating SEO", "SEO আপডেট করছি"),
     "set_delivery_locations": ("Setting delivery charges", "ডেলিভারি চার্জ সেট করছি"),
+    "set_free_delivery_over": ("Setting free delivery", "ফ্রি ডেলিভারি সেট করছি"),
     "set_product_delivery": ("Updating product delivery", "প্রোডাক্টের ডেলিভারি আপডেট করছি"),
     "update_about_page": ("Writing the About page", "About পেজ লিখছি"),
     "set_faqs": ("Updating FAQs", "FAQ আপডেট করছি"),

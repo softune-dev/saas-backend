@@ -23,6 +23,7 @@ from app.api import (
     oauth,
     pages,
     payments,
+    demo_access,
     public,
     push,
     sites,
@@ -68,6 +69,7 @@ api_router.include_router(help_desk.router, dependencies=_demo_guard)
 api_router.include_router(notifications.router, dependencies=_demo_guard)
 api_router.include_router(push.router, dependencies=_demo_guard)
 api_router.include_router(public.router)
+api_router.include_router(demo_access.router)
 api_router.include_router(ai.router, dependencies=_demo_guard)
 api_router.include_router(ai.chat_router, dependencies=_demo_guard)
 api_router.include_router(ai.actions_router, dependencies=_demo_guard)

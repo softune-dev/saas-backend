@@ -400,3 +400,13 @@ async def test_product_rejects_unknown_category_delivery_and_script_in_descripti
     ok = await _tool(account.tenant_id, "create_product", name="Safe", price_taka=10, description="<script>alert(1)</script>Nice")
     async with SessionLocal() as db:
         assert (await db.get(Product, uuid.UUID(ok["product"]["id"]))).description == "Nice"
+
+
+async def test_free_delivery_over_sets_and_undo_clears(account, site):
+    await _tool(account.tenant_id, "set_delivery_locations", locations=[{"name": "Dhaka", "charge_taka": 60}])
+    result = await _tool(account.tenant_id, "set_free_delivery_over", amount_taka=2000)
+    assert result["ok"], result
+    shipping = (await _site_row(account.tenant_id)).shipping
+    assert shipping["free_over_cents"] == 200_000 and shipping["locations"]
+    await _undo(account.tenant_id, result["change"]["id"])
+    assert not (await _site_row(account.tenant_id)).shipping.get("free_over_cents")

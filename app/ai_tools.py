@@ -356,6 +356,10 @@ async def _get_site_info(db: AsyncSession, tenant_id: uuid.UUID) -> dict:
             {"name": loc.get("name"), "charge": _money(loc.get("charge_cents", 0), currency)}
             for loc in (site.shipping or {}).get("locations", [])
         ],
+        "free_delivery_over": (
+            _money(site.shipping["free_over_cents"], currency)
+            if (site.shipping or {}).get("free_over_cents") else None
+        ),
         "faqs": [
             {"question": f.get("question"), "answer": f.get("answer")}
             for f in (site.faqs or [])

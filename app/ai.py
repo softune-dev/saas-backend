@@ -37,7 +37,7 @@ log = logging.getLogger(__name__)
 # just a dict, not a database column or migration, so it's a one-line change
 # whenever the real plan lineup settles.
 #   - demo: the one shared, read-only "click and look around" account
-#     (app/api/public.py's demo_access) — enough allowance to actually try
+#     (app/api/demo_access.py) — enough allowance to actually try
 #     the assistant, not a token amount. Distinct from trial below.
 #   - trial: self-serve 7-day signup (app/api/trial.py) — gets exactly the
 #     Starter cap, same as the plan it's a preview of. Was silently falling
@@ -194,11 +194,10 @@ async def _check_ai_access(tenant_id: str, plan: str) -> None:
     itself never degrades open: a 0-cap plan is a real "not included in
     your plan" answer, not something a Redis blip should ever bypass.
 
-    Used as-is (hard 429 once the daily cap is gone, no purchased fallback)
-    by suggest_theme_patch and generate_text. chat_reply uses
-    _check_chat_access below instead — same counter, but spends a
-    purchased chat credit before ever blocking, since that's the one
-    surface a merchant actually asked to buy extra headroom for.
+    Used by suggest_theme_patch and generate_text. Past the cap it spends a
+    purchased chat credit, exactly like _check_chat_access: a merchant who
+    bought credits was still blocked on the "Write with AI" buttons and then
+    told to buy credits they already had.
     """
     cap = plan_cap(plan)
     if cap <= 0:
@@ -213,15 +212,36 @@ async def _check_ai_access(tenant_id: str, plan: str) -> None:
         count = await client.incr(key)
         if count == 1:
             await client.expire(key, 60 * 60 * 25)  # a little over a day
-        if count > cap:
-            raise HTTPException(
-                status.HTTP_429_TOO_MANY_REQUESTS,
-                f"Daily AI limit reached ({cap}/day). Try again tomorrow.",
-            )
-    except HTTPException:
-        raise
+        over_cap = count > cap
     except Exception as exc:  # noqa: BLE001 - counting must never block real use
         log.warning("AI usage counter failed, allowing request: %s", exc)
+        return
+    if over_cap:
+        from app.db import SessionLocal
+
+        async with SessionLocal() as db:
+            await _spend_credit_or_block(db, tenant_id, cap)
+
+
+async def _spend_credit_or_block(db: AsyncSession, tenant_id: str, cap: int) -> None:
+    """The daily free messages are gone: use a purchased credit, or stop with
+    the structured 429 the dashboard turns into a top-up screen. The `code`
+    is what it keys on; the message alone used to be a dead end in a chat
+    bubble, with no way to buy more."""
+    from app import chat_credits
+
+    try:
+        await chat_credits.spend_one_credit(db, uuid.UUID(tenant_id))
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_402_PAYMENT_REQUIRED:
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                {
+                    "code": "ai_limit_reached",
+                    "message": f"You've used today's {cap} free AI messages. Buy credits to keep going, or come back tomorrow.",
+                },
+            ) from exc
+        raise
 
 
 async def _check_chat_access(tenant_id: str, plan: str, db: AsyncSession) -> None:
@@ -231,8 +251,6 @@ async def _check_chat_access(tenant_id: str, plan: str, db: AsyncSession) -> Non
     chat credits left gets the same 429 _check_ai_access would have given;
     one with credits keeps going, transparently, at 1 credit per message.
     """
-    from app import chat_credits
-
     cap = plan_cap(plan)
     if cap <= 0:
         raise HTTPException(
@@ -255,15 +273,7 @@ async def _check_chat_access(tenant_id: str, plan: str, db: AsyncSession) -> Non
     if not over_cap:
         return
 
-    try:
-        await chat_credits.spend_one_credit(db, uuid.UUID(tenant_id))
-    except HTTPException as exc:
-        if exc.status_code == status.HTTP_402_PAYMENT_REQUIRED:
-            raise HTTPException(
-                status.HTTP_429_TOO_MANY_REQUESTS,
-                f"Daily AI limit reached ({cap}/day) — buy chat credits to keep going, or try again tomorrow.",
-            ) from exc
-        raise
+    await _spend_credit_or_block(db, tenant_id, cap)
 
 
 async def get_usage(tenant_id: str, plan: str) -> dict:

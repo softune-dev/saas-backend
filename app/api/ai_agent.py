@@ -9,12 +9,12 @@ the verified JWT.
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import ai, ai_agent, ai_agent_undo
+from app import ai, ai_agent, ai_agent_undo, ai_log
 from app.api.ai import _tenant_plan
 from app.db import get_db
 from app.security import CurrentUser
@@ -52,7 +52,17 @@ async def agent_chat(payload: AgentChatIn, user: CurrentUser, db: DB) -> Streami
     handles, not as an event halfway through a reply."""
     ai._ensure_configured()
     plan = await _tenant_plan(db, user.tenant_id)
-    await ai._check_chat_access(str(user.tenant_id), plan, db)
+    try:
+        await ai._check_chat_access(str(user.tenant_id), plan, db)
+    except HTTPException as exc:
+        # A blocked try used to leave no trace, so nobody could see how many
+        # times merchants kept trying after the limit.
+        if exc.status_code == 429:
+            await ai_log._write(ai_log.Tracker(
+                kind="chat", tenant_id=user.tenant_id, user_id=user.user_id, status="error",
+                error="ai_limit_reached", input={"message": payload.message}, meta={"plan": plan, "blocked": True},
+            ), 0)
+        raise
     stream = ai_agent.run(
         message=payload.message,
         history=[t.model_dump() for t in payload.history],

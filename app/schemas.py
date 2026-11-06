@@ -27,6 +27,8 @@ from pydantic import (
     model_validator,
 )
 
+from app import contact_checks
+
 T = TypeVar("T")
 
 
@@ -397,6 +399,18 @@ class SiteUpdate(BaseModel):
     legal: dict[str, Any] | None = None
     fraud_rules: dict[str, Any] | None = None
     courier_rules: dict[str, Any] | None = None
+
+    @field_validator("shipping")
+    @classmethod
+    def _valid_free_delivery(cls, v: dict[str, Any] | None) -> dict[str, Any] | None:
+        # Read at checkout to zero the delivery fee, so a bad value here would
+        # change what real customers pay. Money is integer cents; 0 means off.
+        if v is None or v.get("free_over_cents") is None:
+            return v
+        amount = v["free_over_cents"]
+        if isinstance(amount, bool) or not isinstance(amount, int) or amount < 0:
+            raise ValueError("Free delivery amount must be a positive number")
+        return {**v, "free_over_cents": amount or None}
 
     @field_validator("custom_domain")
     @classmethod
@@ -903,6 +917,16 @@ class PlatformContactIn(BaseModel):
     recaptcha_token: str = ""
     recaptcha_v2_token: str = ""
 
+    @field_validator("email")
+    @classmethod
+    def _real_email(cls, value: str) -> str:
+        return contact_checks.clean_signup_email(value)
+
+    @field_validator("phone")
+    @classmethod
+    def _real_phone(cls, value: str | None) -> str | None:
+        return _validate_bd_phone(value)
+
 
 class InquiryCreate(BaseModel):
     """Public — no auth. Shape is deliberately loose: each site's ContactForm
@@ -1369,6 +1393,8 @@ def _validate_bd_phone(value: str | None) -> str | None:
         digits = "0" + digits[3:]
     if not re.match(r"^01[3-9]\d{8}$", digits):
         raise ValueError("Please enter a valid Bangladeshi mobile number (e.g. 01XXXXXXXXX).")
+    if contact_checks.is_fake_bd_phone(digits):
+        raise ValueError("Please enter your real mobile number.")
     return digits
 
 
@@ -1378,6 +1404,11 @@ class TrialStartIn(BaseModel):
     full_name: str | None = Field(default=None, max_length=120)
     recaptcha_token: str = ""
     recaptcha_v2_token: str = ""
+
+    @field_validator("email")
+    @classmethod
+    def _real_email(cls, value: str) -> str:
+        return contact_checks.clean_signup_email(value)
 
     @field_validator("password")
     @classmethod
@@ -1413,7 +1444,8 @@ class TrialVerifyOtpIn(BaseModel):
 class TrialDetailsIn(BaseModel):
     signup_token: str
     shop_name: str = Field(min_length=1, max_length=120)
-    phone: str | None = Field(default=None, max_length=32)
+    # Required: it's how we reach a new merchant, and the step could be skipped.
+    phone: str = Field(max_length=32)
     tagline: str | None = Field(default=None, max_length=160)
     # Free string, not a backend enum — same convention as the dashboard's
     # own onboarding (step-shop-basics.tsx's Shop category/niche select),
@@ -1424,8 +1456,11 @@ class TrialDetailsIn(BaseModel):
 
     @field_validator("phone")
     @classmethod
-    def _phone(cls, value: str | None) -> str | None:
-        return _validate_bd_phone(value)
+    def _phone(cls, value: str) -> str:
+        phone = _validate_bd_phone(value)
+        if phone is None:
+            raise ValueError("Please enter your mobile number.")
+        return phone
 
 
 class TrialThemeIn(BaseModel):
@@ -1467,14 +1502,29 @@ class SuperAdminDemoAccessOut(ORMModel):
 
 
 class DemoAccessIn(BaseModel):
-    """Email required before the public demo hands out tokens — see
-    app/api/public.py's demo_access. Same recaptcha pattern as trial
-    signup; no password-strength-style validation needed, this isn't
-    creating an account."""
+    """Step one of the demo gate: where to mail the code. See
+    app/api/demo_access.py. Same recaptcha pattern as trial signup."""
 
     email: EmailStr
     recaptcha_token: str = ""
     recaptcha_v2_token: str = ""
+
+    @field_validator("email")
+    @classmethod
+    def _real_email(cls, value: str) -> str:
+        return contact_checks.clean_signup_email(value)
+
+
+class DemoVerifyIn(BaseModel):
+    """Step two of the demo gate: the code mailed after DemoAccessIn."""
+
+    email: EmailStr
+    otp: str = Field(min_length=6, max_length=6)
+
+    @field_validator("email")
+    @classmethod
+    def _real_email(cls, value: str) -> str:
+        return contact_checks.clean_signup_email(value)
 
 
 class TrialStatusOut(BaseModel):

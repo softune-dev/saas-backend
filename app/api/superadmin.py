@@ -28,6 +28,7 @@ from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import contact_checks
 from app import ai_images, audit, cache, contacts as contacts_module, chat_credits as chat_credits_module, crud, invoices as invoices_module, mailer, media, queue, vercel
 from app.config import settings
 from app.db import get_db
@@ -819,7 +820,7 @@ async def update_user(
 
 # =============================================================================
 #  Demo access — the outreach list. See migrations/050_demo_access_requests.sql
-#  and app/api/public.py's demo_access.
+#  and app/api/demo_access.py.
 # =============================================================================
 
 
@@ -878,6 +879,8 @@ async def send_demo_marketing_email(request_id: uuid.UUID, admin: SuperAdminUser
     ).scalar_one_or_none()
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Demo request not found")
+    if not contact_checks.is_mailable(row.email):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "That email looks fake or mistyped, so it wasn't sent.")
 
     subject, html_body, text_body = mailer.demo_followup_email()
     await audit.record(admin, "demo.followup_email", "demo_lead", row.id, row.email)

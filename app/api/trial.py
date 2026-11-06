@@ -218,6 +218,8 @@ async def complete(payload: TrialCompleteIn, db: DB) -> dict:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Verify your email first.")
     if not pending.get("shop_name"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Shop details are required first.")
+    if not pending.get("phone"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Please add your mobile number first.")
 
     # Unique subdomain from the shop name — same increment-on-collision
     # pattern crud.create_tenant_owner_and_site already uses for the

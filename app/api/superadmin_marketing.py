@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import audit, mailer, queue
+from app import audit, contact_checks, mailer, queue
 from app.db import get_db
 from app.models import DemoAccessRequest, EmailCampaign, MarketingContact, Tenant, User
 from app.schemas import ORMModel, Page
@@ -149,10 +149,12 @@ async def _resolve(db: AsyncSession, audience: AudienceIn) -> list[str]:
         query = select(MarketingContact.email)
         if audience.lifecycles:
             query = query.where(MarketingContact.lifecycle.in_(audience.lifecycles))
-        emails.update(e.lower() for e in (await db.execute(query)).scalars().all())
+        # Contacts and demo leads hold unverified addresses from before the
+        # form checks existed. Mailing those bounces and hurts delivery.
+        emails.update(e.lower() for e in (await db.execute(query)).scalars().all() if contact_checks.is_mailable(e))
     elif audience.kind == "demo_leads":
         rows = (await db.execute(select(DemoAccessRequest.email))).scalars().all()
-        emails.update(e.lower() for e in rows)
+        emails.update(e.lower() for e in rows if contact_checks.is_mailable(e))
     else:
         query = (
             select(User.email)
@@ -209,7 +211,8 @@ async def audience_counts(admin: SuperAdminUser, db: DB) -> dict:
             q = q.where(MarketingContact.lifecycle == lifecycle)
         return (await db.execute(q)).scalar_one()
 
-    demo = (await db.execute(select(func.count(DemoAccessRequest.id)))).scalar_one()
+    demo_emails = (await db.execute(select(DemoAccessRequest.email))).scalars().all()
+    demo = sum(1 for e in demo_emails if contact_checks.is_mailable(e))
     return {
         "owners": await owners(),
         "trial_owners": await owners(Tenant.plan == "trial"),

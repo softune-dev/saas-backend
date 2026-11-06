@@ -53,3 +53,42 @@ def test_edge_config_key_only_uses_allowed_characters():
     from app import edge_config
 
     assert edge_config.key_for("Shop.Example-Store.com") == "ipb_shop_example_store_com"
+
+
+def test_signup_email_checks():
+    import pytest
+
+    from app import contact_checks as c
+
+    assert c.clean_signup_email(" Real.Merchant@Gmail.com ") == "real.merchant@gmail.com"
+    assert c.clean_signup_email("shop.owner@outlook.com") == "shop.owner@outlook.com"
+    for bad in ("someone@mailinator.com", "owner@ytrr.com", "test@gmail.com", "demo123@gmail.com",
+                "aaaaaaa@gmail.com", "abc@gmail.com"):
+        with pytest.raises(ValueError):
+            c.clean_signup_email(bad)
+    with pytest.raises(ValueError, match="gmail.com"):
+        c.clean_signup_email("real.merchant@gmaio.com")
+    assert not c.is_mailable("x@comzx.com") and c.is_mailable("real.merchant@yahoo.com")
+
+
+def test_fake_phone_numbers_are_refused_and_phone_is_required_at_signup():
+    import pytest
+    from pydantic import ValidationError
+
+    from app.schemas import TrialDetailsIn
+
+    ok = TrialDetailsIn(signup_token="t", shop_name="Shop", phone="+880 1712-345679")
+    assert ok.phone == "01712345679"
+    for bad in ("", "01711111111", "01712345678", "12345"):
+        with pytest.raises(ValidationError):
+            TrialDetailsIn(signup_token="t", shop_name="Shop", phone=bad)
+    with pytest.raises(ValidationError):
+        TrialDetailsIn(signup_token="t", shop_name="Shop")
+
+
+def test_demo_tokens_are_only_reachable_through_the_code_step():
+    from app.main import app
+
+    paths = {route.path for route in app.routes}
+    assert "/public/demo-access/start" in paths and "/public/demo-access/verify" in paths
+    assert "/public/demo-access" not in paths  # the old route handed out tokens with no code

@@ -401,3 +401,32 @@ async def test_ip_block_fails_open_on_cache_error(account, site, monkeypatch):
         headers={"X-Forwarded-For": "203.0.113.201"},
     )
     assert order_resp.status_code == 201
+
+
+async def test_free_delivery_over_amount_zeroes_the_fee_at_checkout(account, site, monkeypatch):
+    """The fee is charged below the amount and dropped at or above it, and the
+    order records the rule it was placed under."""
+    _no_recaptcha(monkeypatch)
+    product = await _product(account, site)
+    await account.patch(
+        f"/sites/{site['id']}/products/{product['id']}",
+        json={"price_cents": 100_000, "stock": 50, "free_delivery": False,
+              "delivery_charges": [{"name": "Dhaka", "charge_cents": 6_000}]},
+    )
+    await account.patch(f"/sites/{site['id']}", json={"shipping": {"locations": [], "free_over_cents": 200_000}})
+    host = await _publish(account, site)
+
+    below = _order_payload("01799999991", product["id"], qty=1)
+    below["delivery_location"] = "Dhaka"
+    res = await _post_order(account, host, below)
+    assert res.status_code == 201, res.text
+    assert res.json()["shipping_cents"] == 6_000
+
+    above = _order_payload("01799999992", product["id"], qty=2)
+    above["delivery_location"] = "Dhaka"
+    res = await _post_order(account, host, above)
+    assert res.status_code == 201, res.text
+    assert res.json()["shipping_cents"] == 0
+
+    bad = await account.patch(f"/sites/{site['id']}", json={"shipping": {"free_over_cents": -5}})
+    assert bad.status_code == 422

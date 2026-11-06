@@ -97,6 +97,11 @@ DECLARATIONS: list[dict] = [
         }, "required": ["locations"]},
     },
     {
+        "name": "set_free_delivery_over",
+        "description": "Make delivery free on orders at or above an amount in taka; 0 turns it off. Applied immediately; undo restores it.",
+        "parameters": {"type": "OBJECT", "properties": {"amount_taka": {"type": "NUMBER"}}, "required": ["amount_taka"]},
+    },
+    {
         "name": "set_product_delivery",
         "description": "Make one product free delivery, or give it the store's delivery charges. Applied immediately; undo restores it.",
         "parameters": {"type": "OBJECT", "properties": {
@@ -333,6 +338,12 @@ async def set_delivery_locations(
     )
 
 
+async def set_free_delivery_over(db: AsyncSession, tenant_id: uuid.UUID, amount_taka: Any) -> dict:
+    cents = _cents(amount_taka) or None
+    summary = f"Free delivery on orders over ৳{cents // 100:,}" if cents else "Turned off free delivery over an amount"
+    return await patch_column(db, tenant_id, "set_free_delivery_over", "shipping", {"free_over_cents": cents}, summary)
+
+
 async def set_product_delivery(
     db: AsyncSession, tenant_id: uuid.UUID, free_delivery: bool,
     product_name: str | None = None, product_id: str | None = None,
@@ -415,6 +426,7 @@ HANDLERS = {
     "update_contact_info": update_contact_info,
     "update_seo": update_seo,
     "set_delivery_locations": set_delivery_locations,
+    "set_free_delivery_over": set_free_delivery_over,
     "set_product_delivery": set_product_delivery,
     "update_about_page": update_about_page,
     "set_faqs": set_faqs,

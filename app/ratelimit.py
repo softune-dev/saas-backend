@@ -59,12 +59,8 @@ def rate_limit(key: str, limit: int, window_seconds: int):
 
 
 async def demo_access_rate_limit(request: Request) -> None:
-    """Demo access has no per-visitor friction by design — anyone can request
-    it, repeatedly, from anywhere; the endpoint itself upserts by email
-    instead of erroring on a repeat. The only cap is per-email (5/day),
-    purely to stop one address from being hammered/scripted; there's
-    deliberately no IP window, since a shared office/campus IP legitimately
-    generates many distinct real signups.
+    """Caps demo codes at 5/day per email, so one inbox can't be flooded. The
+    per-IP cap is a separate rate_limit on the route (app/api/demo_access.py).
 
     Reads the email from the request body directly, same trick
     login_rate_limit uses — Starlette caches the raw body, so this doesn't
@@ -95,7 +91,7 @@ async def demo_access_rate_limit(request: Request) -> None:
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001 - see module docstring
-        log.warning("demo access rate limit check failed for %s: %s (allowing request)", ip, exc)
+        log.warning("demo access rate limit check failed for %s: %s (allowing request)", email, exc)
         return
 
 
