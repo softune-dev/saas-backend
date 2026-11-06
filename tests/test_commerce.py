@@ -40,6 +40,51 @@ async def test_category_cannot_be_its_own_parent(account, site):
     assert response.status_code == 400
 
 
+async def test_category_cannot_be_moved_under_its_own_descendant(account, site):
+    """A -> B (B under A), then A under B would make a loop that every
+    parent-walking consumer (menus, breadcrumbs) never finishes."""
+    parent = (
+        await account.post(f"/sites/{site['id']}/categories", json={"name": "Parent"})
+    ).json()
+    child = (
+        await account.post(
+            f"/sites/{site['id']}/categories",
+            json={"name": "Child", "parent_id": parent["id"]},
+        )
+    ).json()
+    grandchild = (
+        await account.post(
+            f"/sites/{site['id']}/categories",
+            json={"name": "Grandchild", "parent_id": child["id"]},
+        )
+    ).json()
+
+    for descendant in (child, grandchild):
+        response = await account.patch(
+            f"/sites/{site['id']}/categories/{parent['id']}",
+            json={"parent_id": descendant["id"]},
+        )
+        assert response.status_code == 400, response.text
+
+    # Moving UP the tree is still allowed.
+    up = await account.patch(
+        f"/sites/{site['id']}/categories/{grandchild['id']}", json={"parent_id": parent["id"]}
+    )
+    assert up.status_code == 200, up.text
+
+
+def test_creates_cycle_helper_handles_existing_loops():
+    import uuid
+
+    from app.api.commerce import creates_cycle
+
+    a, b, c = (uuid.uuid4() for _ in range(3))
+    assert creates_cycle({a: None, b: a}, a, b)
+    assert not creates_cycle({a: None, b: a}, b, a)
+    # Bad data already in the table must not hang the check.
+    assert creates_cycle({a: b, b: a}, c, a) is False
+
+
 async def test_duplicate_category_slug_is_rejected(account, site):
     await account.post(f"/sites/{site['id']}/categories", json={"name": "Same Name"})
     second = await account.post(

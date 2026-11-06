@@ -108,6 +108,29 @@ async def create_category(
     return category
 
 
+def creates_cycle(
+    parent_of: dict[uuid.UUID, uuid.UUID | None],
+    category_id: uuid.UUID,
+    new_parent_id: uuid.UUID,
+) -> bool:
+    """True if making `new_parent_id` the parent of `category_id` would put
+    `category_id` above itself (A -> B -> A).
+
+    Rejecting only "own parent" left this open: with B under A, setting A's
+    parent to B is accepted and the tree becomes a loop, so anything that walks
+    parents (menus, breadcrumbs, the storefront category tree) never finishes.
+    Walks up from the proposed parent; `seen` also stops it if the data
+    already contains a loop, instead of spinning on it."""
+    seen: set[uuid.UUID] = set()
+    node: uuid.UUID | None = new_parent_id
+    while node is not None and node not in seen:
+        if node == category_id:
+            return True
+        seen.add(node)
+        node = parent_of.get(node)
+    return False
+
+
 @router.patch("/sites/{site_id}/categories/{category_id}", response_model=CategoryOut)
 async def update_category(
     site_id: uuid.UUID,
@@ -131,6 +154,20 @@ async def update_category(
         parent = await crud.get_scoped(db, Category, user.tenant_id, payload.parent_id)
         if parent.site_id != site_id:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Parent is on another site")
+        # One query for the site's whole tree (categories per site are few),
+        # not one per ancestor — each round trip is ~700ms on the pooler.
+        tree = (
+            await db.execute(
+                select(Category.id, Category.parent_id).where(
+                    Category.tenant_id == user.tenant_id, Category.site_id == site_id
+                )
+            )
+        ).all()
+        if creates_cycle(dict(tree), category_id, payload.parent_id):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "A category cannot be moved under one of its own sub-categories",
+            )
 
     old_image_url = category.image_url
     old_banner_url = category.banner_url

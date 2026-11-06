@@ -265,7 +265,11 @@ class Settings(BaseSettings):
     # account, decoupled from trial signup entirely. Not a secret: this
     # identifies WHICH account, app/security.py mints the token itself, no
     # password involved.
-    demo_user_email: str = "kallol.business.ds@gmail.com"
+    # No default on purpose: this names the account /public/demo-access hands a
+    # login for. A personal address here meant a forgotten DEMO_USER_EMAIL in
+    # .env silently pointed the public button at a real person. Blank = demo
+    # unavailable (503), which is the safe failure.
+    demo_user_email: str = ""
     # bKash personal/agent number shown on the dashboard's Billing page for
     # the self-serve "I already sent the money" flow (no payment gateway —
     # see dashboard/components/billing/billing-data.ts). Same number the

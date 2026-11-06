@@ -23,7 +23,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, func, not_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -70,6 +70,16 @@ DB = Annotated[AsyncSession, Depends(get_db)]
 
 # Fixed for now, not a per-site setting — see queue.JOB_SEND_LOW_STOCK_EMAIL.
 _LOW_STOCK_THRESHOLD = 5
+
+# Online payment methods that finish on the gateway's own page, and how long a
+# shopper gets to finish there. An order left "pending" past this window was
+# abandoned (closed tab, cancelled on the gateway, failed card) and must not
+# count as "an order in progress" for the device pending-lock — otherwise that
+# shopper is locked out of ordering again until the merchant cancels by hand.
+# The callbacks can't be used to cancel it for them: they are public, so only
+# a gateway-verified payment may change an order (see _finalize_gateway_payment).
+_GATEWAY_METHODS = ("bkash", "nagad", "sslcommerz")
+_GATEWAY_PAYMENT_WINDOW = timedelta(minutes=30)
 
 
 def _resolve_combo(product: Product, variant_key: str | None) -> dict | None:
@@ -857,9 +867,21 @@ async def create_public_order(
             if cooldown_enabled else None
         )
         if pending_enabled or cooldown_enabled:
+            # Defined once and used both to filter and to label each row, so
+            # the SQL LIMIT below can't be filled with abandoned gateway
+            # orders that would then be ignored in Python. coalesce: an order
+            # with no payment_method must evaluate to False here, not NULL
+            # (NOT NULL is NULL, which would silently drop the row).
+            stale_gateway_order = and_(
+                Order.status == "pending",
+                Order.created_at < datetime.now(timezone.utc) - _GATEWAY_PAYMENT_WINDOW,
+                func.coalesce(Order.meta["payment_method"].astext, "").in_(_GATEWAY_METHODS),
+            )
             conditions = []
             if pending_enabled:
-                conditions.append(Order.status.in_(("pending", "paid")))
+                conditions.append(
+                    and_(Order.status.in_(("pending", "paid")), not_(stale_gateway_order))
+                )
             if cooldown_enabled:
                 conditions.append(
                     and_(
@@ -869,7 +891,12 @@ async def create_public_order(
                 )
             candidates = (
                 await db.execute(
-                    select(Order.status, Order.fraud_status, Order.created_at).where(
+                    select(
+                        Order.status,
+                        Order.fraud_status,
+                        Order.created_at,
+                        stale_gateway_order.label("stale_gateway"),
+                    ).where(
                         Order.site_id == site.id,
                         Order.device_id == payload.device_id,
                         or_(*conditions),
@@ -878,7 +905,8 @@ async def create_public_order(
             ).all()
 
             open_order = pending_enabled and any(
-                row.status in ("pending", "paid") for row in candidates
+                row.status in ("pending", "paid") and not row.stale_gateway
+                for row in candidates
             )
             recent_bad_order = cooldown_enabled and any(
                 row.created_at >= window_start
@@ -1621,13 +1649,15 @@ async def demo_access(payload: DemoAccessIn, request: Request, db: DB) -> dict:
     # deployments, the demo tenant being upgraded to a paid plan, or a
     # superadmin who shares the address), the public would otherwise get
     # full write — or superadmin — access to it.
-    row = (
-        await db.execute(
-            select(User, Tenant)
-            .join(Tenant, User.tenant_id == Tenant.id)
-            .where(User.email == settings.demo_user_email)
-        )
-    ).first()
+    row = None
+    if settings.demo_user_email:  # blank = not configured -> 503 below, no lookup
+        row = (
+            await db.execute(
+                select(User, Tenant)
+                .join(Tenant, User.tenant_id == Tenant.id)
+                .where(User.email == settings.demo_user_email)
+            )
+        ).first()
     demo_user = None
     if row is not None:
         user, tenant = row

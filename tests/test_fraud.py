@@ -238,6 +238,69 @@ async def test_device_pending_lock_blocks_second_open_order(account, site, monke
     assert other_device.status_code == 201
 
 
+async def test_device_pending_lock_ignores_abandoned_gateway_order(account, site, monkeypatch):
+    """A shopper who started a bKash/SSLCommerz/Nagad payment and never
+    finished must not be locked out of ordering again forever. The callbacks
+    can't cancel the order (they're public — see _finalize_gateway_payment),
+    so the lock itself stops counting an unpaid gateway order once the
+    payment window has passed. Cash-on-delivery pending orders still count."""
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import update
+
+    from app.db import SessionLocal
+    from app.models import Order
+
+    _no_recaptcha(monkeypatch)
+    product = await _product(account, site)
+    await account.patch(
+        f"/sites/{site['id']}",
+        json={"fraud_rules": {"device_pending_lock": {"enabled": True}}},
+    )
+    host = await _publish(account, site)
+    device_id = f"dev-{uuid.uuid4().hex[:12]}"
+
+    gateway_payload = _order_payload("01788888888", product["id"], device_id=device_id)
+    gateway_payload["payment_method"] = "bkash"
+    first = await _post_order(account, host, gateway_payload)
+    assert first.status_code == 201, first.text
+
+    # Inside the payment window the shopper may still be paying: still locked.
+    assert (
+        await _post_order(
+            account, host, _order_payload("01788888888", product["id"], device_id=device_id)
+        )
+    ).status_code == 403
+
+    # Past the window, the abandoned gateway order stops blocking.
+    async with SessionLocal() as db:
+        await db.execute(
+            update(Order)
+            .where(Order.device_id == device_id)
+            .values(created_at=datetime.now(UTC) - timedelta(hours=2))
+        )
+        await db.commit()
+    retry = await _post_order(
+        account, host, _order_payload("01788888888", product["id"], device_id=device_id)
+    )
+    assert retry.status_code == 201, retry.text
+
+    # That retry is a COD order; however old it gets, a pending COD order is a
+    # genuine open order and keeps the lock.
+    async with SessionLocal() as db:
+        await db.execute(
+            update(Order)
+            .where(Order.device_id == device_id, Order.meta["payment_method"].astext == "cod")
+            .values(created_at=datetime.now(UTC) - timedelta(hours=2))
+        )
+        await db.commit()
+    assert (
+        await _post_order(
+            account, host, _order_payload("01788888888", product["id"], device_id=device_id)
+        )
+    ).status_code == 403
+
+
 async def test_device_id_omitted_is_backward_compatible(account, site, monkeypatch):
     """A storefront build that predates device_id must keep working exactly
     as before — the field is optional and the checks no-op without it."""
