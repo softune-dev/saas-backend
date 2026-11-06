@@ -34,7 +34,7 @@ from collections.abc import AsyncIterator
 
 import httpx
 
-from app import ai, ai_agent_media, ai_agent_tools, ai_forms, ai_log, ai_tools
+from app import ai, ai_agent_admin, ai_agent_media, ai_agent_settings, ai_agent_tools, ai_forms, ai_log, ai_tools
 from app.config import settings
 from app.db import SessionLocal
 
@@ -83,8 +83,16 @@ RULES
   hosted URL from the note. You cannot generate images here (the Image tab does that).
 - A vague "change my colors" with no direction: pick a fresh, coherent palette
   (primary + accent + surface), not a single color.
-- No tool for: connecting courier/payment accounts (merchant's own keys) or domains
-  (DNS). Say so briefly.
+- Settings are yours too: contact, SEO, delivery, About, FAQs, Privacy, Terms, domains,
+  fraud rules and blocklists, courier auto-booking, account details. Read current
+  values first (get_site_info, get_store_admin_info). For set_faqs send the old FAQs too.
+- Delivery: set_delivery_locations also applies charges to products; say how many.
+  "Demo shipping" = sensible Inside/Outside Dhaka locations, and say they are samples.
+- Privacy/Terms: draft under 500 words from real store facts, leave unpublished unless
+  asked to publish, and tell the merchant to review it. Never invent a legal claim.
+- Never accept keys or passwords in chat. Courier/payment keys, password or email
+  changes, disconnecting a live domain and paying for a plan happen on their own pages:
+  say so briefly. You can read plan, invoices and tickets, and open a support ticket.
 - How-does-it-work / policy / docs questions: call get_platform_guide.
 - New product: set a category only if one clearly fits; otherwise leave it empty.
 - "Audit/review my store": don't ask what kind. Run get_business_overview,
@@ -126,8 +134,17 @@ _GUIDE_TOOL = {
 TOOLS = [{"functionDeclarations": [
     _compact(d)
     for d in ai_tools.TOOL_DECLARATIONS + ai_agent_tools.DECLARATIONS + ai_agent_media.DECLARATIONS
+    + ai_agent_settings.DECLARATIONS + ai_agent_admin.DECLARATIONS
 ] + [_GUIDE_TOOL]}]
-_AGENT_HANDLERS = {**ai_agent_tools.HANDLERS, **ai_agent_media.HANDLERS}
+_AGENT_HANDLERS = {
+    **ai_agent_tools.HANDLERS, **ai_agent_media.HANDLERS,
+    **ai_agent_settings.HANDLERS, **ai_agent_admin.HANDLERS,
+}
+# Tools that act on the signed-in person, not just the store. The id is set
+# after the model's arguments, so the model can never choose it.
+_NEEDS_USER = {"update_account", "get_store_admin_info"}
+# Settings writes a demo account must not make, matching block_demo_writes.
+_NO_DEMO = (set(ai_agent_settings.HANDLERS) | set(ai_agent_admin.HANDLERS)) - {"get_store_admin_info"}
 
 # Status lines shown while a tool runs, so the merchant sees the agent work.
 _LABELS: dict[str, tuple[str, str]] = {
@@ -159,6 +176,21 @@ _LABELS: dict[str, tuple[str, str]] = {
     "set_homepage_image": ("Placing the image", "ছবি বসাচ্ছি"),
     "set_category_image": ("Setting the category picture", "ক্যাটাগরির ছবি দিচ্ছি"),
     "add_product_image": ("Adding the product photo", "প্রোডাক্টের ছবি যোগ করছি"),
+    "update_contact_info": ("Updating contact details", "যোগাযোগের তথ্য আপডেট করছি"),
+    "update_seo": ("Updating SEO", "SEO আপডেট করছি"),
+    "set_delivery_locations": ("Setting delivery charges", "ডেলিভারি চার্জ সেট করছি"),
+    "set_product_delivery": ("Updating product delivery", "প্রোডাক্টের ডেলিভারি আপডেট করছি"),
+    "update_about_page": ("Writing the About page", "About পেজ লিখছি"),
+    "set_faqs": ("Updating FAQs", "FAQ আপডেট করছি"),
+    "update_legal_page": ("Updating the policy page", "পলিসি পেজ আপডেট করছি"),
+    "get_store_admin_info": ("Reading your settings", "সেটিংস দেখছি"),
+    "request_custom_domain": ("Requesting the domain", "ডোমেইন যুক্ত করছি"),
+    "update_fraud_rules": ("Updating fraud protection", "ফ্রড প্রোটেকশন আপডেট করছি"),
+    "update_blocklist": ("Updating the blocklist", "ব্লকলিস্ট আপডেট করছি"),
+    "review_suspicious_order": ("Reviewing the order", "অর্ডার রিভিউ করছি"),
+    "set_courier_auto_book": ("Updating courier booking", "কুরিয়ার বুকিং আপডেট করছি"),
+    "update_account": ("Updating your account", "অ্যাকাউন্ট আপডেট করছি"),
+    "propose_support_ticket": ("Preparing the ticket", "টিকেট প্রস্তুত করছি"),
 }
 _BANGLA = re.compile(r"[ঀ-৿]")
 
@@ -232,9 +264,13 @@ async def _stream_round(
         tracker.total_tokens += int(usage.get("totalTokenCount") or 0)
 
 
-async def _run_tool(name: str, args: dict, db, tenant_id: uuid.UUID) -> dict:
+async def _run_tool(name: str, args: dict, db, tenant_id: uuid.UUID, user_id: uuid.UUID | None = None) -> dict:
     if name == "get_platform_guide":
         return {"guide": _PLATFORM}
+    if name in _NO_DEMO and await ai_agent_admin.is_demo(db, tenant_id):
+        return {"error": "This is a demo account, so settings can't be changed."}
+    if name in _NEEDS_USER:
+        args = {**args, "_user_id": user_id}
     if name in _AGENT_HANDLERS:
         return await ai_agent_tools.run(name, args, db, tenant_id, _AGENT_HANDLERS)
     return await ai_tools.execute_tool(name, args, db, tenant_id)
@@ -360,12 +396,16 @@ async def _turn(
                 name, args = call["name"], call.get("args") or {}
                 tools_used.append(name)
                 yield {"type": "status", "tool": name, "label": _label(name, bangla)}
-                if name in ai_agent_tools.PROPOSAL_TOOLS:
-                    action = await ai_forms.attach_form(ai_agent_tools.proposal_for(name, args), db, tenant_id)
+                if name in ai_agent_tools.PROPOSAL_TOOLS or name in ai_agent_admin.PROPOSAL_TOOLS:
+                    pending = (
+                        ai_agent_admin.proposal_for(args) if name in ai_agent_admin.PROPOSAL_TOOLS
+                        else ai_agent_tools.proposal_for(name, args)
+                    )
+                    action = await ai_forms.attach_form(pending, db, tenant_id)
                     yield {"type": "proposal", "action": action}
                     result: dict = {"ok": True, "shown_to_merchant": "A confirm card is on screen; nothing changes until they confirm."}
                 else:
-                    result = await _run_tool(name, args, db, tenant_id)
+                    result = await _run_tool(name, args, db, tenant_id, tracker.user_id)
                     change = result.get("change") if isinstance(result, dict) else None
                     if change:
                         changes.append(change)

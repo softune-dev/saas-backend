@@ -21,9 +21,13 @@ async def _theme(tenant_id) -> dict:
         return dict(site.theme or {})
 
 
-async def _tool(tenant_id, name, **args) -> dict:
+# Positional-only (the "/"): tools take an argument called `name` (add_category,
+# create_product), which would otherwise collide with this parameter. Uses the
+# agent's full handler table, as the real agent loop does, so image and
+# settings tools resolve too.
+async def _tool(tenant_id, tool, /, **args) -> dict:
     async with SessionLocal() as db:
-        return await ai_agent_tools.run(name, args, db, uuid.UUID(tenant_id))
+        return await ai_agent_tools.run(tool, args, db, uuid.UUID(tenant_id), ai_agent._AGENT_HANDLERS)
 
 
 async def _undo(tenant_id, change_id) -> dict:
@@ -215,3 +219,94 @@ async def test_image_placement_and_undo(account, site, monkeypatch):
     async with SessionLocal() as db:
         row = (await db.execute(select(Product).where(Product.id == uuid.UUID(prod["product"]["id"])))).scalar_one()
         assert row.images == []
+
+
+# --- settings tools ----------------------------------------------------------
+
+async def _site_row(tenant_id) -> Site:
+    async with SessionLocal() as db:
+        return (await db.execute(select(Site).where(Site.tenant_id == uuid.UUID(tenant_id)))).scalars().first()
+
+
+_settings = _tool
+
+
+async def test_delivery_locations_reach_products_and_undo_restores(account, site):
+    made = await _tool(account.tenant_id, "create_product", name="Honey", price_taka=500)
+    result = await _settings(account.tenant_id, "set_delivery_locations", locations=[
+        {"name": "Inside Dhaka", "charge_taka": 60}, {"name": "Outside Dhaka", "charge_taka": 120},
+    ])
+    assert result["ok"]
+    async with SessionLocal() as db:
+        product = await db.get(Product, uuid.UUID(made["product"]["id"]))
+        # Checkout reads the product, so this is what proves customers get charged.
+        assert product.free_delivery is False
+        assert {"name": "Inside Dhaka", "charge_cents": 6000} in product.delivery_charges
+
+    later = await _tool(account.tenant_id, "create_product", name="Ghee", price_taka=900)
+    async with SessionLocal() as db:
+        assert (await db.get(Product, uuid.UUID(later["product"]["id"]))).free_delivery is False
+
+    await _undo(account.tenant_id, result["change"]["id"])
+    assert not ((await _site_row(account.tenant_id)).shipping or {}).get("locations")
+    async with SessionLocal() as db:
+        product = await db.get(Product, uuid.UUID(made["product"]["id"]))
+        assert product.free_delivery is True and product.delivery_charges == []
+
+
+async def test_tracking_id_that_could_inject_script_is_refused(account, site):
+    result = await _settings(account.tenant_id, "update_seo", facebook_pixel="1');alert(1);//")
+    assert "error" in result
+    assert not ((await _site_row(account.tenant_id)).seo or {}).get("facebook_pixel")
+
+
+async def test_seo_undo_keeps_a_newer_manual_edit(account, site):
+    result = await _settings(account.tenant_id, "update_seo", meta_description="Fresh honey", keywords="honey")
+    async with SessionLocal() as db:
+        row = (await db.execute(select(Site).where(Site.tenant_id == uuid.UUID(account.tenant_id)))).scalars().first()
+        row.seo = {**row.seo, "keywords": "hand edited"}
+        await db.commit()
+    await _undo(account.tenant_id, result["change"]["id"])
+    seo = (await _site_row(account.tenant_id)).seo
+    assert seo["keywords"] == "hand edited" and not seo.get("meta_description")
+
+
+async def test_contact_faqs_and_legal_write_the_page_shapes(account, site):
+    assert (await _settings(account.tenant_id, "update_contact_info", phone="+8801711000000", city="Dhaka"))["ok"]
+    faqs = await _settings(account.tenant_id, "set_faqs", faqs=[{"question": "COD?", "answer": "Yes."}])
+    assert (await _settings(account.tenant_id, "update_legal_page", page="terms", content="Terms text."))["ok"]
+    row = await _site_row(account.tenant_id)
+    assert row.business["phone"] == "+8801711000000" and row.business["address"]["city"] == "Dhaka"
+    assert row.faqs[0]["id"] and row.faqs[0]["answer"] == "Yes."
+    assert row.legal["terms"] == {"title": "Terms", "content": "Terms text.", "published": False}
+    await _undo(account.tenant_id, faqs["change"]["id"])
+    assert (await _site_row(account.tenant_id)).faqs == []
+
+
+async def test_empty_legal_page_cannot_be_published(account, site):
+    assert "error" in await _settings(account.tenant_id, "update_legal_page", page="privacy", published=True)
+
+
+async def test_domain_request_stays_pending_and_undo_cancels(account, site):
+    result = await _settings(account.tenant_id, "request_custom_domain", domain="https://Shop.Example-Store.com/")
+    row = await _site_row(account.tenant_id)
+    assert row.pending_custom_domain == "shop.example-store.com" and row.custom_domain is None
+    await _undo(account.tenant_id, result["change"]["id"])
+    assert (await _site_row(account.tenant_id)).pending_custom_domain is None
+
+
+async def test_block_phone_and_undo_unblocks(account, site):
+    result = await _settings(account.tenant_id, "update_blocklist", action="block", kind="phone", value="01711000000")
+    assert result["ok"]
+    info = await _settings(account.tenant_id, "get_store_admin_info", section="fraud")
+    assert [p["phone"] for p in info["blocked_phones"]] == ["01711000000"]
+    await _undo(account.tenant_id, result["change"]["id"])
+    assert (await _settings(account.tenant_id, "get_store_admin_info", section="fraud"))["blocked_phones"] == []
+
+
+def test_every_new_tool_has_a_handler_and_status_label():
+    from app import ai_agent_admin, ai_agent_settings
+    for decl in ai_agent_settings.DECLARATIONS + ai_agent_admin.DECLARATIONS:
+        name = decl["name"]
+        assert name in ai_agent._LABELS, name
+        assert name in ai_agent._AGENT_HANDLERS or name in ai_agent_admin.PROPOSAL_TOOLS, name

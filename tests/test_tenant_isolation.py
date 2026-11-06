@@ -357,3 +357,28 @@ async def test_other_tenant_cannot_undo_ai_agent_change(two_accounts, template_i
 
     assert (await b.post(f"/ai/changes/{change_id}/undo")).status_code == 404
     assert (await a.post(f"/ai/changes/{change_id}/undo")).status_code == 200
+
+
+
+async def test_agent_settings_write_only_touches_the_callers_store(two_accounts, template_id):
+    """The tenant comes from the verified token, so one store's settings write
+    must leave another store's settings exactly as they were."""
+    import uuid
+
+    from sqlalchemy import select
+
+    from app import ai_agent, ai_agent_tools
+    from app.db import SessionLocal
+    from app.models import Site
+
+    a, b = two_accounts
+    await _make_site(a, template_id)
+    await _make_site(b, template_id)
+    async with SessionLocal() as db:
+        out = await ai_agent_tools.run(
+            "update_seo", {"meta_description": "A only"}, db, uuid.UUID(a.tenant_id), ai_agent._AGENT_HANDLERS
+        )
+    assert out["ok"]
+    async with SessionLocal() as db:
+        other = (await db.execute(select(Site).where(Site.tenant_id == uuid.UUID(b.tenant_id)))).scalars().first()
+        assert not (other.seo or {}).get("meta_description")

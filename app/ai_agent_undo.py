@@ -12,7 +12,7 @@ from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
-from app import cache, crud
+from app import ai_agent_admin, ai_agent_settings, cache, crud
 from app.ai_agent_tools import _forget_tool_cache, _template_key, _write_theme
 from app.models import AiAgentChange, Category, Event, Product, Site
 
@@ -70,6 +70,10 @@ async def undo(db: AsyncSession, tenant_id: uuid.UUID, change_id: uuid.UUID) -> 
         await crud.save(db, row)
         await cache.invalidate_site(site.subdomain, site.custom_domain)
         await cache.invalidate_dashboard(str(site.id))
+    elif kind == "site_json":
+        out["skipped"] = await ai_agent_settings.undo_site_json(db, site, spec)
+    elif kind in ai_agent_admin.UNDO_KINDS:
+        await ai_agent_admin.undo(db, site, spec)
     else:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "This change can't be undone.")
 

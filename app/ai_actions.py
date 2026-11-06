@@ -282,14 +282,26 @@ async def create_product(db: AsyncSession, tenant_id: uuid.UUID, product: dict) 
         if str(f.get("title", "")).strip()
     ][:8]
 
+    # A product charges only what it stores itself, so a new one has to pick
+    # up the store's delivery locations or it would ship free by accident.
+    delivery_charges = [
+        {"name": loc["name"], "charge_cents": int(loc.get("charge_cents") or 0)}
+        for loc in (site.shipping or {}).get("locations", []) if loc.get("name")
+    ][:10]
+
     row = Product(
         site_id=site.id,
         tenant_id=site.tenant_id,
         name=name,
+        free_delivery=not delivery_charges,
+        delivery_charges=delivery_charges,
         slug=crud.slugify(name, "product"),
         description=product.get("description") or None,
         short_description=product.get("short_description") or None,
         price_cents=price_cents,
+        # Not left to the column default (USD): an order takes its currency from
+        # its products and sends it to the gateway, so ৳500 would become $500.
+        currency="BDT",
         category_id=category_id,
         images=_normalize_images(product.get("images")),
         attributes=attributes,

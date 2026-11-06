@@ -28,6 +28,18 @@ from app.security import create_access_token
 
 
 @pytest.fixture(autouse=True)
+def _no_recaptcha_in_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests post logins and contact forms with no captcha token. With a real
+    RECAPTCHA_SECRET_KEY in .env (as on a production-like machine) those
+    requests are refused with 400, which failed unrelated tests. A blank key
+    is the app's documented "skip verification" mode (app/recaptcha.py)."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "recaptcha_secret_key", "")
+    monkeypatch.setattr(settings, "recaptcha_v2_secret_key", "")
+
+
+@pytest.fixture(autouse=True)
 async def _dispose_engine() -> AsyncGenerator[None, None]:
     """Close pooled database connections after every test.
 
