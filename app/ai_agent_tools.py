@@ -145,49 +145,6 @@ DECLARATIONS: list[dict] = [
         },
     },
     {
-        "name": "create_product",
-        "description": (
-            "Create a product. Applied immediately; undo deletes it. Price is in taka. "
-            "Write a good short_description and description yourself if the merchant "
-            "didn't give one."
-        ),
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {
-                "name": {"type": "STRING"},
-                "price_taka": {"type": "NUMBER"},
-                "compare_at_price_taka": {"type": "NUMBER", "description": "Original price, shown crossed out."},
-                "stock": {"type": "INTEGER"},
-                "category_name": {"type": "STRING"},
-                "short_description": {"type": "STRING"},
-                "description": {"type": "STRING"},
-            },
-            "required": ["name", "price_taka"],
-        },
-    },
-    {
-        "name": "update_product",
-        "description": (
-            "Edit an existing product found by name or id: price, compare-at price, stock, "
-            "active/hidden, name, descriptions, category. Applied immediately; undo restores it."
-        ),
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {
-                "product_name": {"type": "STRING"},
-                "product_id": {"type": "STRING"},
-                "new_name": {"type": "STRING"},
-                "price_taka": {"type": "NUMBER"},
-                "compare_at_price_taka": {"type": "NUMBER"},
-                "stock": {"type": "INTEGER"},
-                "is_active": {"type": "BOOLEAN"},
-                "short_description": {"type": "STRING"},
-                "description": {"type": "STRING"},
-                "category_name": {"type": "STRING"},
-            },
-        },
-    },
-    {
         "name": "create_discount_event",
         "description": (
             "Create a sale/discount event (also used for the storefront popup). "
@@ -387,65 +344,6 @@ async def add_category(db: AsyncSession, tenant_id: uuid.UUID, name: str, descri
     return {"ok": True, "category": created, "change": {"id": str(change.id), "summary": change.summary, "kind": "catalog"}}
 
 
-async def create_product(db: AsyncSession, tenant_id: uuid.UUID, **args: Any) -> dict:
-    site = await _site(db, tenant_id)
-    fields: dict[str, Any] = {
-        "name": args.get("name"),
-        "price_cents": _cents(args.get("price_taka")) or 0,
-        "category_name": args.get("category_name"),
-        "short_description": args.get("short_description"),
-        "description": args.get("description"),
-    }
-    created = await ai_actions.create_product(db, tenant_id, fields)
-    extra = {}
-    if args.get("stock") is not None:
-        extra["stock"] = max(0, int(args["stock"]))
-    if args.get("compare_at_price_taka") is not None:
-        extra["compare_at_cents"] = _cents(args["compare_at_price_taka"])
-    if extra:
-        await ai_actions.update_product(db, tenant_id, {"product_id": created["id"], **extra})
-    change = await _record(
-        db, site, "create_product", f"Added product “{created['name']}”",
-        {"type": "delete_product", "product_id": created["id"]},
-    )
-    await _forget_tool_cache(tenant_id)
-    return {
-        "ok": True, "product": created,
-        "note": "No photo yet — the merchant can attach one in chat or from the product page.",
-        "change": {"id": str(change.id), "summary": change.summary, "kind": "catalog"},
-    }
-
-
-_PRODUCT_RESTORE_FIELDS = ("name", "price_cents", "compare_at_cents", "stock", "is_active",
-                           "short_description", "description", "category_id")
-
-
-async def update_product(db: AsyncSession, tenant_id: uuid.UUID, **args: Any) -> dict:
-    site = await _site(db, tenant_id)
-    row = await ai_actions._find_product(db, site, args.get("product_id"), args.get("product_name"))
-    before = {f: getattr(row, f) for f in _PRODUCT_RESTORE_FIELDS}
-    before["category_id"] = str(before["category_id"]) if before["category_id"] else None
-    patch: dict[str, Any] = {"product_id": str(row.id)}
-    if args.get("new_name"):
-        patch["name"] = _clip(args["new_name"], 200)
-    if args.get("price_taka") is not None:
-        patch["price_cents"] = _cents(args["price_taka"])
-    if args.get("compare_at_price_taka") is not None:
-        patch["compare_at_cents"] = _cents(args["compare_at_price_taka"])
-    for f in ("stock", "is_active", "short_description", "description", "category_name"):
-        if args.get(f) is not None:
-            patch[f] = args[f]
-    if len(patch) == 1:
-        return {"error": "Nothing to change on that product."}
-    updated = await ai_actions.update_product(db, tenant_id, patch)
-    change = await _record(
-        db, site, "update_product", f"Updated “{updated['name']}”",
-        {"type": "restore_product", "product_id": updated["id"], "before": before},
-    )
-    await _forget_tool_cache(tenant_id)
-    return {"ok": True, "product": updated, "change": {"id": str(change.id), "summary": change.summary, "kind": "catalog"}}
-
-
 async def create_discount_event(db: AsyncSession, tenant_id: uuid.UUID, **args: Any) -> dict:
     site = await _site(db, tenant_id)
     created = await ai_actions.create_event(
@@ -478,8 +376,6 @@ HANDLERS = {
     "update_storefront_design": update_storefront_design,
     "update_homepage_text": update_homepage_text,
     "add_category": add_category,
-    "create_product": create_product,
-    "update_product": update_product,
     "create_discount_event": create_discount_event,
 }
 

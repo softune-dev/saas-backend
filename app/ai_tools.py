@@ -69,8 +69,8 @@ TOOL_DECLARATIONS = [
         "name": "get_product",
         "description": (
             "Full detail on ONE product — every field, not the short summary list_products "
-            "gives you. Always call this before proposing an update_product edit, so you can "
-            "show the merchant everything currently on the product before asking what to change."
+            "gives you, including variants and per-combination stock. Call this before "
+            "update_product so you change only what was asked."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -596,7 +596,17 @@ async def _get_product(
         "description": product.description,
         "features": product.features or [],
         "variants": attrs.get("variants") or [],
+        # Per-combination price/stock/SKU: a variant edit has to see these to
+        # keep them, and to answer "how many Navy / M do I have".
+        "combinations": attrs.get("combinations") or [],
+        "slug": product.slug,
+        "cost_price": _money(product.cost_price_cents, product.currency) if product.cost_price_cents else None,
+        "video_url": product.video_url,
+        "serial_number": product.serial_number,
+        "initial_sold_count": product.initial_sold_count,
+        "delivery_charges": product.delivery_charges or [],
         "photo_count": len(product.images or []),
+        "image_urls": [i.get("url") for i in (product.images or []) if isinstance(i, dict)],
     }
 
 

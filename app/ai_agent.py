@@ -34,7 +34,7 @@ from collections.abc import AsyncIterator
 
 import httpx
 
-from app import ai, ai_agent_admin, ai_agent_media, ai_agent_settings, ai_agent_tools, ai_forms, ai_log, ai_tools
+from app import ai, ai_agent_admin, ai_agent_media, ai_agent_products, ai_agent_settings, ai_agent_tools, ai_forms, ai_log, ai_tools
 from app.config import settings
 from app.db import SessionLocal
 
@@ -94,7 +94,12 @@ RULES
   changes, disconnecting a live domain and paying for a plan happen on their own pages:
   say so briefly. You can read plan, invoices and tickets, and open a support ticket.
 - How-does-it-work / policy / docs questions: call get_platform_guide.
-- New product: set a category only if one clearly fits; otherwise leave it empty.
+- Products: you can set EVERY field of the Add Product form (SKU, cost price, stock,
+  unit, video, delivery, features, photos, variants with per-combination price and
+  stock). Do all of it in one call. To add options ("add 3 colors") use
+  add_variant_values with real hex codes; for a full change call get_product first.
+  New combinations start at stock 0: ask or pass variant_stock. Set a category only
+  if one clearly fits.
 - "Audit/review my store": don't ask what kind. Run get_business_overview,
   get_site_info, get_storefront_design and list_products, then give a short
   prioritized list (most valuable fix first) of real gaps, each with what you'd
@@ -134,11 +139,11 @@ _GUIDE_TOOL = {
 TOOLS = [{"functionDeclarations": [
     _compact(d)
     for d in ai_tools.TOOL_DECLARATIONS + ai_agent_tools.DECLARATIONS + ai_agent_media.DECLARATIONS
-    + ai_agent_settings.DECLARATIONS + ai_agent_admin.DECLARATIONS
+    + ai_agent_products.DECLARATIONS + ai_agent_settings.DECLARATIONS + ai_agent_admin.DECLARATIONS
 ] + [_GUIDE_TOOL]}]
 _AGENT_HANDLERS = {
     **ai_agent_tools.HANDLERS, **ai_agent_media.HANDLERS,
-    **ai_agent_settings.HANDLERS, **ai_agent_admin.HANDLERS,
+    **ai_agent_products.HANDLERS, **ai_agent_settings.HANDLERS, **ai_agent_admin.HANDLERS,
 }
 # Tools that act on the signed-in person, not just the store. The id is set
 # after the model's arguments, so the model can never choose it.

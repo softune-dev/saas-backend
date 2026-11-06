@@ -310,3 +310,93 @@ def test_every_new_tool_has_a_handler_and_status_label():
         name = decl["name"]
         assert name in ai_agent._LABELS, name
         assert name in ai_agent._AGENT_HANDLERS or name in ai_agent_admin.PROPOSAL_TOOLS, name
+
+
+# --- full product tools -------------------------------------------------------
+
+def test_description_html_keeps_formatting_and_drops_script():
+    from app.ai_agent_products import clean_html
+
+    out = clean_html('<p onclick="x()">Soft <b>silk</b></p><script>alert(1)</script><a href="javascript:evil()">bad</a><a href="https://ok.example/p">good</a><img src=x onerror=y>')
+    assert out == '<p>Soft <b>silk</b></p>bad<a href="https://ok.example/p" target="_blank" rel="noopener noreferrer">good</a>'
+    assert clean_html("Line one\nline two\n\nPrice < 5 & more") == "<p>Line one<br>line two</p><p>Price &lt; 5 &amp; more</p>"
+
+
+def test_adding_colors_keeps_existing_values_and_only_adds_new_ones():
+    from app.ai_agent_products import _merge_values
+
+    current = [{"type": "Color", "isColor": True, "affectsPrice": False,
+                "values": [{"value": "Blush", "hex": "#F4C2C2"}, {"value": "Ivory", "hex": "#FFFFF0"}]}]
+    merged = _merge_values(current, [{"type": "color", "values": [{"value": "blush"}, {"value": "Lavender", "hex": "#B57EDC"}]}])
+    assert [v["value"] for v in merged[0]["values"]] == ["Blush", "Ivory", "Lavender"]
+    assert merged[0]["values"][2]["hex"] == "#B57EDC"
+    assert len(current[0]["values"]) == 2  # the stored product is not edited in place
+
+
+def test_combinations_keep_saved_stock_and_start_new_ones_at_the_given_stock():
+    from app.ai_agent_products import _combinations
+
+    options = [{"type": "Color", "values": [{"value": "Blush"}, {"value": "Lavender"}]}, {"type": "Size", "values": [{"value": "M"}]}]
+    existing = [{"key": "Color:Blush|Size:M", "optionValues": {"Color": "Blush", "Size": "M"}, "stock": 9, "trackStock": True, "isActive": True}]
+    rows = _combinations(options, existing, [{"options": [{"type": "Color", "value": "Lavender"}, {"type": "Size", "value": "M"}], "price_taka": 1500}], 4)
+    by_key = {r["key"]: r for r in rows}
+    assert by_key["Color:Blush|Size:M"]["stock"] == 9
+    assert by_key["Color:Lavender|Size:M"]["stock"] == 4 and by_key["Color:Lavender|Size:M"]["priceCents"] == 150_000
+    assert _combinations(options, [], [], None) is None  # plain pooled stock stays as it is
+    import pytest
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException):
+        _combinations(options, existing, [{"options": [{"type": "Color", "value": "Green"}]}], None)
+
+
+async def test_product_with_every_field_and_adding_colors_with_undo(account, site):
+    await _tool(account.tenant_id, "add_category", name="Dupatta")
+    await _tool(account.tenant_id, "set_delivery_locations", locations=[{"name": "Inside Dhaka", "charge_taka": 60}, {"name": "Outside Dhaka", "charge_taka": 120}])
+    made = await _tool(
+        account.tenant_id, "create_product", name="Blush Organza Dupatta", price_taka=1800, compare_at_price_taka=2200,
+        cost_price_taka=900, stock=20, sku="DUP-001", unit="pcs", category_name="dupatta", serial_number="SN-1",
+        video_url="https://example.com/v.mp4", initial_sold_count=12, track_stock=True,
+        description="Hand finished.\n\nZari border.", features=[{"title": "Free gift box", "icon": "gift"}],
+        delivery_locations=["Inside Dhaka"],
+        variants=[{"type": "Color", "is_color": True, "values": [{"value": "Blush", "hex": "#F4C2C2"}, {"value": "Ivory", "hex": "#FFFFF0"}]}],
+    )
+    assert made["ok"], made
+    pid = made["product"]["id"]
+    async with SessionLocal() as db:
+        row = await db.get(Product, uuid.UUID(pid))
+        assert (row.sku, row.unit, row.compare_at_cents, row.cost_price_cents, row.currency) == ("DUP-001", "pcs", 220_000, 90_000, "BDT")
+        assert row.category_id is not None and row.initial_sold_count == 12 and row.video_url.startswith("https://")
+        assert row.description == "<p>Hand finished.</p><p>Zari border.</p>"
+        assert row.free_delivery is False and row.delivery_charges == [{"name": "Inside Dhaka", "charge_cents": 6000}]
+        assert [v["value"] for v in row.attributes["variants"][0]["values"]] == ["Blush", "Ivory"]
+
+    added = await _tool(account.tenant_id, "update_product", product_id=pid,
+                        add_variant_values=[{"type": "Color", "values": [{"value": "Lavender", "hex": "#B57EDC"}]}])
+    assert added["ok"], added
+    async with SessionLocal() as db:
+        row = await db.get(Product, uuid.UUID(pid))
+        assert [v["value"] for v in row.attributes["variants"][0]["values"]] == ["Blush", "Ivory", "Lavender"]
+
+    sized = await _tool(account.tenant_id, "update_product", product_id=pid,
+                        add_variant_values=[{"type": "Size", "values": [{"value": "S"}, {"value": "M"}]}], variant_stock=5,
+                        combinations=[{"options": [{"type": "Color", "value": "Blush"}, {"value": "S", "type": "Size"}], "price_taka": 1700, "stock": 2}])
+    assert sized["ok"] and sized["product"]["combination_count"] == 6, sized
+    async with SessionLocal() as db:
+        combos = {c["key"]: c for c in (await db.get(Product, uuid.UUID(pid))).attributes["combinations"]}
+        assert combos["Color:Blush|Size:S"]["priceCents"] == 170_000 and combos["Color:Blush|Size:S"]["stock"] == 2
+        assert combos["Color:Ivory|Size:M"]["stock"] == 5
+
+    await _undo(account.tenant_id, sized["change"]["id"])
+    await _undo(account.tenant_id, added["change"]["id"])
+    async with SessionLocal() as db:
+        row = await db.get(Product, uuid.UUID(pid))
+        assert [v["value"] for v in row.attributes["variants"][0]["values"]] == ["Blush", "Ivory"]
+        assert "combinations" not in row.attributes
+
+
+async def test_product_rejects_unknown_category_delivery_and_script_in_description(account, site):
+    assert "error" in await _tool(account.tenant_id, "create_product", name="X", price_taka=10, category_name="Nope")
+    assert "error" in await _tool(account.tenant_id, "create_product", name="X", price_taka=10, delivery_locations=["Mars"])
+    ok = await _tool(account.tenant_id, "create_product", name="Safe", price_taka=10, description="<script>alert(1)</script>Nice")
+    async with SessionLocal() as db:
+        assert (await db.get(Product, uuid.UUID(ok["product"]["id"]))).description == "Nice"

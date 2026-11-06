@@ -36,7 +36,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import ai_agent_media, ai_agent_tools, ai_agent_undo, ai_log, ai_tools, cache, mcp_images, oauth_server
+from app import ai_agent_media, ai_agent_products, ai_agent_tools, ai_agent_undo, ai_log, ai_tools, cache, mcp_images, oauth_server
 from app.config import settings
 from app.models import AiAgentChange, OAuthToken
 
@@ -72,7 +72,7 @@ _WRITE_TOOLS: dict[str, tuple[str, dict]] = {
     "set_category_image": ("Set category image", _OVERWRITE),
     "add_product_image": ("Add product photo", _OVERWRITE),
 }
-_HANDLERS = {**ai_agent_tools.HANDLERS, **ai_agent_media.HANDLERS}
+_HANDLERS = {**ai_agent_tools.HANDLERS, **ai_agent_media.HANDLERS, **ai_agent_products.HANDLERS}
 _OWN_TOOLS = {
     "add_image_to_gallery": {
         "title": "Add image to media library",
@@ -134,7 +134,7 @@ def _json_schema(node: Any) -> Any:
 def _tool_defs() -> list[dict]:
     decls = {
         d["name"]: d
-        for d in ai_tools.TOOL_DECLARATIONS + ai_agent_tools.DECLARATIONS + ai_agent_media.DECLARATIONS
+        for d in ai_tools.TOOL_DECLARATIONS + ai_agent_tools.DECLARATIONS + ai_agent_media.DECLARATIONS + ai_agent_products.DECLARATIONS
     }
     out: list[dict] = []
     for name, title in _READ_TOOLS.items():
