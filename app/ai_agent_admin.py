@@ -21,7 +21,7 @@ from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import ai_actions, ai_tools, cache, crud, domains, queue, vercel
+from app import ai_actions, ai_tools, cache, crud, domains, edge_config, queue, vercel
 from app.ai_agent_settings import _result, patch_column
 from app.ai_agent_tools import _clip, _forget_tool_cache, _record, _site
 from app.models import (
@@ -276,6 +276,7 @@ async def _add_block(db: AsyncSession, site: Site, kind: str, value: str, note: 
     if kind == "ip":
         await crud.save(db, FraudIpBlocklistEntry(tenant_id=site.tenant_id, site_id=site.id, ip_address=value, note=note))
         await cache.invalidate_ip_blocks(site.subdomain, site.custom_domain)
+        await edge_config.sync_ip_blocks(db, site)
     else:
         await crud.save(db, FraudBlocklistEntry(tenant_id=site.tenant_id, site_id=site.id, phone=value, note=note))
 
@@ -284,6 +285,7 @@ async def _remove_block(db: AsyncSession, site: Site, row: Any, kind: str) -> No
     await crud.delete(db, row)
     if kind == "ip":
         await cache.invalidate_ip_blocks(site.subdomain, site.custom_domain)
+        await edge_config.sync_ip_blocks(db, site)
 
 
 async def update_blocklist(

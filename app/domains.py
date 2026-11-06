@@ -17,7 +17,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import cache, crud, queue, vercel
+from app import cache, crud, edge_config, queue, vercel
 from app.config import settings
 from app.models import Site
 
@@ -84,6 +84,8 @@ async def promote(db: AsyncSession, site: Site) -> bool:
         return False
 
     await _drop_caches(pending, previous, f"{site.subdomain}.{settings.site_base_domain}")
+    # The blocklist is stored per hostname, so the new domain needs its copy.
+    await edge_config.sync_ip_blocks(db, site)
     if site.status == "published":
         await queue.publish(queue.JOB_REVALIDATE_SITE, {"site_id": str(site.id)})
     if previous and previous != pending:

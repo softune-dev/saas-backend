@@ -30,7 +30,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import cache, crud
+from app import cache, crud, edge_config
 from app.db import get_db
 from app.models import FraudBlocklistEntry, FraudIpBlocklistEntry, Order, Site
 from app.schemas import (
@@ -130,6 +130,7 @@ async def add_to_ip_blocklist(
     # merchant who just got attacked needs the block live immediately, not
     # after the cache's own short TTL happens to expire on its own.
     await cache.invalidate_ip_blocks(site.subdomain, site.custom_domain)
+    await edge_config.sync_ip_blocks(db, site)
     return saved
 
 
@@ -143,6 +144,7 @@ async def remove_from_ip_blocklist(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "IP blocklist entry not found")
     await crud.delete(db, entry)
     await cache.invalidate_ip_blocks(site.subdomain, site.custom_domain)
+    await edge_config.sync_ip_blocks(db, site)
 
 
 # =============================================================================

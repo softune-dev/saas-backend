@@ -91,6 +91,9 @@ class Settings(BaseSettings):
     # Only needed if the Vercel projects live under a Team, not a personal
     # account — leave blank otherwise.
     vercel_team_id: str = ""
+    # Store holding per-site IP blocklists for storefront middleware. Blank
+    # turns the sync off and storefronts fall back to asking this API.
+    edge_config_id: str = ""
 
     # --- media (Cloudinary) ---
     # See app/media.py for how these are used. Left blank-able rather than

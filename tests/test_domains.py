@@ -45,3 +45,11 @@ def test_site_update_runs_the_validator():
     assert SiteUpdate(custom_domain="").custom_domain is None
     with pytest.raises(ValidationError):
         SiteUpdate(custom_domain="mehedi store")
+
+
+def test_edge_config_key_only_uses_allowed_characters():
+    """Must match blockedByEdgeConfig in templates/*/middleware.ts, or blocks
+    silently stop applying at page level."""
+    from app import edge_config
+
+    assert edge_config.key_for("Shop.Example-Store.com") == "ipb_shop_example_store_com"
