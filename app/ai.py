@@ -671,7 +671,17 @@ honest about not being built — never imply it works if it's marked that way.
   sentence), set a real OG image so shared links look good on
   WhatsApp/Facebook, keep indexing hidden until the store has real products
   and is ready to be found, and connect Search Console once live so Google
-  actually indexes it. Page-level SEO (set per-page) always overrides the
+  actually indexes it.
+- **Meta Pixel tracking is automatic**: with only the Pixel ID saved, the
+  storefront itself sends PageView, ViewContent, AddToCart, InitiateCheckout
+  and Purchase (Purchase on a successful order, with the real total in BDT
+  and the order number as event ID). Checkout shows a receipt on the same
+  /checkout page, with no thank-you URL, so tell merchants NOT to add Purchase
+  through Meta's Event Setup Tool ("Track a URL"/"Track a button"): it would
+  count false or duplicate sales. To check it, use Events Manager → Test
+  events and place a test order. For better accuracy, connect Meta
+  Conversions API (access token, same SEO page); it is deduplicated with the
+  Pixel. Guide: https://www.softunebd.com/support/documentation/meta-pixel-tracking Page-level SEO (set per-page) always overrides the
   site-wide defaults above, so a merchant only needs to set something once
   at the site level and override it per page where it actually differs.
 
