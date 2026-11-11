@@ -24,6 +24,7 @@ from app.api import (
     pages,
     payments,
     demo_access,
+    pay,
     public,
     push,
     sites,
@@ -63,6 +64,10 @@ api_router.include_router(customers.router, dependencies=_demo_guard)
 api_router.include_router(events.router, dependencies=_demo_guard)
 api_router.include_router(courier.router, dependencies=_demo_guard)
 api_router.include_router(payments.router, dependencies=_demo_guard)
+api_router.include_router(pay.admin_router, dependencies=_demo_guard)
+# NOT gated by _demo_guard: the Softune Pay phone app has no dashboard login;
+# it authenticates with its own device token (app/api/pay.py's current_device).
+api_router.include_router(pay.device_router)
 api_router.include_router(marketing.router, dependencies=_demo_guard)
 api_router.include_router(fraud.router, dependencies=_demo_guard)
 api_router.include_router(help_desk.router, dependencies=_demo_guard)

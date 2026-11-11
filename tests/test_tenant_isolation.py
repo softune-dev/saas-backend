@@ -382,3 +382,38 @@ async def test_agent_settings_write_only_touches_the_callers_store(two_accounts,
     async with SessionLocal() as db:
         other = (await db.execute(select(Site).where(Site.tenant_id == uuid.UUID(b.tenant_id)))).scalars().first()
         assert not (other.seo or {}).get("meta_description")
+
+
+# ---------------------------------------------------------------------------
+#  Softune Pay (paired phones and their payments)
+# ---------------------------------------------------------------------------
+
+
+async def test_other_tenant_cannot_make_pay_code_or_see_pay_data(two_accounts, template_id):
+    a, b = two_accounts
+    site = await _make_site(a, template_id)
+    assert (await b.post(f"/sites/{site['id']}/pay/pairing-code")).status_code == 404
+    assert (await b.get(f"/sites/{site['id']}/pay/devices")).status_code == 404
+    assert (await b.get(f"/sites/{site['id']}/pay/payments")).status_code == 404
+
+
+async def test_other_tenant_cannot_remove_pay_device(two_accounts, template_id):
+    a, b = two_accounts
+    site_a = await _make_site(a, template_id)
+    site_b = await _make_site(b, template_id)
+    code = (await a.post(f"/sites/{site_a['id']}/pay/pairing-code")).json()["code"]
+    device_id = (await a.client.post("/pay/pair", json={"code": code})).json()["device_id"]
+    # B uses its own site in the URL and A's real device id: still 404.
+    assert (await b.delete(f"/sites/{site_b['id']}/pay/devices/{device_id}")).status_code == 404
+    assert len((await a.get(f"/sites/{site_a['id']}/pay/devices")).json()) == 1
+
+
+async def test_pay_device_only_sees_its_own_store(two_accounts, template_id):
+    a, b = two_accounts
+    site_a = await _make_site(a, template_id)
+    site_b = await _make_site(b, template_id)
+    code = (await b.post(f"/sites/{site_b['id']}/pay/pairing-code")).json()["code"]
+    token_b = (await b.client.post("/pay/pair", json={"code": code})).json()["token"]
+    me = (await b.client.get("/pay/me", headers={"Authorization": f"Bearer {token_b}"})).json()
+    assert me["store"]["domain"].startswith(site_b["subdomain"])
+    assert not me["store"]["domain"].startswith(site_a["subdomain"])

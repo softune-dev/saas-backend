@@ -27,6 +27,7 @@ from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
+from app import pay_matching
 from app import ai_images, billing_actions, bkash, claims, cache, chat_credits, courier_crypto, crud, events, fraud, invoices as invoices_module, mailer, nagad, notifications, queue, recaptcha, sslcommerz, steadfast
 from app.ratelimit import _client_ip, rate_limit
 from app.config import settings
@@ -1141,6 +1142,11 @@ async def create_public_order(
         ip_address=order_ip,
     )
     order = await crud.save(db, order)
+
+    # Softune Pay: shoppers often pay first and place the order second, so the
+    # wallet SMS may already be here. Best-effort; never fails the order.
+    if payload.payment_method == "manual":
+        await pay_matching.match_new_order(db, order)
 
     # This shopper finished checkout — if capture_abandoned_checkout ever
     # saw this phone on this site, mark it converted so the dashboard's

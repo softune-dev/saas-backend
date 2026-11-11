@@ -1378,3 +1378,51 @@ class TrustedDevice(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     last_used_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class PayDevice(Base, TimestampMixin):
+    """A merchant phone paired with Softune Pay (migrations/082). It posts the
+    payment SMS it receives; see app/pay_matching.py and app/api/pay.py.
+    token_hash is SHA-256 of the phone's secret token, never the token."""
+
+    __tablename__ = "pay_devices"
+
+    id: Mapped[uuid.UUID] = _pk()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"))
+    site_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("sites.id", ondelete="CASCADE"))
+    name: Mapped[str] = mapped_column(Text, default="Android phone")
+    token_hash: Mapped[str] = mapped_column(Text, unique=True)
+    app_version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sim_carrier: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sim_number: Mapped[str | None] = mapped_column(Text, nullable=True)
+    providers: Mapped[list] = mapped_column(JSONB, default=lambda: ["bkash", "nagad", "rocket"])
+    watching: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class PaySms(Base):
+    """One payment SMS a paired phone sent in (migrations/082), matched or not.
+    Unique per (site, provider, trx_id): a transaction can pay one order once."""
+
+    __tablename__ = "pay_sms"
+    __table_args__ = (UniqueConstraint("site_id", "provider", "trx_id", name="uq_pay_sms_site_trx"),)
+
+    id: Mapped[uuid.UUID] = _pk()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"))
+    site_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("sites.id", ondelete="CASCADE"))
+    device_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("pay_devices.id", ondelete="SET NULL"), nullable=True
+    )
+    provider: Mapped[str] = mapped_column(Text)
+    trx_id: Mapped[str] = mapped_column(CITEXT)
+    amount_cents: Mapped[int] = mapped_column(Integer)
+    sender_number: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_text: Mapped[str] = mapped_column(Text)
+    sms_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    status: Mapped[str] = mapped_column(Text, default="unmatched")
+    order_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("orders.id", ondelete="SET NULL"), nullable=True
+    )
+    matched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = _created()
