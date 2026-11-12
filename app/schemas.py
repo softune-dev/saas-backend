@@ -1479,10 +1479,27 @@ class TrialThemeIn(BaseModel):
     body_font: str | None = Field(default=None, max_length=60)
 
 
+class TrialAttributionIn(BaseModel):
+    """Where a signup came from: the ad click's utm_* and fbclid, kept by the
+    landing site (landing/lib/meta.ts) from the first page they landed on.
+    Every field optional and length-capped; it's marketing data, not trusted
+    for anything else."""
+
+    utm_source: str | None = Field(default=None, max_length=200)
+    utm_medium: str | None = Field(default=None, max_length=200)
+    utm_campaign: str | None = Field(default=None, max_length=200)
+    utm_content: str | None = Field(default=None, max_length=200)
+    utm_term: str | None = Field(default=None, max_length=200)
+    fbclid: str | None = Field(default=None, max_length=500)
+    landing_page: str | None = Field(default=None, max_length=200)
+    referrer: str | None = Field(default=None, max_length=300)
+
+
 class TrialCompleteIn(BaseModel):
     signup_token: str
     template_key: str = Field(min_length=1, max_length=60)
     theme: TrialThemeIn = TrialThemeIn()
+    attribution: TrialAttributionIn | None = None
 
 
 class SuperAdminDemoAccessOut(ORMModel):

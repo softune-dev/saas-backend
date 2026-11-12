@@ -29,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import cache, crud, mailer, queue, recaptcha
 from app.config import settings
 from app.db import get_db
-from app.models import Site, SitePage, User
+from app.models import Site, SitePage, Tenant, User
 from app.ratelimit import _client_ip, rate_limit
 from app.schemas import (
     TrialCompleteIn,
@@ -299,6 +299,15 @@ async def complete(payload: TrialCompleteIn, db: DB) -> dict:
     site.status = "published"
     site.published_at = datetime.now(UTC)
     site.seo = {**(site.seo or {}), "noindex": False}
+
+    # Which ad brought them (utm_*, fbclid), so a signup can be tied back to
+    # the campaign later. Kept in Tenant.settings, no column of its own.
+    if payload.attribution:
+        attribution = payload.attribution.model_dump(exclude_none=True)
+        if attribution:
+            tenant = await db.get(Tenant, user.tenant_id)
+            if tenant is not None:
+                tenant.settings = {**(tenant.settings or {}), "signup_attribution": attribution}
     await db.commit()
 
     await cache.invalidate_site(site.subdomain, site.custom_domain)
