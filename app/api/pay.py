@@ -334,6 +334,14 @@ async def _device_site(db: AsyncSession, device: PayDevice) -> Site:
     return await crud.get_scoped(db, Site, device.tenant_id, device.site_id)
 
 
+def _theme_logo(site: Site) -> str | None:
+    theme = site.theme or {}
+    url = theme.get("logoImage")
+    if theme.get("logoType") == "image" and isinstance(url, str) and url.startswith("http"):
+        return url
+    return None
+
+
 async def _store_out(db: AsyncSession, site: Site) -> dict:
     owner = (await db.execute(
         select(User).where(User.tenant_id == site.tenant_id).order_by(User.role != "owner", User.created_at).limit(1)
@@ -343,7 +351,9 @@ async def _store_out(db: AsyncSession, site: Site) -> dict:
     return {
         "name": site.name,
         "domain": site.custom_domain or f"{site.subdomain}.{settings.site_base_domain}",
-        "logo_url": business.get("logo_url"),
+        # The logo a merchant sets in the theme editor (what their storefront
+        # shows) wins; business.logo_url is the older, rarely-filled field.
+        "logo_url": _theme_logo(site) or business.get("logo_url"),
         "owner": {
             "name": name,
             "initials": "".join(p[0] for p in name.split()[:2]).upper() or "S",
