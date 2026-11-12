@@ -749,9 +749,10 @@ async def create_public_order(
     same rule as commerce.py's create_order, extended to shipping_cents too,
     since here the caller is an anonymous browser, not an authenticated
     merchant. The delivery fee is recomputed here exactly the way
-    CartContext.tsx computes it for display (sum of each item's matching
-    delivery_charges entry for the chosen location, 0 for an item that
-    doesn't support it) — never trusted from the client.
+    CartContext.tsx computes it for display (the highest matching
+    delivery_charges entry among the items for the chosen location, charged
+    once per order; 0 for an item that doesn't support it) — never trusted
+    from the client.
 
     Rate-limited to 8 orders per IP per 5 minutes — see app/ratelimit.py.
     Loose enough for a real shopper retrying a failed payment, tight enough
@@ -1005,7 +1006,11 @@ async def create_public_order(
                 None,
             )
             if match:
-                shipping += (match.get("charge_cents") or 0) * line.quantity
+                # One delivery charge per order, not per item: the parcel goes
+                # out once. Items can carry different charges for the same
+                # location (a heavy one costs more to ship), so the highest
+                # wins. Adding them up charged a 3-item order 3x delivery.
+                shipping = max(shipping, match.get("charge_cents") or 0)
 
         items.append(
             OrderItem(

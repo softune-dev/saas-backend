@@ -428,5 +428,24 @@ async def test_free_delivery_over_amount_zeroes_the_fee_at_checkout(account, sit
     assert res.status_code == 201, res.text
     assert res.json()["shipping_cents"] == 0
 
+
+async def test_delivery_is_charged_once_per_order_not_per_item(account, site, monkeypatch):
+    """Three units ship as one parcel: one delivery charge, not three."""
+    _no_recaptcha(monkeypatch)
+    product = await _product(account, site)
+    await account.patch(
+        f"/sites/{site['id']}/products/{product['id']}",
+        json={"price_cents": 10_000, "stock": 50, "free_delivery": False,
+              "delivery_charges": [{"name": "Dhaka", "charge_cents": 10_000}]},
+    )
+    host = await _publish(account, site)
+
+    payload = _order_payload("01799999993", product["id"], qty=3)
+    payload["delivery_location"] = "Dhaka"
+    res = await _post_order(account, host, payload)
+    assert res.status_code == 201, res.text
+    assert res.json()["shipping_cents"] == 10_000
+    assert res.json()["total_cents"] == 30_000 + 10_000
+
     bad = await account.patch(f"/sites/{site['id']}", json={"shipping": {"free_over_cents": -5}})
     assert bad.status_code == 422
