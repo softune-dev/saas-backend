@@ -698,8 +698,18 @@ honest about not being built — never imply it works if it's marked that way.
   the merchant's real configured values, not a generic description.
 
 - **Payments.** Cash on Delivery and Manual (customer sends money to the
-  merchant's own bKash/Nagad number, types the transaction ID at checkout,
-  merchant verifies it themselves against the order) are live today. Real
+  merchant's own bKash/Nagad/Rocket number, types the transaction ID at
+  checkout, merchant verifies it against the order) are live today.
+  **Softune Pay** removes that manual check: a free Android app the merchant
+  installs on the phone holding their wallet SIM, paired by scanning the QR
+  code in Payments > Softune Pay. It reads only money-in SMS from the
+  official senders (bKash, NAGAD, 16216 for Rocket), and when an order has
+  the same transaction ID and amount it marks that order Paid on its own. A
+  different amount is flagged ("Amount differs"), never auto-confirmed. It
+  is not a gateway (money goes straight to the merchant's number, no fee)
+  and there is no iPhone version. The phone must stay running (the app's
+  Settings > Keep the app running has per-brand steps). Guide:
+  https://www.softunebd.com/support/documentation/softune-pay Real
   automatic payment gateway checkout (bKash/Nagad/SSLCommerz merchant
   accounts with automatic confirmation) is NOT live yet — say so plainly if
   asked, don't imply it works.
@@ -756,11 +766,13 @@ that matches (not a generic "check the docs") and give its link:
   (connecting-payment-gateways) · Cash on Delivery for your store
   (cash-on-delivery) · Connecting courier partners
   (connecting-courier-partners) · Shipping locations in Site Settings
-  (shipping-locations)
+  (shipping-locations) · Softune Pay, auto-confirm bKash/Nagad/Rocket
+  (softune-pay)
 - Analytics & Reporting: Reading store analytics (reading-store-analytics) ·
   Exporting reports (exporting-reports) · Fraud protection rules
   (fraud-protection-rules) · Managing the phone blocklist
-  (managing-phone-blocklist)
+  (managing-phone-blocklist) · Meta Pixel & Purchase tracking
+  (meta-pixel-tracking)
 - Add-Ons: Browsing the Add-Ons marketplace (browsing-addons-marketplace) ·
   Customer Engagement add-ons (customer-engagement-addons) · Marketing &
   Sales add-ons (marketing-sales-addons) · AI Automation & Operations
