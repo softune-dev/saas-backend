@@ -10,12 +10,13 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import crud, mailer, queue, recaptcha
+from app import crud, google_auth, mailer, queue, recaptcha
 from app.config import settings
 from app.db import get_db
 from app.models import Tenant, TrustedDevice, User
 from app.ratelimit import _client_ip, forgot_password_rate_limit, login_rate_limit, rate_limit
 from app.schemas import (
+    GoogleCredentialIn,
     ChangePasswordConfirmIn,
     ChangePasswordRequestOtpIn,
     ForgotPasswordConfirmIn,
@@ -121,6 +122,52 @@ async def _queue_otp_email(to_email: str, otp: str, full_name: str | None) -> No
         queue.JOB_SEND_EMAIL,
         {"to": to_email, "subject": subject, "html_body": html_body, "text_body": text_body},
     )
+
+
+@router.get("/providers")
+async def providers() -> dict:
+    """Which sign-in methods are switched on, so the login and signup
+    screens only show a Google button that actually works."""
+    return {"google_client_id": settings.google_client_id.strip() or None}
+
+
+@router.post(
+    "/google",
+    response_model=LoginResultOut,
+    dependencies=[Depends(login_rate_limit)],
+)
+async def login_with_google(payload: GoogleCredentialIn, db: DB) -> LoginResultOut:
+    """Sign in with Google for an EXISTING account, matched by email.
+
+    Google has already verified the address (google_auth.verify checks
+    email_verified), which is what our email OTP proves for a password
+    login, so this skips that step and returns real tokens straight away.
+    No account for the email: 404 with code "no_account", and the screen
+    offers the free trial instead of creating anything here."""
+    identity = await google_auth.verify(payload.credential)
+    user = (
+        await db.execute(select(User).where(User.email == identity.email))
+    ).scalar_one_or_none()
+    if user is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            {
+                "code": "no_account",
+                "message": "No SoftuneBD account uses this Google email yet. Start a free trial to create one.",
+            },
+        )
+    if not user.is_active:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "This account is disabled.")
+    await _check_tenant_access(db, user.tenant_id)
+
+    if not user.avatar_url and identity.picture:
+        user.avatar_url = identity.picture
+    if not user.full_name and identity.full_name:
+        user.full_name = identity.full_name
+    user.last_login_at = func.now()
+    await db.commit()
+    await db.refresh(user)
+    return LoginResultOut(otp_required=False, **_tokens(user).model_dump())
 
 
 @router.post(

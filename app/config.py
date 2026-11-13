@@ -151,6 +151,11 @@ class Settings(BaseSettings):
     # Server-side only — the SITE key (public, safe in the browser) lives in
     # NEXT_PUBLIC_RECAPTCHA_SITE_KEY (dashboard and both storefront templates).
     recaptcha_secret_key: str = ""
+    # Sign in with Google (app/google_auth.py). The OAuth 2.0 *Web* client ID
+    # from Google Cloud Console; public, the browser button uses it too
+    # (served to the frontends by GET /auth/providers). Empty = Google
+    # sign-in is off and the buttons stay hidden.
+    google_client_id: str = ""
     # A SEPARATE key, registered as "v2 Checkbox" in the reCAPTCHA admin
     # console (v3 and v2 are different site/secret key pairs, even for the
     # same domain) — used only as a fallback when v3 scores a request too

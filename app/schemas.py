@@ -63,6 +63,13 @@ class RegisterIn(BaseModel):
     workspace_name: str = Field(min_length=2, max_length=80)
 
 
+class GoogleCredentialIn(BaseModel):
+    """The ID token (a JWT) Google's Sign-in button gives the browser.
+    Verified server-side in app/google_auth.py, never trusted as-is."""
+
+    credential: str = Field(min_length=20, max_length=4096)
+
+
 class LoginIn(BaseModel):
     email: EmailStr
     password: str = Field(max_length=72)

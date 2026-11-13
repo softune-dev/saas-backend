@@ -26,12 +26,13 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import cache, crud, mailer, queue, recaptcha
+from app import cache, crud, google_auth, mailer, queue, recaptcha
 from app.config import settings
 from app.db import get_db
 from app.models import Site, SitePage, Tenant, User
 from app.ratelimit import _client_ip, rate_limit
 from app.schemas import (
+    GoogleCredentialIn,
     TrialCompleteIn,
     TrialDetailsIn,
     TrialResendOtpIn,
@@ -119,6 +120,42 @@ async def start(payload: TrialStartIn, request: Request, db: DB) -> dict:
     )
     await _queue_otp_email(payload.email, otp, payload.full_name)
     return {"signup_token": signup_token, "email_verified": False}
+
+
+@router.post(
+    "/google",
+    response_model=TrialSignupTokenOut,
+    dependencies=[Depends(rate_limit("trial-google", limit=10, window_seconds=600))],
+)
+async def start_with_google(payload: GoogleCredentialIn, db: DB) -> dict:
+    """Same as /start, but the account step is "Continue with Google":
+    Google has verified the email, so the signup starts already verified and
+    skips the OTP; the wizard goes straight on to the shop details.
+
+    The account still gets a password hash, a random one nobody knows, so
+    the users table stays as it is. They sign in with Google, or set a real
+    password any time with "Forgot password"."""
+    identity = await google_auth.verify(payload.credential)
+
+    existing = await db.execute(select(User.id).where(User.email == identity.email))
+    if existing.scalar_one_or_none():
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "An account with that email already exists. Try logging in instead.",
+        )
+
+    signup_token = secrets.token_urlsafe(24)
+    await _save_pending(
+        signup_token,
+        {
+            "email": identity.email,
+            "password_hash": hash_password(secrets.token_urlsafe(32)),
+            "full_name": identity.full_name,
+            "email_verified": True,
+            "auth_provider": "google",
+        },
+    )
+    return {"signup_token": signup_token, "email_verified": True}
 
 
 @router.get("/status/{signup_token}", response_model=TrialStatusOut)
