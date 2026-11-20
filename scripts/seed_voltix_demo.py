@@ -13,7 +13,9 @@ are our own store brand, not real brands.
 
 Run once, on the server (it writes to the production database):
 
-    docker compose -f docker-compose.prod.yml exec api python scripts/seed_voltix_demo.py
+    docker compose -f docker-compose.prod.yml exec -T api python - < scripts/seed_voltix_demo.py
+
+(The image only contains app/, so the script is piped in from the host.)
 
 Safe to re-run: if voltix already exists it stops without changing anything.
 The owner login gets a random password nobody knows; use "Forgot password"
