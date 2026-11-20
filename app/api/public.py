@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
 from app import pay_matching
+from app import products as products_module
 from app import ai_images, billing_actions, bkash, claims, cache, chat_credits, courier_crypto, crud, events, fraud, invoices as invoices_module, mailer, nagad, notifications, queue, recaptcha, sslcommerz, steadfast
 from app.ratelimit import _client_ip, rate_limit
 from app.config import settings
@@ -1019,6 +1020,10 @@ async def create_public_order(
                 sku_snapshot=combo.get("sku") or product.sku if combo is not None else product.sku,
                 unit_price_cents=charged_unit_price,
                 cost_price_cents_snapshot=product.cost_price_cents,
+                # The variant's own photo when it has one, else the product's.
+                image_url_snapshot=(
+                    (combo or {}).get("image") or products_module.first_image_url(product)
+                ),
                 quantity=line.quantity,
                 total_cents=line_total,
                 # Immutable snapshot — the receipt keeps showing this even

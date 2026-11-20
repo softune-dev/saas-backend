@@ -910,6 +910,7 @@ class OrderItemOut(ORMModel):
     unit_price_cents: int
     quantity: int
     total_cents: int
+    image_url_snapshot: str | None = None
 
 
 class PlatformContactIn(BaseModel):

@@ -320,3 +320,14 @@ def validate_attributes(raw: dict | None) -> dict:
         options = clean.get("variants") or []
         clean["combinations"] = validate_combinations(clean["combinations"], options)
     return clean
+
+
+def first_image_url(product: Any) -> str | None:
+    """The product's primary (first) photo URL, or None if it has none.
+    Saved on order lines as image_url_snapshot (migrations/083)."""
+    for img in getattr(product, "images", None) or []:
+        if isinstance(img, dict) and img.get("url"):
+            return str(img["url"])
+        if isinstance(img, str) and img:
+            return img
+    return None

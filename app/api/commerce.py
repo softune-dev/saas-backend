@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import cache, courier_booking, courier_crypto, crud, media, products, steadfast
 from app.db import get_db
+from app.products import first_image_url
 from app.models import Category, Inquiry, Order, OrderItem, Product, Site, Tenant
 from app.schemas import (
     CategoryCreate,
@@ -437,6 +438,7 @@ async def create_order(
                 sku_snapshot=product.sku,
                 unit_price_cents=product.price_cents,
                 cost_price_cents_snapshot=product.cost_price_cents,
+                image_url_snapshot=first_image_url(product),
                 quantity=line.quantity,
                 total_cents=line_total,
             )

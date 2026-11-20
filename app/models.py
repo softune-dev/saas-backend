@@ -624,6 +624,8 @@ class OrderItem(Base):
     # immutable (CLAUDE.md rule 8), same reasoning as the snapshots above.
     # Null when the product had no cost set at sale time.
     cost_price_cents_snapshot: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Product photo at sale time (migrations/083), for the Orders table.
+    image_url_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
     quantity: Mapped[int] = mapped_column(Integer)
     total_cents: Mapped[int] = mapped_column(Integer)
     # Which Event's discount (if any) applied to this line at sale time —
