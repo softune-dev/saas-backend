@@ -24,6 +24,7 @@ from app.api import (
     pages,
     payments,
     demo_access,
+    manage,
     pay,
     public,
     push,
@@ -61,6 +62,7 @@ api_router.include_router(media.router, dependencies=_demo_guard)
 api_router.include_router(pages.router, dependencies=_demo_guard)
 api_router.include_router(commerce.router, dependencies=_demo_guard)
 api_router.include_router(customers.router, dependencies=_demo_guard)
+api_router.include_router(manage.router, dependencies=_demo_guard)
 api_router.include_router(events.router, dependencies=_demo_guard)
 api_router.include_router(courier.router, dependencies=_demo_guard)
 api_router.include_router(payments.router, dependencies=_demo_guard)

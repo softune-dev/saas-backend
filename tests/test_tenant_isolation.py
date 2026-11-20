@@ -417,3 +417,75 @@ async def test_pay_device_only_sees_its_own_store(two_accounts, template_id):
     me = (await b.client.get("/pay/me", headers={"Authorization": f"Bearer {token_b}"})).json()
     assert me["store"]["domain"].startswith(site_b["subdomain"])
     assert not me["store"]["domain"].startswith(site_a["subdomain"])
+
+
+async def _site_with_order(acct: Account, template_id: str, stock: int = 10, qty: int = 2):
+    site = await _make_site(acct, template_id)
+    product = (
+        await acct.post(
+            f"/sites/{site['id']}/products",
+            json={"name": "Thing", "price_cents": 500, "stock": stock},
+        )
+    ).json()
+    order = (
+        await acct.post(
+            f"/sites/{site['id']}/orders",
+            json={
+                "customer": {"email": "buyer@example.test"},
+                "items": [{"product_id": product["id"], "quantity": qty}],
+            },
+        )
+    ).json()
+    return site, product, order
+
+
+async def test_other_tenant_cannot_delete_orders(two_accounts, template_id):
+    a, b = two_accounts
+    site, _, order = await _site_with_order(a, template_id)
+
+    assert (await b.delete(f"/sites/{site['id']}/orders/{order['id']}")).status_code == 404
+    res = await b.post(f"/sites/{site['id']}/orders/bulk-delete", json={"ids": [order["id"]]})
+    assert res.status_code == 404
+    # B's own site can't reach A's order by id either: nothing matched.
+    site_b = await _make_site(b, template_id)
+    res = await b.post(f"/sites/{site_b['id']}/orders/bulk-delete", json={"ids": [order["id"]]})
+    assert res.status_code == 200 and res.json()["deleted"] == 0
+    assert (await a.get(f"/sites/{site['id']}/orders/{order['id']}")).status_code == 200
+
+
+async def test_deleting_an_unshipped_order_puts_stock_back(account, template_id):
+    site, product, order = await _site_with_order(account, template_id, stock=10, qty=3)
+    after_order = (await account.get(f"/sites/{site['id']}/products/{product['id']}")).json()
+    assert after_order["stock"] == 7
+
+    assert (await account.delete(f"/sites/{site['id']}/orders/{order['id']}")).status_code == 204
+    assert (await account.get(f"/sites/{site['id']}/orders/{order['id']}")).status_code == 404
+    restored = (await account.get(f"/sites/{site['id']}/products/{product['id']}")).json()
+    assert restored["stock"] == 10
+
+
+async def test_deleting_a_fulfilled_order_keeps_stock_out(account, template_id):
+    site, product, order = await _site_with_order(account, template_id, stock=10, qty=3)
+    await account.patch(f"/sites/{site['id']}/orders/{order['id']}", json={"status": "fulfilled"})
+
+    res = await account.post(f"/sites/{site['id']}/orders/bulk-delete", json={"ids": [order["id"]]})
+    assert res.status_code == 200 and res.json()["deleted"] == 1
+    kept = (await account.get(f"/sites/{site['id']}/products/{product['id']}")).json()
+    assert kept["stock"] == 7
+
+
+async def test_other_tenant_cannot_delete_customers_or_notifications(two_accounts, template_id):
+    a, b = two_accounts
+    site, _, _ = await _site_with_order(a, template_id)
+    customers = (await a.get(f"/sites/{site['id']}/customers")).json()["items"]
+
+    for c in customers:
+        assert (await b.delete(f"/sites/{site['id']}/customers/{c['id']}")).status_code == 404
+    assert (
+        await b.post(f"/sites/{site['id']}/customers/bulk-delete", json={"ids": [c["id"] for c in customers] or [str(uuid.uuid4())]})
+    ).status_code == 404
+    assert (await b.delete(f"/sites/{site['id']}/notifications")).status_code == 404
+    assert (await b.delete(f"/sites/{site['id']}/abandoned-checkouts")).status_code == 404
+    assert (await b.delete(f"/sites/{site['id']}/inquiries/{uuid.uuid4()}")).status_code == 404
+    assert (await b.delete(f"/sites/{site['id']}/pay/payments/{uuid.uuid4()}")).status_code == 404
+    assert len((await a.get(f"/sites/{site['id']}/customers")).json()["items"]) == len(customers)
