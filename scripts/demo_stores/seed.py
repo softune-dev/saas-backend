@@ -7,7 +7,7 @@ Runs on the server, inside a one-off api container that can see scripts/
         python scripts/demo_stores/seed.py voltix noor raaj pawpal ghorkona tinytots
 
 Each store belongs to its own account, demo-<slug>@softunebd.com, on the
-Business plan. A store that already exists is rebuilt only if it belongs to
+demo plan (read-only dashboard, no billing). A store that already exists is rebuilt only if it belongs to
 that demo account: its categories, products and events are replaced and its
 settings rewritten. A subdomain owned by anyone else is never touched.
 """
@@ -28,7 +28,7 @@ from app import cache, queue  # noqa: E402
 from app.crud import create_tenant_owner_and_site  # noqa: E402
 from app.db import SessionLocal  # noqa: E402
 from app.models import (  # noqa: E402
-    Category, Event, PaymentConnection, Product, Site, SitePage, User,
+    Category, Event, PaymentConnection, Product, Site, SitePage, Tenant, User,
 )
 from catalog import STORES  # noqa: E402
 from catalog_bn import LOOK  # noqa: E402
@@ -191,6 +191,9 @@ async def seed_one(db, s: dict) -> None:
         if owner is None:
             print(f"{slug}: {sub} belongs to someone else, skipped")
             return
+        # Showcase stores sit on the demo plan: read-only dashboard, never billed.
+        tenant = await db.get(Tenant, site.tenant_id)
+        tenant.plan = "demo"
         # Rebuild: clear the old catalogue, keep the account and site.
         await db.execute(delete(Event).where(Event.site_id == site.id))
         await db.execute(delete(Product).where(Product.site_id == site.id))
@@ -199,7 +202,7 @@ async def seed_one(db, s: dict) -> None:
         print(f"{slug}: rebuilding {sub}")
     else:
         _user, created = await create_tenant_owner_and_site(
-            db, email=email, password=secrets.token_urlsafe(24), workspace_name=s["name"], plan="business",
+            db, email=email, password=secrets.token_urlsafe(24), workspace_name=s["name"], plan="demo",
             template_key=s["theme"], site_name=s["name"], subdomain=sub, full_name=f"{s['name']} Demo",
         )
         site = await db.get(Site, created.id)
