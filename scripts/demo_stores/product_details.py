@@ -468,3 +468,8 @@ DETAILS: dict[str, dict[str, dict]] = {
         },
     },
 }
+
+# Second batch: swarna, oudh, freshkart, stride.
+from product_details_b2 import DETAILS_B2  # noqa: E402
+
+DETAILS.update(DETAILS_B2)
