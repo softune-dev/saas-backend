@@ -77,6 +77,34 @@ def master_prompt(s: dict) -> str:
     return chr(10).join(lines)
 
 
+def run_all_prompt(s: dict) -> str:
+    """For a ChatGPT that can save files into the project: makes every image
+    in one run, saving and resizing each one itself, and reports at the end."""
+    images = image_list(s)
+    q = chr(34)
+    lines = [
+        f"You are the art director and image maker for {q}{s['name']}{q}, an online store in Bangladesh selling {s['niche'].lower()}.",
+        f"Tagline: {q}{s['tagline']}{q}. Brand colours: primary {s['colors']['primary']}, accent {s['colors']['accent']}, background {s['colors']['surface']}.",
+        "",
+        f"VISUAL STYLE for every image: {s['style']}",
+        "",
+        "RULES",
+        "- Photorealistic, high-end and consistent: the same lighting, colour grade and mood across all images.",
+        "- No watermarks and no real brand logos. Add text only where an image asks for it, spelled exactly as written.",
+        "",
+        f"TASK: generate ALL {len(images)} images below in one run. Do not stop to ask me anything and do not wait for me to say next.",
+        f"For each image: generate it, save it as a PNG into demo-assets/{s['slug']}/ with exactly the filename shown, then resize it to exactly the size shown",
+        "(keep the logo transparent). If one fails, try once more, then continue with the next and list it at the end.",
+        "Keep your messages short while working. When all are done, reply with a table of filename, size and OK or FAILED.",
+        "",
+        "IMAGES",
+    ]
+    for n, (fname, kind, prompt) in enumerate(images, 1):
+        w, h, _ = SIZES[kind]
+        lines.append(f"{n}. {fname} ({w}x{h}): {prompt}")
+    return chr(10).join(lines)
+
+
 def main() -> None:
     os.makedirs(OUT, exist_ok=True)
     total = 0
@@ -91,8 +119,8 @@ def main() -> None:
              "venv\Scripts\python.exe scripts\demo_stores\check_assets.py",
              "```",
              "",
-             "| Store | Theme | Niche | Images | One-paste prompt | Details |",
-             "|---|---|---|---|---|---|"]
+             "| Store | Theme | Niche | Images | One-paste prompt (step by step) | Run-all prompt (saves files itself) | Details |",
+             "|---|---|---|---|---|---|---|"]
     for s in STORES:
         doc = store_doc(s)
         n = len(image_list(s))
@@ -101,7 +129,9 @@ def main() -> None:
             f.write(doc)
         with open(os.path.join(OUT, f"{s['slug']}-paste-this.txt"), "w", encoding="utf-8") as f:
             f.write(master_prompt(s) + chr(10))
-        index.append(f"| {s['name']} | {THEME_NAME[s['theme']]} | {s['niche']} | {n} | [{s['slug']}-paste-this.txt]({s['slug']}-paste-this.txt) | [{s['slug']}.md]({s['slug']}.md) |")
+        with open(os.path.join(OUT, f"{s['slug']}-run-all.txt"), "w", encoding="utf-8") as f:
+            f.write(run_all_prompt(s) + chr(10))
+        index.append(f"| {s['name']} | {THEME_NAME[s['theme']]} | {s['niche']} | {n} | [{s['slug']}-paste-this.txt]({s['slug']}-paste-this.txt) | [{s['slug']}-run-all.txt]({s['slug']}-run-all.txt) | [{s['slug']}.md]({s['slug']}.md) |")
     index += ["", f"Total: {total} images."]
     with open(os.path.join(OUT, "README.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(index) + "\n")

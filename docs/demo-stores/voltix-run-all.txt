@@ -1,0 +1,42 @@
+You are the art director and image maker for "Voltix", an online store in Bangladesh selling electronics and gadgets.
+Tagline: "Gadgets you'll love". Brand colours: primary #2563EB, accent #0F172A, background #F5F7FB.
+
+VISUAL STYLE for every image: Clean modern tech product photography. Cool white, electric blue and deep navy palette, studio lighting with soft reflections, floating products, subtle gradients, crisp and premium. Product designs are our own unbranded Voltix models (no Apple, Samsung, JBL or other real brand logos).
+
+RULES
+- Photorealistic, high-end and consistent: the same lighting, colour grade and mood across all images.
+- No watermarks and no real brand logos. Add text only where an image asks for it, spelled exactly as written.
+
+TASK: generate ALL 27 images below in one run. Do not stop to ask me anything and do not wait for me to say next.
+For each image: generate it, save it as a PNG into demo-assets/voltix/ with exactly the filename shown, then resize it to exactly the size shown
+(keep the logo transparent). If one fails, try once more, then continue with the next and list it at the end.
+Keep your messages short while working. When all are done, reply with a table of filename, size and OK or FAILED.
+
+IMAGES
+1. logo.png (1024x1024): Logo for "Voltix", a brand selling electronics and gadgets: a simple, memorable mark next to the name "Voltix" in a refined font, in the brand colours. Transparent background, centred, no mockup.
+2. hero-1.png (1536x1024): Wireless headphones, smartwatch and earbuds floating over an electric blue gradient with soft glow. Bold headline: "Big Tech Sale", line under: "Up to 15% off top gadgets", small "Voltix" wordmark. Keep all text and key subjects inside the middle 80% of the height (it will be cropped to 16:9).
+3. hero-1-mobile.png (1024x1024): Square mobile version of the previous banner: same scene, subject centred, the same text stacked and large enough to read on a phone.
+4. hero-2.png (1536x1024): Sleek laptop and phone on a navy desk with blue light accents. Headline: "Work. Play. Create.", line: "Laptops from Tk 52,990". Keep all text and key subjects inside the middle 80% of the height (it will be cropped to 16:9).
+5. hero-2-mobile.png (1024x1024): Square mobile version of the previous banner: same scene, subject centred, the same text stacked and large enough to read on a phone.
+6. category-headphones.png (1024x1024): Category image for "Headphones" (wireless and noise cancelling). One clear hero subject, plenty of space, no text.
+7. category-smartwatches.png (1024x1024): Category image for "Smartwatches" (fitness and calls on your wrist). One clear hero subject, plenty of space, no text.
+8. category-phones.png (1024x1024): Category image for "Smartphones" (phones for every budget). One clear hero subject, plenty of space, no text.
+9. category-laptops.png (1024x1024): Category image for "Laptops" (work, study and gaming). One clear hero subject, plenty of space, no text.
+10. category-speakers.png (1024x1024): Category image for "Speakers" (portable bluetooth speakers). One clear hero subject, plenty of space, no text.
+11. category-power.png (1024x1024): Category image for "Power & Charging" (power banks and chargers). One clear hero subject, plenty of space, no text.
+12. product-01.png (1024x1024): Product photo: Voltix Aura ANC Headphones. Active noise cancelling, 40-hour battery. Studio shot on a clean background in the brand palette, the product fills most of the frame, no text, no watermark.
+13. product-02.png (1024x1024): Product photo: Voltix Pods Pro Earbuds. ANC earbuds with a wireless charging case. Studio shot on a clean background in the brand palette, the product fills most of the frame, no text, no watermark.
+14. product-03.png (1024x1024): Product photo: Voltix Watch S2 AMOLED. AMOLED display, Bluetooth calls, SpO2. Studio shot on a clean background in the brand palette, the product fills most of the frame, no text, no watermark.
+15. product-04.png (1024x1024): Product photo: Voltix Watch Active. 100+ sport modes, 10-day battery. Studio shot on a clean background in the brand palette, the product fills most of the frame, no text, no watermark.
+16. product-05.png (1024x1024): Product photo: Voltix Nova 12 (8/256GB). 120Hz display, 50MP camera, 5000mAh. Studio shot on a clean background in the brand palette, the product fills most of the frame, no text, no watermark.
+17. product-06.png (1024x1024): Product photo: Voltix Nova Lite (6/128GB). Big battery and a smooth 90Hz screen. Studio shot on a clean background in the brand palette, the product fills most of the frame, no text, no watermark.
+18. product-07.png (1024x1024): Product photo: Voltix Book Air 14. Thin and light, 16GB RAM, 512GB SSD. Studio shot on a clean background in the brand palette, the product fills most of the frame, no text, no watermark.
+19. product-08.png (1024x1024): Product photo: Voltix Book Pro 16. Creator laptop with fast graphics. Studio shot on a clean background in the brand palette, the product fills most of the frame, no text, no watermark.
+20. product-09.png (1024x1024): Product photo: Voltix Boom Go Speaker. IP67 waterproof, punchy 20W sound. Studio shot on a clean background in the brand palette, the product fills most of the frame, no text, no watermark.
+21. product-10.png (1024x1024): Product photo: Voltix Party Max Speaker. 60W party speaker with lights. Studio shot on a clean background in the brand palette, the product fills most of the frame, no text, no watermark.
+22. product-11.png (1024x1024): Product photo: Voltix PowerCell 20000mAh. 22.5W fast charging, three outputs. Studio shot on a clean background in the brand palette, the product fills most of the frame, no text, no watermark.
+23. product-12.png (1024x1024): Product photo: Voltix 65W GaN Charger. Charges laptop and phone together. Studio shot on a clean background in the brand palette, the product fills most of the frame, no text, no watermark.
+24. event-1.png (1536x1024): Electric blue sale banner with floating headphones, watch and speaker, light streaks. Text: "11.11 Tech Sale, 15% Off". Bold readable text, everything important in the centre.
+25. event-2.png (1536x1024): Power banks and chargers on a navy background with glowing cables. Text: "Power Week, 10% Off". Bold readable text, everything important in the centre.
+26. why.png (1024x1536): Technician's hands testing a smartphone at a clean white workbench with tools, cool light. No text.
+27. about.png (1536x1024): A modern electronics showroom with lit shelves of gadgets and a friendly staff counter. No text.
