@@ -17,6 +17,8 @@ Image sizes are what ChatGPT generates natively (1024x1024, 1536x1024,
 3.2:1 itself, so prompts ask to keep key content in the middle band.
 """
 
+import re
+
 # ---- image kinds: (width, height, what the image is for) ----------------
 SIZES = {
     "logo": (1024, 1024, "logo mark + name on a transparent background"),
@@ -524,7 +526,10 @@ def image_list(store: dict) -> list[tuple[str, str, str]]:
     for i, (_cat, name, _p, _c, short) in enumerate(store["products"], 1):
         out.append((f"product-{i:02d}.png", kind, f"Product photo: {name}. {short} Studio shot on a clean background in the brand palette, the product fills most of the frame, no text, no watermark."))
     for i, (name, _d, prompt, _popup) in enumerate(store["events"], 1):
-        out.append((f"event-{i}.png", "event", prompt + ". Bold readable text, everything important in the centre."))
+        # No text in event images: the theme prints the event name and
+        # discount itself, so baked-in text would show twice.
+        scene = re.sub(r'\.?\s*Text:\s*"[^"]*"', "", prompt).strip().rstrip(".")
+        out.append((f"event-{i}.png", "event", scene + ". Image only: no text, no numbers, no logos anywhere. Keep the main subject in the centre."))
     out.append(("why.png", "why", store["why"] + " No text."))
     out.append(("about.png", "about", store["about"] + " No text."))
     return out
