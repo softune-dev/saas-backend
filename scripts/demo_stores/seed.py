@@ -100,7 +100,7 @@ CATEGORY_ICONS = {
 DEFAULT_CATEGORY_ICON = "solar:square-arrow-right-down-bold"
 
 
-def product_extras(slug: str, name: str, short: str, price: int, stock: int, image: str) -> tuple[dict, str]:
+def product_extras(slug: str, name: str, short: str, price: int, compare: int | None, stock: int, image: str) -> tuple[dict, str]:
     """Variant attributes and an HTML description for one product, from
     product_details.py. Colour values point at the product photo so the
     storefront's image swap has something to show."""
@@ -135,6 +135,7 @@ def product_extras(slug: str, name: str, short: str, price: int, stock: int, ima
         rows.append({
             "key": "|".join(f"{t}:{pairs[t]}" for t in sorted(pairs)),
             "optionValues": pairs, "priceCents": price * 100 + delta,
+            **({"compareAtCents": compare * 100 + delta} if compare else {}),
             "stock": each + (i * 7) % 9, "trackStock": True, "image": image, "isActive": True,
         })
     attrs = validate_attributes({"variants": options, "combinations": rows})
@@ -271,7 +272,7 @@ async def seed_one(db, s: dict) -> None:
     products: list[Product] = []
     for i, (cslug, name, price, compare, short) in enumerate(s["products"]):
         stock = 12 + (i * 7) % 40
-        attrs, desc = product_extras(slug, name, short, price, stock, u[f"product-{i + 1:02d}.png"])
+        attrs, desc = product_extras(slug, name, short, price, compare, stock, u[f"product-{i + 1:02d}.png"])
         if attrs.get("combinations"):
             # Product stock is the total across its combinations.
             stock = sum(c["stock"] for c in attrs["combinations"])
