@@ -69,6 +69,34 @@ def testimonials(s: dict) -> list[dict]:
             for i, ((n, city), q) in enumerate(zip(REVIEWERS, quotes))]
 
 
+# Category icons (Iconify Solar set), keyed by category slug; "store/slug"
+# wins where two stores share a slug but sell different things.
+CATEGORY_ICONS = {
+    "abayas": "solar:t-shirt-bold", "hijabs": "solar:user-hands-bold", "kaftans": "solar:hanger-bold",
+    "co-ords": "solar:hanger-2-bold", "prayer": "solar:moon-stars-bold", "accessories": "solar:bag-4-bold",
+    "necklaces": "solar:crown-minimalistic-bold", "earrings": "solar:star-shine-bold", "bangles": "solar:record-circle-bold",
+    "rings": "solar:medal-ribbons-star-bold", "bridal": "solar:heart-bold", "silver": "solar:diamond-bold",
+    "perfumes": "solar:bottle-bold", "attar": "solar:waterdrop-bold", "oud": "solar:leaf-bold",
+    "bakhoor": "solar:fire-bold", "gift-sets": "solar:gift-bold", "home": "solar:home-2-bold",
+    "headphones": "solar:headphones-round-bold", "smartwatches": "solar:watch-square-bold",
+    "phones": "solar:smartphone-bold", "laptops": "solar:laptop-bold", "speakers": "solar:speaker-bold",
+    "power": "solar:battery-charge-bold",
+    "vegetables": "solar:leaf-bold", "fruits": "solar:apple-bold", "rice-dal": "solar:bag-3-bold",
+    "dairy": "solar:cup-bold", "snacks": "solar:donut-bold", "cleaning": "solar:trash-bin-minimalistic-bold",
+    "toys": "solar:gamepad-bold", "plush": "solar:emoji-funny-circle-bold", "baby-care": "solar:heart-pulse-bold",
+    "feeding": "solar:bottle-bold", "kids-wear": "solar:t-shirt-bold", "school": "solar:backpack-bold",
+    "decor": "solar:pallete-2-bold", "cushions": "solar:sofa-bold", "lighting": "solar:lamp-bold",
+    "dinnerware": "solar:plate-bold", "kitchen": "solar:chef-hat-bold", "plants": "solar:leaf-bold",
+    "cat-food": "solar:cat-bold", "dog-food": "solar:bone-bold", "pawpal/toys": "solar:basketball-bold",
+    "beds": "solar:bed-bold", "grooming": "solar:scissors-bold", "pawpal/accessories": "solar:tag-bold",
+    "panjabi": "solar:t-shirt-bold", "koti": "solar:hanger-bold", "pajama": "solar:hanger-2-bold",
+    "fatua": "solar:t-shirt-bold", "shawls": "solar:layers-bold", "footwear": "solar:walking-bold",
+    "sneakers": "solar:running-bold", "formal": "solar:case-bold", "sandals": "solar:sun-bold",
+    "women": "solar:women-bold", "kids": "solar:smile-circle-bold", "care": "solar:magic-stick-3-bold",
+}
+DEFAULT_CATEGORY_ICON = "solar:square-arrow-right-down-bold"
+
+
 def theme(s: dict, u: dict, cat_ids: list[str], featured: list[str], showcase: str, event_ids: list[str]) -> dict:
     t = s["texts"]
     look = LOOK.get(s["slug"], {})
@@ -182,7 +210,7 @@ async def seed_one(db, s: dict) -> None:
     for i, (cslug, name, desc) in enumerate(s["categories"]):
         img = u[f"category-{cslug}.png"]
         c = Category(tenant_id=tenant_id, site_id=site_id, name=name, slug=cslug, description=desc,
-                     icon="solar:square-arrow-right-down-bold", image_url=img, banner_url=img, sort_order=i, is_active=True)
+                     icon=CATEGORY_ICONS.get(f"{slug}/{cslug}") or CATEGORY_ICONS.get(cslug, DEFAULT_CATEGORY_ICON), image_url=img, banner_url=img, sort_order=i, is_active=True)
         db.add(c)
         cats[cslug] = c
     await db.flush()
