@@ -32,6 +32,9 @@ from app.models import (  # noqa: E402
 )
 from catalog import STORES  # noqa: E402
 from catalog_bn import LOOK  # noqa: E402
+from product_details import DETAILS  # noqa: E402
+
+from app.products import validate_attributes  # noqa: E402
 
 # Store subdomains (<sub>.softunebd.com). "noor" is a real merchant's store,
 # so the demo uses noormodest; the others are free names.
@@ -95,6 +98,53 @@ CATEGORY_ICONS = {
     "women": "solar:women-bold", "kids": "solar:smile-circle-bold", "care": "solar:magic-stick-3-bold",
 }
 DEFAULT_CATEGORY_ICON = "solar:square-arrow-right-down-bold"
+
+
+def product_extras(slug: str, name: str, short: str, price: int, stock: int, image: str) -> tuple[dict, str]:
+    """Variant attributes and an HTML description for one product, from
+    product_details.py. Colour values point at the product photo so the
+    storefront's image swap has something to show."""
+    d = DETAILS.get(slug, {}).get(name)
+    if not d:
+        return {}, f"<p>{short}</p>"
+    options = []
+    for type_name, vals in d["v"]:
+        is_color = bool(vals) and isinstance(vals[0], tuple) and isinstance(vals[0][1], str)
+        priced = bool(vals) and isinstance(vals[0], tuple) and isinstance(vals[0][1], int)
+        values = []
+        for v in vals:
+            if is_color:
+                values.append({"value": v[0], "hex": v[1], "image": image})
+            elif priced:
+                values.append({"value": v[0], "priceDeltaCents": v[1] * 100})
+            else:
+                values.append({"value": v})
+        opt = {"type": type_name, "affectsPrice": priced, "values": values}
+        if is_color:
+            opt["isColor"] = True
+        options.append(opt)
+    # Every combination of the options, each with its own price and stock.
+    combos = [{}]
+    for o in options:
+        combos = [{**c, o["type"]: v} for c in combos for v in o["values"]]
+    each = max(stock // max(len(combos), 1), 3)
+    rows = []
+    for i, c in enumerate(combos):
+        delta = sum(v.get("priceDeltaCents", 0) for v in c.values())
+        pairs = {t: v["value"] for t, v in c.items()}
+        rows.append({
+            "key": "|".join(f"{t}:{pairs[t]}" for t in sorted(pairs)),
+            "optionValues": pairs, "priceCents": price * 100 + delta,
+            "stock": each + (i * 7) % 9, "trackStock": True, "image": image, "isActive": True,
+        })
+    attrs = validate_attributes({"variants": options, "combinations": rows})
+    html = f"<p>{d['d']}</p>"
+    if d.get("h"):
+        html += "<p><strong>Highlights</strong></p><ul>" + "".join(f"<li>{x}</li>" for x in d["h"]) + "</ul>"
+    if d.get("s"):
+        html += "<p><strong>Specifications</strong></p><ul>" + "".join(f"<li><strong>{k}:</strong> {v}</li>" for k, v in d["s"]) + "</ul>"
+    html += "<p>Cash on delivery all over Bangladesh. Not right? Return or exchange within 7 days.</p>"
+    return attrs, html
 
 
 def theme(s: dict, u: dict, cat_ids: list[str], featured: list[str], showcase: str, event_ids: list[str]) -> dict:
@@ -221,15 +271,19 @@ async def seed_one(db, s: dict) -> None:
     products: list[Product] = []
     for i, (cslug, name, price, compare, short) in enumerate(s["products"]):
         stock = 12 + (i * 7) % 40
+        attrs, desc = product_extras(slug, name, short, price, stock, u[f"product-{i + 1:02d}.png"])
+        if attrs.get("combinations"):
+            # Product stock is the total across its combinations.
+            stock = sum(c["stock"] for c in attrs["combinations"])
         p = Product(
             tenant_id=tenant_id, site_id=site_id, category_id=cats[cslug].id,
             sku=f"{slug[:3].upper()}-{1001 + i}", name=name, slug=slugify(name),
             short_description=short,
-            description=f"{short} Delivered all over Bangladesh with cash on delivery, and easy to return within 7 days.",
+            description=desc,
             price_cents=price * 100, compare_at_cents=compare * 100 if compare else None,
             cost_price_cents=int(price * 100 * 0.7), currency="BDT",
             stock=stock, track_stock=True, initial_sold_count=20 + (i * 13) % 90,
-            images=[{"url": u[f"product-{i + 1:02d}.png"]}], attributes={}, is_active=True,
+            images=[{"url": u[f"product-{i + 1:02d}.png"]}], attributes=attrs, is_active=True,
             free_delivery=False, delivery_charges=LOCATIONS, features=FEATURES,
         )
         db.add(p)
