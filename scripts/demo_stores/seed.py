@@ -45,6 +45,9 @@ FEATURES = [
     {"title": "7-day easy returns", "description": "Not right? Return or exchange within 7 days.", "icon": "rotate-ccw"},
     {"title": "Quality checked", "description": "Every order is checked before it ships.", "icon": "shield-check"},
 ]
+# The scrolling announcement bar sits above the hero for some stores and
+# below it for others; each store picks its own (BAR_BELOW_HERO).
+BAR_BELOW_HERO = {"swarna", "voltix", "pawpal", "ghorkona", "stride"}
 SECTIONS = ["banner", "hero", "categories", "featureProducts", "events", "productShowcase",
             "categoryShowcase", "whyChooseUs", "features", "bannerCta", "testimonials", "footer"]
 PAGES = [("/", "home", "Home"), ("/shop", "products", "Shop"), ("/shop/:slug", "productDetail", "Product details"),
@@ -52,6 +55,14 @@ PAGES = [("/", "home", "Home"), ("/shop", "products", "Shop"), ("/shop/:slug", "
          ("/about", "about", "About"), ("/contact", "contact", "Contact"), ("/faq", "faq", "FAQ"),
          ("/privacy", "privacy", "Privacy"), ("/terms", "terms", "Terms")]
 REVIEWERS = [("Nusrat Jahan", "Dhaka"), ("Tanvir Hasan", "Chattogram"), ("Sadia Islam", "Sylhet")]
+
+
+def sections_for(slug: str) -> list[str]:
+    """Home page section order, with the announcement bar above or below the hero."""
+    order = list(SECTIONS)
+    if slug in BAR_BELOW_HERO:
+        order[0], order[1] = order[1], order[0]
+    return order
 
 
 def slugify(text: str) -> str:
@@ -171,7 +182,7 @@ def theme(s: dict, u: dict, cat_ids: list[str], featured: list[str], showcase: s
                      {"id": "n3", "path": "/about", "label": "About"}, {"id": "n4", "path": "/contact", "label": "Contact"}],
         "headerButtons": [{"id": "b1", "label": "Cart", "style": "primary"}],
         "pages": [{"id": f"p{i + 1}", "path": p, "type": ty, "title": ti, "enabled": True} for i, (p, ty, ti) in enumerate(PAGES)],
-        "sections": [{"id": f"s{i + 1}", "type": ty} for i, ty in enumerate(SECTIONS)],
+        "sections": [{"id": f"s{i + 1}", "type": ty} for i, ty in enumerate(sections_for(s["slug"]))],
         "heroMediaType": "image", "heroVideo": "",
         "heroImages": [u["hero-1.png"], u["hero-2.png"]],
         "heroImagesSquare": [u["hero-1-mobile.png"], u["hero-2-mobile.png"]],
