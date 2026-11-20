@@ -373,7 +373,7 @@ STORES = [
         "slug": "pawpal", "name": "PawPal", "theme": "fashion-classic",
         "niche": "Pet supplies for cats and dogs",
         "tagline": "Everything your pet loves",
-        "colors": {"primary": "#0F766E", "accent": "#F59E0B", "surface": "#F3F8F6"},
+        "colors": {"primary": "#0F766E", "accent": "#F59E0B", "surface": "#FFF9F0"},
         "fonts": {"display": "prata", "body": "work-sans"},
         "style": "Warm, happy pet lifestyle photography. Teal, warm yellow and cream palette, soft daylight, cute healthy cats and dogs, cosy homes, clean product shots of pet food, toys and beds. Packaging is our own unbranded PawPal design.",
         "hero": [

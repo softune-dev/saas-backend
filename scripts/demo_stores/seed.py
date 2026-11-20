@@ -31,6 +31,7 @@ from app.models import (  # noqa: E402
     Category, Event, PaymentConnection, Product, Site, SitePage, User,
 )
 from catalog import STORES  # noqa: E402
+from catalog_bn import LOOK  # noqa: E402
 
 # Store subdomains (<sub>.softunebd.com). "noor" is a real merchant's store,
 # so the demo uses noormodest; the others are free names.
@@ -59,7 +60,7 @@ def slugify(text: str) -> str:
 
 def testimonials(s: dict) -> list[dict]:
     p = s["products"]
-    quotes = [
+    quotes = LOOK[s["slug"]]["reviews"] if s["slug"] in LOOK else [
         f"Ordered the {p[0][1]} and it looks even better in person. Delivered in two days, well packed.",
         f"Paid cash on delivery and checked everything first. The {p[4][1]} is great quality for the price.",
         f"Third order from {s['name']} now. Helpful on WhatsApp and the {p[8][1]} was exactly as shown.",
@@ -70,17 +71,21 @@ def testimonials(s: dict) -> list[dict]:
 
 def theme(s: dict, u: dict, cat_ids: list[str], featured: list[str], showcase: str, event_ids: list[str]) -> dict:
     t = s["texts"]
-    (w1t, w1), (w2t, w2), (w3t, w3) = t["why"]
+    look = LOOK.get(s["slug"], {})
+    ti = look.get("titles", {})
+    (w1t, w1), (w2t, w2), (w3t, w3) = look.get("why", t["why"])
+    cta = look.get("cta", (t["cta"][0], t["cta"][1], "Shop now"))
+    fonts = look.get("fonts", {"display": s["fonts"]["display"], "body": s["fonts"]["body"]})
     return {
-        "siteName": s["name"], "tagline": s["tagline"],
+        "siteName": s["name"], "tagline": look.get("tagline", s["tagline"]),
         "logoType": "image", "logoImage": u["logo.png"],
         "primaryColor": s["colors"]["primary"], "accentColor": s["colors"]["accent"], "surfaceColor": s["colors"]["surface"],
-        "displayFont": s["fonts"]["display"], "bodyFont": s["fonts"]["body"], "buttonStyle": "Pill",
-        "announcementItems": [
+        "displayFont": fonts["display"], "bodyFont": fonts["body"], "buttonStyle": "Pill",
+        "announcementItems": look.get("announce", [
             "Free delivery on orders over ৳3,000",
             f"{s['events'][0][0]}: {s['events'][0][1]}% off for a limited time",
             "Cash on delivery all over Bangladesh",
-        ],
+        ]),
         "announcementDivider": "•",
         "navLinks": [{"id": "n1", "path": "/shop", "label": "Shop"}, {"id": "n2", "path": "/categories", "label": "Categories"},
                      {"id": "n3", "path": "/about", "label": "About"}, {"id": "n4", "path": "/contact", "label": "Contact"}],
@@ -90,23 +95,23 @@ def theme(s: dict, u: dict, cat_ids: list[str], featured: list[str], showcase: s
         "heroMediaType": "image", "heroVideo": "",
         "heroImages": [u["hero-1.png"], u["hero-2.png"]],
         "heroImagesSquare": [u["hero-1-mobile.png"], u["hero-2-mobile.png"]],
-        "categoriesTitle": "Shop by category", "selectedCategoryIds": cat_ids,
-        "featureProductsTitle": "Bestsellers", "selectedProductIds": featured,
+        "categoriesTitle": ti.get("categories", "Shop by category"), "selectedCategoryIds": cat_ids,
+        "featureProductsTitle": ti.get("featured", "Bestsellers"), "selectedProductIds": featured,
         "selectedEventIds": event_ids, "showcaseProductId": showcase,
-        "categoryShowcaseTitle": "Explore the collection", "categoryShowcaseCategoryIds": cat_ids[:5],
-        "whyTitle": f"Why shop with {s['name']}", "whyImage": u["why.png"],
+        "categoryShowcaseTitle": ti.get("showcase", "Explore the collection"), "categoryShowcaseCategoryIds": cat_ids[:5],
+        "whyTitle": ti.get("why", f"Why shop with {s['name']}"), "whyImage": u["why.png"],
         "why1Title": w1t, "why1": w1, "why2Title": w2t, "why2": w2, "why3Title": w3t, "why3": w3,
-        "featuresTitle": "Shopping made easy",
-        "feature1Title": "Fast delivery", "feature1": "Inside Dhaka in 24 hours, the rest of Bangladesh in 2 to 3 days.",
+        "featuresTitle": ti.get("features", "Shopping made easy"),
+        "feature1Title": "দ্রুত ডেলিভারি", "feature1": "ঢাকায় 24 ঘণ্টায়, সারা দেশে 2 থেকে 3 দিনে।",
         "feature1IconKind": "icon", "feature1Icon": "solar:delivery-bold", "feature1Image": "",
-        "feature2Title": "Cash on delivery", "feature2": "Check your order at the door and pay the rider. bKash and Nagad too.",
+        "feature2Title": "Cash on Delivery", "feature2": "দরজায় পণ্য দেখে টাকা দিন। bKash আর Nagad ও চলে।",
         "feature2IconKind": "icon", "feature2Icon": "solar:wallet-money-bold", "feature2Image": "",
-        "feature3Title": "Easy returns", "feature3": "Not right? Return or exchange within 7 days, no fuss.",
+        "feature3Title": "সহজ রিটার্ন", "feature3": "পছন্দ না হলে 7 দিনের মধ্যে ফেরত বা বদল।",
         "feature3IconKind": "icon", "feature3Icon": "solar:restart-bold", "feature3Image": "",
-        "ctaTitle": t["cta"][0], "ctaBody": t["cta"][1], "ctaButton": "Shop now",
-        "testimonialsTitle": "What our customers say", "testimonialsMode": "cards",
+        "ctaTitle": cta[0], "ctaBody": cta[1], "ctaButton": cta[2],
+        "testimonialsTitle": ti.get("testimonials", "What our customers say"), "testimonialsMode": "cards",
         "testimonials": testimonials(s), "testimonialsCards": [], "testimonialsScreenshots": [],
-        "footerDescription": t["about"],
+        "footerDescription": look.get("about", t["about"]),
         "footerShopLabel": "Shop", "footerShopLinks": [{"id": "fs1", "path": "/shop", "label": "All products"},
                                                        {"id": "fs2", "path": "/categories", "label": "Categories"}],
         "footerCompanyLabel": "Company", "footerCompanyLinks": [{"id": "fc1", "path": "/about", "label": "About"},
