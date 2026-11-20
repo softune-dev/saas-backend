@@ -60,7 +60,7 @@ def slugify(text: str) -> str:
 
 def testimonials(s: dict) -> list[dict]:
     p = s["products"]
-    quotes = LOOK[s["slug"]]["reviews"] if s["slug"] in LOOK else [
+    quotes = [
         f"Ordered the {p[0][1]} and it looks even better in person. Delivered in two days, well packed.",
         f"Paid cash on delivery and checked everything first. The {p[4][1]} is great quality for the price.",
         f"Third order from {s['name']} now. Helpful on WhatsApp and the {p[8][1]} was exactly as shown.",
@@ -76,10 +76,11 @@ def theme(s: dict, u: dict, cat_ids: list[str], featured: list[str], showcase: s
     (w1t, w1), (w2t, w2), (w3t, w3) = look.get("why", t["why"])
     cta = look.get("cta", (t["cta"][0], t["cta"][1], "Shop now"))
     fonts = look.get("fonts", {"display": s["fonts"]["display"], "body": s["fonts"]["body"]})
+    colors = look.get("colors", s["colors"])
     return {
         "siteName": s["name"], "tagline": look.get("tagline", s["tagline"]),
         "logoType": "image", "logoImage": u["logo.png"],
-        "primaryColor": s["colors"]["primary"], "accentColor": s["colors"]["accent"], "surfaceColor": s["colors"]["surface"],
+        "primaryColor": colors["primary"], "accentColor": colors["accent"], "surfaceColor": colors["surface"],
         "displayFont": fonts["display"], "bodyFont": fonts["body"], "buttonStyle": "Pill",
         "announcementItems": look.get("announce", [
             "Free delivery on orders over ৳3,000",
@@ -102,11 +103,11 @@ def theme(s: dict, u: dict, cat_ids: list[str], featured: list[str], showcase: s
         "whyTitle": ti.get("why", f"Why shop with {s['name']}"), "whyImage": u["why.png"],
         "why1Title": w1t, "why1": w1, "why2Title": w2t, "why2": w2, "why3Title": w3t, "why3": w3,
         "featuresTitle": ti.get("features", "Shopping made easy"),
-        "feature1Title": "দ্রুত ডেলিভারি", "feature1": "ঢাকায় 24 ঘণ্টায়, সারা দেশে 2 থেকে 3 দিনে।",
+        "feature1Title": "Fast delivery", "feature1": "Inside Dhaka in 24 hours, the rest of Bangladesh in 2 to 3 days.",
         "feature1IconKind": "icon", "feature1Icon": "solar:delivery-bold", "feature1Image": "",
-        "feature2Title": "Cash on Delivery", "feature2": "দরজায় পণ্য দেখে টাকা দিন। bKash আর Nagad ও চলে।",
+        "feature2Title": "Cash on delivery", "feature2": "Check your order at the door and pay the rider. bKash and Nagad too.",
         "feature2IconKind": "icon", "feature2Icon": "solar:wallet-money-bold", "feature2Image": "",
-        "feature3Title": "সহজ রিটার্ন", "feature3": "পছন্দ না হলে 7 দিনের মধ্যে ফেরত বা বদল।",
+        "feature3Title": "Easy returns", "feature3": "Not right? Return or exchange within 7 days, no fuss.",
         "feature3IconKind": "icon", "feature3Icon": "solar:restart-bold", "feature3Image": "",
         "ctaTitle": cta[0], "ctaBody": cta[1], "ctaButton": cta[2],
         "testimonialsTitle": ti.get("testimonials", "What our customers say"), "testimonialsMode": "cards",
