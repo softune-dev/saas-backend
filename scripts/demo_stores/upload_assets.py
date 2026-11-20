@@ -31,6 +31,14 @@ URLS = os.path.join(os.path.dirname(__file__), "urls")
 def prepare(path: str, kind: str) -> bytes:
     im = Image.open(path)
     im = im.convert("RGBA") if kind == "logo" else im.convert("RGB")
+    if kind == "logo":
+        # ChatGPT draws the logo small in a big transparent square; trim the
+        # empty space so it shows at a useful size in the store header.
+        box = im.getchannel("A").point(lambda a: 255 if a > 16 else 0).getbbox()
+        if box:
+            pad = 12
+            im = im.crop((max(box[0] - pad, 0), max(box[1] - pad, 0),
+                          min(box[2] + pad, im.width), min(box[3] + pad, im.height)))
     if kind == "hero":
         w, h = im.size
         target_h = round(w * 9 / 16)
@@ -42,7 +50,14 @@ def prepare(path: str, kind: str) -> bytes:
 
 
 def main() -> None:
-    slugs = sys.argv[1:]
+    # --only logo.png  re-uploads just those files and updates their URLs.
+    args = sys.argv[1:]
+    only = None
+    if "--only" in args:
+        i = args.index("--only")
+        only = set(args[i + 1].split(","))
+        args = args[:i] + args[i + 2:]
+    slugs = args
     if not slugs:
         raise SystemExit("usage: upload_assets.py <slug> [<slug> ...]")
     cloudinary.config(
@@ -55,8 +70,11 @@ def main() -> None:
     by_slug = {s["slug"]: s for s in STORES}
     for slug in slugs:
         store = by_slug[slug]
-        out = {}
+        url_file = os.path.join(URLS, f"{slug}.json")
+        out = json.load(open(url_file, encoding="utf-8")) if only and os.path.exists(url_file) else {}
         for fname, kind, _ in image_list(store):
+            if only and fname not in only:
+                continue
             path = os.path.join("demo-assets", slug, fname)
             if not os.path.exists(path):
                 raise SystemExit(f"{slug}: missing {fname}, run check_assets.py first")
