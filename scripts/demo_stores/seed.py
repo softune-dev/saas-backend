@@ -213,7 +213,10 @@ async def seed_one(db, s: dict) -> None:
         e = Event(tenant_id=tenant_id, site_id=site_id, name=name, slug=slugify(name),
                   description=f"{pct}% off selected {s['niche'].split(':')[0].lower()} for a limited time.",
                   image_url=u[f"event-{i + 1}.png"], cta_label="Shop now", discount_percent=pct,
-                  is_active=True, is_popup=popup)
+                  is_active=True, is_popup=popup,
+                  # Image only: no title, text or button on the card or popup,
+                  # just the banner, which links to the event's products.
+                  image_only=True)
         e.products = [p for c in picks for p in by_cat[c]]
         db.add(e)
         events.append(e)
