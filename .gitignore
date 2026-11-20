@@ -26,3 +26,4 @@ eval_agent_report.json
 # Database dumps contain every customer's data — never commit them.
 *.dump
 *.sql.gz
+/demo-assets
