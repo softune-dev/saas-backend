@@ -22,6 +22,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import cache, events
+from app.products import stock_status
 from app.assistant.index import build_index
 from app.assistant.schemas import AssistantSettings
 from app.assistant.text import tokens
@@ -124,7 +125,8 @@ def live_loader(db: AsyncSession, site: Site):
                 "id": str(p.id), "slug": p.slug, "name": p.name,
                 "image": next((i.get("url", "") for i in (p.images or []) if i.get("url")), ""),
                 "price_cents": price, "compare_at_cents": compare,
-                "in_stock": (not p.track_stock) or p.stock > 0,
+                # Per-variant stock, same rule as the storefront (products.stock_status).
+                "in_stock": stock_status(p)[0],
                 "variants": [
                     {"type": v.get("type", ""), "values": [x.get("value", "") for x in v.get("values", [])]}
                     for v in ((p.attributes or {}).get("variants") or [])

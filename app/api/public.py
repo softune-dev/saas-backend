@@ -67,6 +67,9 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/public", tags=["public"])
 DB = Annotated[AsyncSession, Depends(get_db)]
 
+# A sitemap file may hold at most 50,000 URLs; stay far below it. Newest edits first.
+_SITEMAP_MAX_PRODUCTS = 5000
+
 # Fixed for now, not a per-site setting — see queue.JOB_SEND_LOW_STOCK_EMAIL.
 _LOW_STOCK_THRESHOLD = 5
 
@@ -319,6 +322,19 @@ def _public_category(category: Category, item_count: int) -> dict[str, Any]:
     }
 
 
+def _plain_excerpt(html: str | None, limit: int = 160) -> str:
+    """A clean plain-text start of a rich description, for search snippets and
+    link previews when the merchant wrote no short blurb: tags stripped,
+    whitespace collapsed, cut at a word boundary."""
+    text = re.sub(r"<[^>]+>", " ", html or "")
+    text = re.sub(r"&nbsp;", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0] or text[:limit]
+    return cut.rstrip(" ,.;:-") + "…"
+
+
 def _public_product(
     product: Product, category_name: str | None, active_event: Event | None = None
 ) -> dict[str, Any]:
@@ -345,15 +361,26 @@ def _public_product(
     else:
         display_price_cents = product.price_cents
         compare_at_cents = product.compare_at_cents
+    # Stock and prices of products with variants live in their combinations;
+    # see products.stock_status / discounted_attributes for why.
+    in_stock, stock_count = products_module.stock_status(product)
+    attributes = (
+        products_module.discounted_attributes(product.attributes, active_event.discount_percent)
+        if active_event is not None
+        else (product.attributes or {})
+    )
     return {
         "id": str(product.id),
         "slug": product.slug,
         "name": product.name,
-        "description": product.description or "",
+        # Many merchants leave the long description empty; the short blurb is
+        # then the best real text for the page, search snippets and structured
+        # data, better than shipping an empty description to Google and Meta.
+        "description": product.description or product.short_description or "",
         # The merchant's own short blurb — separate from `description` (rich
         # HTML) since a storefront needs a real plain-text excerpt, not one
         # derived by stripping tags off the long version.
-        "shortDescription": product.short_description or "",
+        "shortDescription": product.short_description or _plain_excerpt(product.description),
         "price": display_price_cents / 100,
         "compareAtPrice": (
             compare_at_cents / 100 if compare_at_cents is not None else None
@@ -363,9 +390,9 @@ def _public_product(
         "video": product.video_url or "",
         "categoryId": str(product.category_id) if product.category_id else None,
         "categoryName": category_name,
-        "inStock": (not product.track_stock) or product.stock > 0,
-        "stockCount": product.stock,
-        "attributes": product.attributes or {},
+        "inStock": in_stock,
+        "stockCount": stock_count,
+        "attributes": attributes,
         "features": product.features or [],
         "freeDelivery": product.free_delivery,
         # Real merchant-set options only — an empty list here means "the
@@ -1525,17 +1552,33 @@ async def sitemap(host: str, db: DB) -> dict:
     config = await get_site_config(host, db)
     if not config["site"]["seo"].get("sitemap_enabled", True):
         return {"urls": []}
-    return {
-        "urls": [
-            {
-                "loc": page["seo"]["canonical"],
-                "lastmod": config["updated_at"],
-                "priority": 1.0 if page["path"] == "/" else 0.7,
-            }
-            for page in config["pages"]
-            if not page["seo"]["noindex"]
+    urls = [
+        {
+            "loc": page["seo"]["canonical"],
+            "lastmod": config["updated_at"],
+            "priority": 1.0 if page["path"] == "/" else 0.7,
+        }
+        for page in config["pages"]
+        if not page["seo"]["noindex"]
+    ]
+    # Product pages: the pages Google and Meta most need to find. Only active
+    # products, and not at all when the whole site asks to stay out of search
+    # (the same noindex switch that hides its other pages).
+    site = await _find_published_site(host, db)
+    if not (site.seo or {}).get("noindex"):
+        rows = (
+            await db.execute(
+                select(Product.slug, Product.updated_at)
+                .where(Product.tenant_id == site.tenant_id, Product.site_id == site.id, Product.is_active)
+                .order_by(Product.updated_at.desc())
+                .limit(_SITEMAP_MAX_PRODUCTS)
+            )
+        ).all()
+        urls += [
+            {"loc": _canonical(site, f"shop/{slug}"), "lastmod": updated.isoformat(), "priority": 0.6}
+            for slug, updated in rows
         ]
-    }
+    return {"urls": urls}
 
 
 # =============================================================================

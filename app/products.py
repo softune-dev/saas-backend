@@ -331,3 +331,63 @@ def first_image_url(product: Any) -> str | None:
         if isinstance(img, str) and img:
             return img
     return None
+
+
+def stock_status(product: Any) -> tuple[bool, int]:
+    """(in_stock, stock_count) as a shopper should see it.
+
+    A product with variant combinations keeps its stock PER COMBINATION (see
+    the module docstring); the product's own `stock` column is not maintained
+    for it and is usually 0. Reading that column alone made every such product
+    look out of stock to shoppers, Google and Meta even while "Add to bag"
+    worked, which is the bug this function exists to prevent. So with
+    combinations, the answer comes from the combinations:
+
+      - in stock if any ACTIVE combination can be bought: it is untracked, or
+        it has stock left (checkout applies the same per-combination rule);
+      - the count is the total left across the active tracked combinations.
+
+    A product with no combinations keeps the original rule, exactly.
+    """
+    combos = (getattr(product, "attributes", None) or {}).get("combinations") or []
+    active = [c for c in combos if isinstance(c, dict) and c.get("isActive", True)]
+    if not active:
+        if combos:  # combinations exist but every one is switched off
+            return False, 0
+        return (not product.track_stock) or product.stock > 0, product.stock
+    tracked_left = sum(int(c.get("stock") or 0) for c in active if c.get("trackStock", True))
+    untracked = any(not c.get("trackStock", True) for c in active)
+    return (untracked or tracked_left > 0), tracked_left
+
+
+def discounted_attributes(attributes: dict | None, discount_percent: int) -> dict:
+    """A copy of a product's attributes with its combinations priced for an
+    active sale: each combination's own price becomes the sale price and the
+    old price becomes its "was" price.
+
+    Checkout already charges the sale price on top of a combination's own price
+    (app/api/public.py, create order), but the storefronts show a combination's
+    price exactly as the API gives it, so during a sale the page showed the
+    full price while the shopper was charged less. Doing the adjustment here,
+    once, fixes every theme without any of them knowing about sales.
+
+    Combinations with no price of their own are left alone: the storefront
+    shows the product's price for those, which the API already discounts.
+    """
+    from app import events  # local: events imports nothing from here, but keep this module light
+
+    attrs = dict(attributes or {})
+    combos = attrs.get("combinations")
+    if not combos:
+        return attrs
+    adjusted = []
+    for c in combos:
+        if isinstance(c, dict) and c.get("priceCents") is not None:
+            c = {
+                **c,
+                "compareAtCents": c["priceCents"],
+                "priceCents": events.round_discounted_cents(int(c["priceCents"]), discount_percent),
+            }
+        adjusted.append(c)
+    attrs["combinations"] = adjusted
+    return attrs
