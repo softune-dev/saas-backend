@@ -281,6 +281,9 @@ class Site(Base, TimestampMixin):
     # Courier automation, e.g. {"auto_book": {"enabled": true, "provider":
     # "steadfast"}} — see migrations/059 and app/courier_booking.py.
     courier_rules: Mapped[dict] = mapped_column(JSONB, default=dict)
+    # Storefront chat assistant settings (migrations/084). {} = all defaults,
+    # which means ON; shape is enforced by app/assistant/schemas.py.
+    assistant: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
     published_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -602,6 +605,34 @@ class Inquiry(Base):
     data: Mapped[dict] = mapped_column(JSONB, default=dict)
     status: Mapped[str] = mapped_column(Text, default="new")
     created_at: Mapped[datetime] = _created()
+
+
+class AssistantQuestion(Base, TimestampMixin):
+    """A shopper question the store assistant could not answer (migrations/085).
+    One row per distinct question per site; repeats raise `times_asked`.
+    Answering one turns it into a written answer in sites.assistant.qa."""
+
+    __tablename__ = "assistant_questions"
+    __table_args__ = (
+        UniqueConstraint("site_id", "question_key", name="uq_assistant_questions_site_key"),
+        CheckConstraint("lang IN ('en', 'bn')", name="assistant_questions_lang_check"),
+        CheckConstraint("status IN ('open', 'answered', 'dismissed')", name="assistant_questions_status_check"),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    site_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("sites.id", ondelete="CASCADE")
+    )
+    question: Mapped[str] = mapped_column(Text)
+    question_key: Mapped[str] = mapped_column(Text)
+    lang: Mapped[str] = mapped_column(Text, default="en")
+    times_asked: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    status: Mapped[str] = mapped_column(Text, default="open", server_default="open")
+    first_asked_at: Mapped[datetime] = _created()
+    last_asked_at: Mapped[datetime] = _created()
 
 
 class OrderItem(Base):

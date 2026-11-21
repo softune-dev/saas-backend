@@ -94,7 +94,8 @@ async def list_scoped(
 
     stmt = select(model).where(*where).limit(limit).offset(offset)
     if order_by is not None:
-        stmt = stmt.order_by(order_by)
+        # One column, or a list of them for a tie-breaker.
+        stmt = stmt.order_by(*order_by) if isinstance(order_by, (list, tuple)) else stmt.order_by(order_by)
     rows = list((await db.execute(stmt)).scalars().all())
     return rows, total
 
@@ -182,6 +183,7 @@ def _explain(exc: IntegrityError) -> str:
         "uq_fraud_ip_blocklist_site_ip": "That IP address is already blocked.",
         "uq_customers_site_phone": "A customer with that phone number already exists on this site.",
         "uq_push_subscriptions_endpoint": "This browser is already subscribed.",
+        "uq_assistant_questions_site_key": "That question is already in the list.",
         "idx_payment_claims_trx_id": "That Transaction ID has already been submitted.",
         "payment_claims_kind_check": "Unknown payment claim type.",
         "payment_claims_kind_fields_check": "That payment claim's fields don't match its type.",

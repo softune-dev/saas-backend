@@ -1,0 +1,22 @@
+-- =============================================================================
+-- sites.assistant: the merchant's settings for the storefront chat assistant
+-- (on/off, name, avatar, greeting, and their own written question/answer
+-- pairs). Shape is enforced by app/assistant/schemas.py, which is the only
+-- thing that writes it, same arrangement as sites.fraud_rules and
+-- sites.courier_rules.
+--
+-- It is a column rather than a table because there is exactly one assistant
+-- per site, it is always read together with the site row the public API has
+-- already loaded, and the written Q&A list is capped (100 entries), so it
+-- never grows into something that needs its own rows or its own queries.
+--
+-- Empty '{}' is a valid value and means "all defaults": the assistant is ON
+-- for every store, including every existing one, until the merchant turns it
+-- off. No backfill is needed.
+--
+-- No foreign key and no new index: the column is only read alongside its own
+-- row, which is already found by the existing sites subdomain/custom_domain
+-- lookup.
+-- =============================================================================
+
+ALTER TABLE sites ADD COLUMN IF NOT EXISTS assistant jsonb NOT NULL DEFAULT '{}'::jsonb;

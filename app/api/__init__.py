@@ -3,6 +3,8 @@
 from fastapi import APIRouter, Depends
 
 from app.api import (
+    assistant_admin,
+    assistant_public,
     ai,
     ai_agent,
     ai_images,
@@ -76,6 +78,8 @@ api_router.include_router(help_desk.router, dependencies=_demo_guard)
 api_router.include_router(notifications.router, dependencies=_demo_guard)
 api_router.include_router(push.router, dependencies=_demo_guard)
 api_router.include_router(public.router)
+api_router.include_router(assistant_public.router)
+api_router.include_router(assistant_admin.router, dependencies=_demo_guard)
 api_router.include_router(demo_access.router)
 api_router.include_router(ai.router, dependencies=_demo_guard)
 api_router.include_router(ai.chat_router, dependencies=_demo_guard)

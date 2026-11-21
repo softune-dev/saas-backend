@@ -58,6 +58,11 @@ def site_key(host: str) -> str:
     return f"site:{host.lower()}"
 
 
+def assistant_key(host: str) -> str:
+    """Cache key for one site's assistant knowledge index, by hostname."""
+    return f"assistant:{host.lower()}"
+
+
 def ip_block_key(host: str) -> str:
     """Cache key for one site's IP blocklist, keyed by hostname — read by
     app/main.py's ip_block middleware on every /public/* request. Short TTL
@@ -139,8 +144,13 @@ async def invalidate_site(subdomain: str, custom_domain: str | None = None) -> N
     chase.
     """
     keys = [site_key(f"{subdomain}.{settings.site_base_domain}"), site_key(subdomain)]
+    # The assistant's knowledge index is built from the same data, so it is
+    # dropped by the same call: every handler that already invalidates the site
+    # on a product/FAQ/shipping change keeps the assistant fresh for free, and
+    # the next question rebuilds it.
+    keys += [assistant_key(f"{subdomain}.{settings.site_base_domain}"), assistant_key(subdomain)]
     if custom_domain:
-        keys.append(site_key(custom_domain))
+        keys += [site_key(custom_domain), assistant_key(custom_domain)]
     await drop(*keys)
 
 

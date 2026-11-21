@@ -406,6 +406,19 @@ class SiteUpdate(BaseModel):
     legal: dict[str, Any] | None = None
     fraud_rules: dict[str, Any] | None = None
     courier_rules: dict[str, Any] | None = None
+    # Storefront chat assistant settings (migrations/084). Validated and
+    # normalised by app/assistant/schemas.py, which is the only definition of
+    # this column's shape.
+    assistant: dict[str, Any] | None = None
+
+    @field_validator("assistant")
+    @classmethod
+    def _valid_assistant(cls, v: dict[str, Any] | None) -> dict[str, Any] | None:
+        if v is None:
+            return v
+        from app.assistant.schemas import AssistantSettings
+
+        return AssistantSettings.model_validate(v).model_dump()
 
     @field_validator("shipping")
     @classmethod
@@ -457,11 +470,37 @@ class SiteOut(ORMModel):
     legal: dict
     fraud_rules: dict
     courier_rules: dict
+    assistant: dict = {}
     screenshot_url: str | None
     published_at: datetime | None
     onboarding_completed_at: datetime | None
     created_at: datetime
     updated_at: datetime
+
+
+class AssistantQuestionOut(ORMModel):
+    id: uuid.UUID
+    site_id: uuid.UUID
+    question: str
+    lang: str
+    times_asked: int
+    status: str
+    first_asked_at: datetime
+    last_asked_at: datetime
+
+
+class AssistantQuestionAnswer(BaseModel):
+    """Turn an unanswered question into one of the merchant's written answers.
+    `question` lets them tidy the wording first; it defaults to what shoppers typed."""
+
+    answer: str = Field(min_length=1, max_length=800)
+    question: str | None = Field(default=None, min_length=2, max_length=200)
+
+
+class AssistantQuestionPatch(BaseModel):
+    # 'answered' is only reachable through the answer endpoint, so a PATCH can
+    # never mark a question done without actually creating the answer.
+    status: Literal["open", "dismissed"]
 
 
 class DomainStatusOut(BaseModel):

@@ -489,3 +489,51 @@ async def test_other_tenant_cannot_delete_customers_or_notifications(two_account
     assert (await b.delete(f"/sites/{site['id']}/inquiries/{uuid.uuid4()}")).status_code == 404
     assert (await b.delete(f"/sites/{site['id']}/pay/payments/{uuid.uuid4()}")).status_code == 404
     assert len((await a.get(f"/sites/{site['id']}/customers")).json()["items"]) == len(customers)
+
+
+async def test_assistant_never_answers_from_another_tenants_store(two_accounts, template_id):
+    """The assistant resolves the host to ONE site and reads only that site's
+    products. Asking store B about a product that only store A sells must not
+    reveal A's product, price, or even that it exists."""
+    a, b = two_accounts
+    site_a = await _make_site(a, template_id)
+    site_b = await _make_site(b, template_id)
+    await a.post(
+        f"/sites/{site_a['id']}/products",
+        json={"name": "Zorblax Quantum Gadget", "price_cents": 987600, "stock": 3},
+    )
+    host_a = (await a.post(f"/sites/{site_a['id']}/publish", json={})).json()["subdomain"]
+    host_b = (await b.post(f"/sites/{site_b['id']}/publish", json={})).json()["subdomain"]
+
+    own = await a.client.post(f"/public/site/{host_a}/assistant/ask", json={"question": "how much is Zorblax Quantum Gadget"})
+    assert own.json()["kind"] == "product"
+
+    leak = await b.client.post(f"/public/site/{host_b}/assistant/ask", json={"question": "how much is Zorblax Quantum Gadget"})
+    body = leak.json()
+    assert body["kind"] == "fallback"
+    assert "Zorblax" not in body["answer"] and "9,876" not in body["answer"]
+    assert body["products"] == []
+
+
+async def test_other_tenant_cannot_see_or_change_assistant_questions(two_accounts, template_id):
+    """The unanswered-questions list is tenant-owned: B must get 404 (never
+    403, never the data) for A's site and for A's question ids, even when B
+    pairs A's question id with B's own site id."""
+    a, b = two_accounts
+    site_a = await _make_site(a, template_id)
+    site_b = await _make_site(b, template_id)
+    host_a = (await a.post(f"/sites/{site_a['id']}/publish", json={})).json()["subdomain"]
+    await a.client.post(f"/public/site/{host_a}/assistant/ask", json={"question": "Do you deliver to Sylhet?"})
+    q = (await a.get(f"/sites/{site_a['id']}/assistant/questions")).json()["items"][0]
+    qid = q["id"]
+
+    assert (await b.get(f"/sites/{site_a['id']}/assistant/questions")).status_code == 404
+    for site in (site_a, site_b):  # A's site, then B's own site with A's id
+        base = f"/sites/{site['id']}/assistant/questions/{qid}"
+        assert (await b.post(f"{base}/answer", json={"answer": "leak"})).status_code == 404
+        assert (await b.patch(base, json={"status": "dismissed"})).status_code == 404
+        assert (await b.delete(base)).status_code == 404
+
+    # A's question is untouched and B's settings never gained an answer.
+    assert (await a.get(f"/sites/{site_a['id']}/assistant/questions")).json()["items"][0]["status"] == "open"
+    assert (await b.get(f"/sites/{site_b['id']}")).json()["assistant"].get("qa", []) == []

@@ -417,6 +417,16 @@ or WhatsApp: ONE to TWO sentences, plain text, under 200 characters, inviting a 
     "site_about_paragraph": _COPYWRITER_STYLE + """
 Write ONE paragraph for a store's "About" / brand story page: 2-4 sentences, plain
 text, no markdown. An authentic founder-brand voice, not corporate filler.
+""",    "assistant_answer": """You write the reply a small online store's chat assistant gives a shopper.
+The shopper's question is in CONTEXT as "question". Reply in the SAME LANGUAGE as that
+question (Bangla script in, Bangla out; English in, English out), in 1-3 short, warm,
+plain sentences, no markdown, no greeting, no sign-off.
+
+Use ONLY facts present in CONTEXT. If CONTEXT does not contain a fact the answer needs
+(a delivery time, a price, a policy, a place), do NOT guess: write the sentence with a
+[square-bracket placeholder] where the store owner must type the real detail, e.g.
+"Yes, we deliver to Sylhet. It takes [number] working days." The owner reviews and
+edits this before it is saved, so a clear placeholder is far better than an invented fact.
 """,
 }
 
@@ -427,6 +437,7 @@ _TEXT_REQUIRED_CONTEXT: dict[str, str] = {
     "site_meta_description": "site_name",
     "site_og_description": "site_name",
     "site_about_paragraph": "site_name",
+    "assistant_answer": "question",
 }
 
 
