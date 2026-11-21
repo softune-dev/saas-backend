@@ -876,6 +876,11 @@ class PublicOrderCreate(BaseModel):
     # predates this field simply omits it, and the pending-lock/cooldown
     # checks in app/api/public.py no-op when it's absent.
     device_id: str | None = Field(default=None, max_length=200)
+    # Meta browser identifiers (the _fbp / _fbc cookies), passed through to the
+    # server-side Purchase event so Meta can join it to the ad click. Optional
+    # and format-checked: they are echoed to a third party.
+    fbp: str | None = Field(default=None, max_length=200, pattern=r"^[A-Za-z0-9._\-]*$")
+    fbc: str | None = Field(default=None, max_length=300, pattern=r"^[A-Za-z0-9._\-]*$")
     # Blank when RECAPTCHA_SECRET_KEY isn't configured — see app/recaptcha.py.
     recaptcha_token: str = ""
     # Present only on a retry after a "please verify" challenge (v3 scored
@@ -1233,6 +1238,13 @@ class MetaCapiConnectIn(BaseModel):
     access_token: str = Field(min_length=1, max_length=500)
 
 
+class MetaCapiSettingsIn(BaseModel):
+    """The test code from Meta Events Manager > Test events (or null to switch
+    test mode off). Letters and digits only, so it can't carry anything odd."""
+
+    test_event_code: str | None = Field(default=None, max_length=40, pattern=r"^[A-Za-z0-9]*$")
+
+
 class MarketingConnectionOut(ORMModel):
     id: uuid.UUID
     site_id: uuid.UUID
@@ -1241,6 +1253,13 @@ class MarketingConnectionOut(ORMModel):
     # Deliberately NOT access_token_encrypted — same rule as
     # CourierConnectionOut above.
     access_token_hint: str
+    # Tracking health, filled in by the worker after each server event.
+    test_event_code: str | None = None
+    events_sent: int = 0
+    events_failed: int = 0
+    last_event_at: datetime | None = None
+    last_error: str | None = None
+    last_error_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 

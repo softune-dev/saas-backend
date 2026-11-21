@@ -537,3 +537,24 @@ async def test_other_tenant_cannot_see_or_change_assistant_questions(two_account
     # A's question is untouched and B's settings never gained an answer.
     assert (await a.get(f"/sites/{site_a['id']}/assistant/questions")).json()["items"][0]["status"] == "open"
     assert (await b.get(f"/sites/{site_b['id']}")).json()["assistant"].get("qa", []) == []
+
+
+async def test_other_tenant_cannot_see_or_change_marketing_connections(two_accounts, template_id):
+    """A store's Meta connection (test code, tracking health) belongs to its
+    tenant: B gets 404, never the data, whether B uses A's site id, or pairs A's
+    connection id with B's own site."""
+    a, b = two_accounts
+    site_a = await _make_site(a, template_id)
+    site_b = await _make_site(b, template_id)
+    connected = await a.post(f"/sites/{site_a['id']}/marketing/meta-capi", json={"access_token": "EAAB" + "a1B2c3" * 12})
+    assert connected.status_code == 201
+    conn_id = connected.json()["id"]
+
+    assert (await b.get(f"/sites/{site_a['id']}/marketing")).status_code == 404
+    for site in (site_a, site_b):  # A's site, then B's own site with A's connection id
+        url = f"/sites/{site['id']}/marketing/{conn_id}"
+        assert (await b.patch(url, json={"test_event_code": "HACK"})).status_code == 404
+        assert (await b.delete(url)).status_code == 404
+
+    mine = (await a.get(f"/sites/{site_a['id']}/marketing")).json()[0]
+    assert mine["test_event_code"] is None, "A's connection must be untouched"

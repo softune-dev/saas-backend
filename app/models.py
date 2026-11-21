@@ -793,6 +793,14 @@ class MarketingConnection(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(Text, default="connected")
     access_token_encrypted: Mapped[str] = mapped_column(Text)
     access_token_hint: Mapped[str] = mapped_column(Text)
+    # Tracking health and Meta test mode (migrations/086). Written by the worker
+    # after each server event, shown in the dashboard.
+    test_event_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    events_sent: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    events_failed: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    last_event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_error_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class FraudBlocklistEntry(Base):

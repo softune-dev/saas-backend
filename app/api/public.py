@@ -1294,8 +1294,21 @@ async def create_public_order(
             "customer_email": payload.customer.get("email")
             if isinstance(payload.customer.get("email"), str)
             else None,
+            "first_name": payload.customer.get("first_name") if isinstance(payload.customer.get("first_name"), str) else None,
+            "last_name": payload.customer.get("last_name") if isinstance(payload.customer.get("last_name"), str) else None,
+            "city": payload.customer.get("city") if isinstance(payload.customer.get("city"), str) else None,
             "client_ip": client_ip,
             "user_agent": request.headers.get("user-agent"),
+            "fbp": payload.fbp or None,
+            "fbc": payload.fbc or None,
+            # What was bought, at the prices actually charged: Meta uses this to
+            # match the purchase to catalog products (ids are the same product
+            # ids the storefront pixel sends).
+            "contents": [
+                {"id": str(it.product_id), "quantity": it.quantity, "item_price": round(it.unit_price_cents / 100, 2)}
+                for it in items
+                if it.product_id is not None
+            ],
             "event_source_url": f"https://{host}/checkout",
         },
     )

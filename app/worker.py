@@ -630,6 +630,8 @@ async def handle_send_meta_capi_event(payload: dict) -> None:
         ).scalar_one_or_none()
         if connection is None:
             return
+        connection_id = connection.id
+        test_event_code = connection.test_event_code or None
 
         try:
             access_token = courier_crypto.decrypt(connection.access_token_encrypted)
@@ -645,14 +647,46 @@ async def handle_send_meta_capi_event(payload: dict) -> None:
         value=payload["value"],
         currency=payload["currency"],
         order_number=payload["order_number"],
+        contents=payload.get("contents"),
         customer_phone=payload.get("customer_phone"),
         customer_email=payload.get("customer_email"),
+        first_name=payload.get("first_name"),
+        last_name=payload.get("last_name"),
+        city=payload.get("city"),
         client_ip=payload.get("client_ip"),
         user_agent=payload.get("user_agent"),
+        fbp=payload.get("fbp"),
+        fbc=payload.get("fbc"),
         event_source_url=payload.get("event_source_url"),
+        test_event_code=test_event_code,
     )
+    # The error text was already scrubbed of the token (marketing.scrub), so it
+    # is safe to log and to store where the merchant can read it.
     if not ok:
         log.warning("meta capi: send failed for site %s order %s: %s", site_id, payload.get("order_number"), error)
+    await _record_capi_outcome(connection_id, ok, error)
+
+
+async def _record_capi_outcome(connection_id, ok: bool, error: str | None) -> None:
+    """Count the result on the connection so the dashboard can show tracking
+    health. Best-effort like everything here: failing to record must never
+    break the worker."""
+    try:
+        async with SessionLocal() as db:
+            conn = await db.get(MarketingConnection, connection_id)
+            if conn is None:
+                return
+            now = datetime.now(UTC)
+            if ok:
+                conn.events_sent = (conn.events_sent or 0) + 1
+                conn.last_event_at = now
+            else:
+                conn.events_failed = (conn.events_failed or 0) + 1
+                conn.last_error = error
+                conn.last_error_at = now
+            await db.commit()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("meta capi: could not record outcome: %s", exc)
 
 
 async def handle_capture_screenshot(payload: dict) -> None:

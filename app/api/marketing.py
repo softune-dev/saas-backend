@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import courier_crypto, crud
 from app.db import get_db
 from app.models import MarketingConnection, Site
-from app.schemas import MarketingConnectionOut, MetaCapiConnectIn
+from app.schemas import MarketingConnectionOut, MetaCapiConnectIn, MetaCapiSettingsIn
 from app.security import CurrentUser
 
 router = APIRouter(prefix="/sites/{site_id}/marketing", tags=["marketing"])
@@ -83,6 +83,20 @@ async def connect_meta_capi(
             ),
         )
     return connection
+
+
+@router.patch("/{connection_id}", response_model=MarketingConnectionOut)
+async def update_marketing_settings(
+    site_id: uuid.UUID, connection_id: uuid.UUID, payload: MetaCapiSettingsIn, user: CurrentUser, db: DB
+) -> MarketingConnection:
+    """Set or clear the Meta test event code on this site's connection."""
+    site = await _owned_site(db, user.tenant_id, site_id)
+    connection = await crud.get_scoped(db, MarketingConnection, user.tenant_id, connection_id)
+    # Same tenant but another site's connection is still "not found" here.
+    if connection.site_id != site.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
+    connection.test_event_code = payload.test_event_code or None
+    return await crud.save(db, connection)
 
 
 @router.delete("/{connection_id}", status_code=status.HTTP_204_NO_CONTENT)
