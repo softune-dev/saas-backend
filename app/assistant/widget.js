@@ -21,6 +21,9 @@
   if (!host || !api) return;
   window.__softuneAssistant = true;
 
+  // z-index 45 on purpose: above page content, but BELOW every theme popup,
+  // drawer and header (layer 50 and up). At the old maximum value the launcher
+  // sat on top of the sale popup's close button and blocked it.
   // Brand logos live with the landing site; a missing one just hides itself.
   var ASSETS = "https://www.softunebd.com/icons/";
   var base = api + "/public/site/" + encodeURIComponent(host) + "/assistant";
@@ -87,7 +90,7 @@
   var CSS = [
     ":host{all:initial;font-family:inherit}",
     "*{box-sizing:border-box;font-family:inherit}",
-    ".root{position:fixed;bottom:16px;z-index:2147483000;display:flex;flex-direction:column;gap:12px;align-items:flex-end;--a:#E8431A;color:#111827;font-size:14px;line-height:1.45}",
+    ".root{position:fixed;bottom:16px;z-index:45;display:flex;flex-direction:column;gap:12px;align-items:flex-end;--a:#E8431A;color:#111827;font-size:14px;line-height:1.45}",
     ".root.left{left:16px;align-items:flex-start}.root.right{right:16px}",
     ".av{flex:none;border-radius:50%;object-fit:cover;display:block}",
     ".launch{display:flex;align-items:center;gap:10px;height:56px;padding:0 20px 0 8px;border:0;border-radius:999px;background:var(--a);color:#fff;font:600 14px inherit;cursor:pointer;box-shadow:0 14px 32px -10px rgba(0,0,0,.45);transition:transform .15s}",
