@@ -345,6 +345,10 @@ async def complete(payload: TrialCompleteIn, db: DB) -> dict:
             tenant = await db.get(Tenant, user.tenant_id)
             if tenant is not None:
                 tenant.settings = {**(tenant.settings or {}), "signup_attribution": attribution}
+    # The tokens returned below sign them in, so this is their first login. A
+    # plain value, not func.now(): a SQL expression would expire the attribute
+    # and need a refresh before anything reads it.
+    user.last_login_at = datetime.now(UTC)
     await db.commit()
 
     await cache.invalidate_site(site.subdomain, site.custom_domain)

@@ -1,5 +1,6 @@
 """Register, login, refresh, me."""
 
+import logging
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -63,6 +64,7 @@ _TRUSTED_DEVICE_DAYS = 30
 # a no-op here (there's still the refresh token in the body to revoke).
 _bearer = HTTPBearer(auto_error=False)
 
+log = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["auth"])
 DB = Annotated[AsyncSession, Depends(get_db)]
 
@@ -388,7 +390,19 @@ async def refresh(payload: RefreshIn, db: DB) -> TokenOut:
     if user is None or not user.is_active:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Account unavailable")
     await _check_tenant_access(db, user.tenant_id)
-    return _tokens(user)
+    tokens = _tokens(user)
+    # A session kept alive for weeks never passes through /login again, so
+    # without this "last login" goes stale for exactly the people who use the
+    # dashboard most. Not activity (app/activity.py): an idle tab refreshes by
+    # itself. Best effort, after the tokens are built: the dashboard logs a
+    # person out when a refresh fails, and a timestamp is not worth that.
+    try:
+        user.last_login_at = datetime.now(UTC)
+        await db.commit()
+    except Exception:  # noqa: BLE001
+        log.warning("couldn't record the refresh of user %s", user_id, exc_info=True)
+        await db.rollback()
+    return tokens
 
 
 @router.get("/me", response_model=MeOut)
