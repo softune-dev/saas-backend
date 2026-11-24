@@ -11,13 +11,14 @@ will drift.
 """
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import (
     ARRAY,
     Boolean,
     CheckConstraint,
     Column,
+    Date,
     DateTime,
     ForeignKey,
     Integer,
@@ -143,6 +144,12 @@ class Tenant(Base, TimestampMixin):
     # app/ai_images.py's claim_onboarding_free — deliberately NOT part of
     # ai_image_credits, so paid credits and this gift never mix in the ledger.
     onboarding_free_images_remaining: Mapped[int] = mapped_column(Integer, default=0)
+    # When the merchant last did something real (migrations/087), so a later
+    # sweep can tell an abandoned free store from a live one. Server default
+    # now(): existing tenants' clocks start when the migration ran.
+    last_active_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
 
     users: Mapped[list["User"]] = relationship(back_populates="tenant")
 
@@ -1004,6 +1011,26 @@ class OrderCounter(Base):
         UUID(as_uuid=True), ForeignKey("sites.id", ondelete="CASCADE"), primary_key=True
     )
     next_number: Mapped[int] = mapped_column(Integer, default=1000)
+
+
+class TenantOrderMonth(Base):
+    """Orders per tenant per calendar month (migrations/087): the counter a
+    free plan's monthly order limit is enforced against. `month` is the first
+    day of the month; `blocked` counts orders refused once the limit was hit.
+    The composite PK also serves the tenant FK, so no extra index."""
+
+    __tablename__ = "tenant_order_months"
+    __table_args__ = (
+        CheckConstraint("orders >= 0", name="tenant_order_months_orders_check"),
+        CheckConstraint("blocked >= 0", name="tenant_order_months_blocked_check"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    month: Mapped[date] = mapped_column(Date, primary_key=True)
+    orders: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    blocked: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
 
 
 class InvoiceCounter(Base):
