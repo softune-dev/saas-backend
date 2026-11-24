@@ -21,7 +21,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,7 +29,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from app import pay_matching
 from app import products as products_module
-from app import ai_images, billing_actions, bkash, claims, cache, chat_credits, courier_crypto, crud, events, fraud, invoices as invoices_module, mailer, nagad, notifications, queue, recaptcha, sslcommerz, steadfast
+from app import ai_images, billing_actions, bkash, claims, cache, chat_credits, courier_crypto, crud, events, fraud, invoices as invoices_module, mailer, nagad, notifications, order_limit, queue, recaptcha, sslcommerz, steadfast
 from app.ratelimit import _client_ip, rate_limit
 from app.config import settings
 from app.db import get_db
@@ -252,7 +252,11 @@ async def get_site_config(host: str, db: DB) -> dict:
         for pc in payment_connections
     ]
 
+    # What the plan changes on the storefront: ordering and the badge.
+    plan_flags, ttl = await order_limit.storefront_flags(db, site.tenant_id)
+
     config = {
+        **plan_flags,
         "site": {
             "id": str(site.id),
             "name": site.name,
@@ -298,7 +302,7 @@ async def get_site_config(host: str, db: DB) -> dict:
         "updated_at": site.updated_at.isoformat(),
     }
 
-    await cache.set_json(key, config)
+    await cache.set_json(key, config, ttl=ttl)
     return config
 
 
@@ -768,7 +772,7 @@ async def capture_abandoned_checkout(host: str, payload: AbandonedCheckoutCaptur
     dependencies=[Depends(rate_limit("checkout", limit=8, window_seconds=300))],
 )
 async def create_public_order(
-    host: str, payload: PublicOrderCreate, request: Request, db: DB
+    host: str, payload: PublicOrderCreate, request: Request, db: DB, background: BackgroundTasks
 ) -> PublicOrderOut:
     """What a real storefront checkout submits. No auth — anonymous
     customers use this.
@@ -936,6 +940,9 @@ async def create_public_order(
                     "This store can't accept a new order from you right now. "
                     "Please contact us directly to complete your purchase.",
                 )
+
+    # Read before the stock rows are locked below, so no lock waits for it.
+    tenant = await order_limit.load_tenant(db, site.tenant_id)
 
     ids = [item.product_id for item in payload.items]
     products = {
@@ -1152,10 +1159,14 @@ async def create_public_order(
         rules=site.fraud_rules or {},
     )
 
+    order_number = await crud.next_order_number(db, site.id)
+    # Free's monthly limit, in this transaction so a failed save is not counted.
+    # It locks the tenant's counter: nothing slow between here and crud.save.
+    claimed = await order_limit.claim_for_order(db, tenant, site)
     order = Order(
         site_id=site.id,
         tenant_id=site.tenant_id,
-        order_number=await crud.next_order_number(db, site.id),
+        order_number=order_number,
         customer=payload.customer,
         customer_id=customer_record.id if customer_record else None,
         subtotal_cents=subtotal,
@@ -1179,6 +1190,7 @@ async def create_public_order(
         ip_address=order_ip,
     )
     order = await crud.save(db, order)
+    background.add_task(order_limit.after_order, claimed)
 
     # Softune Pay: shoppers often pay first and place the order second, so the
     # wallet SMS may already be here. Best-effort; never fails the order.
