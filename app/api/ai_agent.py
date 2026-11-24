@@ -14,7 +14,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import ai, ai_agent, ai_agent_undo, ai_log
+from app import ai, ai_agent, ai_agent_undo, ai_log, plans
 from app.api.ai import _tenant_plan
 from app.db import get_db
 from app.security import CurrentUser
@@ -50,8 +50,11 @@ async def agent_chat(payload: AgentChatIn, user: CurrentUser, db: DB) -> Streami
     """Server-Sent Events. The credit check runs BEFORE the stream opens, so
     "daily limit reached" comes back as a normal 429 the dashboard already
     handles, not as an event halfway through a reply."""
-    ai._ensure_configured()
     plan = await _tenant_plan(db, user.tenant_id)
+    # Before anything else: a locked plan gets the structured plan_locked, not
+    # a 503 about configuration or the daily-cap 403 it would reach below.
+    plans.ensure_feature(plan, "ai")
+    ai._ensure_configured()
     try:
         await ai._check_chat_access(str(user.tenant_id), plan, db)
     except HTTPException as exc:

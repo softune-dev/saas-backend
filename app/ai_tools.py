@@ -18,11 +18,12 @@ import math
 import uuid
 from datetime import UTC, date, datetime, timedelta
 
+from fastapi import HTTPException
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import cache, crud, invoices as invoices_module, media, risk_score as risk_score_module
+from app import ai_plan, cache, crud, invoices as invoices_module, media, risk_score as risk_score_module
 from app.config import settings
 from app.plans import get_plan
 from app.models import (
@@ -445,7 +446,9 @@ async def _get_billing_status(db: AsyncSession, tenant_id: uuid.UUID) -> dict:
     storage_limit_mb = round(media.plan_storage_limit(plan) / 1_048_576, 1)
     if site is not None:
         try:
-            used_bytes = await run_in_threadpool(media.site_storage_used_bytes, site.subdomain)
+            # The count the upload paths enforce (the thorough one on Free), so
+            # the figure the assistant quotes matches what blocks an upload.
+            used_bytes = await run_in_threadpool(media.storage_used_for_plan, plan, site.subdomain)
             storage_used_mb = round(used_bytes / 1_048_576, 1)
         except Exception as exc:  # noqa: BLE001
             log.warning("get_billing_status: media lookup failed: %s", exc)
@@ -1077,6 +1080,13 @@ async def execute_tool(
     handler = _HANDLERS.get(name)
     if handler is None:
         return {"error": f"Unknown tool '{name}'."}
+
+    # Before the cache: a read cached while the tenant had the feature must
+    # not be served after a downgrade.
+    try:
+        await ai_plan.ensure_tool(db, tenant_id, name, args, need_ai=False)
+    except HTTPException as exc:
+        return {"error": ai_plan.detail_message(exc.detail)}
 
     cache_key = f"ai:tool:{tenant_id}:{name}:{json.dumps(args, sort_keys=True)}"
     cached = await cache.get_json(cache_key)

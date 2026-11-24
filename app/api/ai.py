@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import ai, ai_actions, ai_forms, ai_log, ai_tools, chat_credits, crud, mailer
+from app import ai, ai_actions, ai_forms, ai_log, ai_plan, ai_tools, chat_credits, crud, mailer, plan_gate, plans
 from app.config import settings
 from app.db import get_db
 from app.models import PaymentClaim, Site, Tenant, User
@@ -30,7 +30,12 @@ chat_router = APIRouter(prefix="/ai/chat", tags=["ai"])
 # Confirm endpoints for the two things the chat assistant can PROPOSE — see
 # app/ai_actions.py's module docstring for why these are separate requests
 # from the chat call itself, gated on the merchant's own click.
-actions_router = APIRouter(prefix="/ai/actions", tags=["ai"])
+actions_router = APIRouter(
+    prefix="/ai/actions", tags=["ai"],
+    # Every confirm route is an AI feature, and a card proposed before a
+    # downgrade is refused here too: the plan is read when it is confirmed.
+    dependencies=[Depends(plan_gate.require_feature("ai"))],
+)
 # Usage/credits display — its own router since, like chat, it's tenant-wide,
 # not scoped to one site.
 usage_router = APIRouter(prefix="/ai", tags=["ai"])
@@ -67,6 +72,7 @@ async def suggest(
     # context handed to Gemini is this tenant's row, full stop.
     site = await crud.get_scoped(db, Site, user.tenant_id, site_id)
     plan = await _tenant_plan(db, user.tenant_id)
+    plans.ensure_feature(plan, "ai")
     async with ai_log.track(
         "theme_suggest",
         tenant_id=user.tenant_id,
@@ -100,6 +106,13 @@ class ChatOut(BaseModel):
 @chat_router.post("", response_model=ChatOut)
 async def chat(payload: ChatIn, user: CurrentUser, db: DB) -> ChatOut:
     plan = await _tenant_plan(db, user.tenant_id)
+    # The plan the daily counter sees. Free has no AI (cap 0), except this
+    # one sign-up door; see ai_plan.ONBOARDING_CHAT_PLAN for how it is bounded.
+    cap_plan = plan
+    if not plans.has_feature(plan, "ai"):
+        if not await ai_plan.onboarding_open(db, user.tenant_id):
+            plans.ensure_feature(plan, "ai")
+        cap_plan = ai_plan.ONBOARDING_CHAT_PLAN
     history = [t.model_dump() for t in payload.history]
     async with ai_log.track(
         "chat",
@@ -109,7 +122,7 @@ async def chat(payload: ChatIn, user: CurrentUser, db: DB) -> ChatOut:
         meta={"plan": plan},
     ) as tracker:
         reply, tools_used, pending_action = await ai.chat_reply(
-            payload.message, history, str(user.tenant_id), db, plan
+            payload.message, history, str(user.tenant_id), db, cap_plan
         )
         tracker.output = {
             "reply": reply,
@@ -149,7 +162,12 @@ async def get_chat_credit_balance(user: CurrentUser, db: DB) -> dict:
     return {"balance": await chat_credits.get_balance(db, user.tenant_id)}
 
 
-@usage_router.post("/chat-credits/purchase", status_code=status.HTTP_202_ACCEPTED)
+@usage_router.post(
+    "/chat-credits/purchase", status_code=status.HTTP_202_ACCEPTED,
+    # New purchases need AI. A claim submitted before a downgrade still settles:
+    # that path is the payment webhook, which never reads the plan.
+    dependencies=[Depends(plan_gate.require_feature("ai"))],
+)
 async def submit_chat_credit_purchase(payload: ChatCreditPurchaseSubmit, user: CurrentUser, db: DB) -> dict:
     """Same self-serve "I already sent the money" claim as
     app/api/ai_images.py's submit_credit_purchase — a different currency
@@ -252,6 +270,7 @@ async def generate_ai_text(payload: GenerateTextIn, user: CurrentUser, db: DB) -
     typing it themselves.
     """
     plan = await _tenant_plan(db, user.tenant_id)
+    plans.ensure_feature(plan, "ai")
     async with ai_log.track(
         "generate_text",
         tenant_id=user.tenant_id,

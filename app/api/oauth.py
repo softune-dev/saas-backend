@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import crud, oauth_server as oauth
+from app import crud, oauth_server as oauth, plan_gate
 from app.config import settings
 from app.db import get_db
 from app.models import OAuthToken, Site, Tenant
@@ -186,6 +186,8 @@ def _require_owner(user) -> None:
 async def consent_preview(request: str, user: CurrentUser, db: DB) -> dict:
     """What the consent page shows: who is asking, for which store, to do what."""
     _require_owner(user)
+    # Refused up front so nobody reads a permissions page they can't approve.
+    await plan_gate.ensure(db, user.tenant_id, "chatgpt")
     try:
         req = oauth.read_request_token(request)
     except oauth.OAuthError as exc:
@@ -214,6 +216,9 @@ async def consent(payload: ConsentIn, user: CurrentUser, db: DB) -> dict:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "This account can't connect apps right now.")
     if not payload.approve:
         return {"redirect_url": oauth.redirect_back(req, error="access_denied", error_description="The merchant declined.")}
+    # Declining stays open (it only sends the merchant back); approving mints a
+    # code, so it needs the feature. Existing connections are not touched here.
+    await plan_gate.ensure(db, user.tenant_id, "chatgpt")
     code = await oauth.issue_code(db, tenant_id=user.tenant_id, user_id=user.user_id, req=req)
     return {"redirect_url": oauth.redirect_back(req, code=code)}
 
