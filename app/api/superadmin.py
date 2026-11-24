@@ -349,6 +349,10 @@ async def update_tenant(
         tenant.plan_overdue_notified_at = None
         tenant.plan_overdue_since = None
         tenant.plan_deletion_warned_at = None
+        # Otherwise login stays blocked for a payment nobody owes any more.
+        # A manual suspension is left alone.
+        if tenant.status == "payment_overdue":
+            tenant.status = "active"
         tenant = await crud.save(db, tenant)
     elif (
         plan_changed
@@ -378,7 +382,7 @@ async def update_tenant(
         await queue.publish(queue.JOB_GENERATE_INVOICE_PDF, {"invoice_id": str(invoice.id)})
 
     if plan_changed:
-        await billing_actions.refresh_storefronts(db, tenant.id)
+        await billing_actions.refresh_storefronts(tenant.id)
 
     aggregates = (await _tenant_aggregates(db, [tenant.id]))[tenant.id]
     sites = (await _sites_for_tenants(db, [tenant.id]))[tenant.id]

@@ -183,7 +183,7 @@ def test_starter_may_switch_themes_trial_may_not():
         plans.ensure_theme_switch_allowed("free")
 
 
-@pytest.mark.parametrize("key", ["starter", "trial", "free"])
+@pytest.mark.parametrize("key", ["starter", "trial"])
 def test_gateways_locked_below_growth_and_cash_always_open(key):
     with pytest.raises(HTTPException) as exc:
         plans.ensure_payment_provider_allowed(key, "bkash")
@@ -294,3 +294,21 @@ async def test_require_feature_lets_a_plan_that_has_it_through(account_factory):
     async with AsyncClient(transport=ASGITransport(app=_gated_app()), base_url="http://t") as c:
         assert (await c.get("/seo", headers=acct.headers)).status_code == 200
 
+
+
+@pytest.mark.parametrize(
+    ("check", "provider", "feature", "needed"),
+    [
+        (plans.ensure_payment_provider_allowed, "bkash", "gateways", "growth"),
+        (plans.ensure_courier_allowed, "ecourier", "ecourier", "starter"),
+        (plans.ensure_courier_allowed, "pathao", "all_couriers", "growth"),
+    ],
+)
+def test_free_gets_the_structured_lock_for_gateways_and_couriers(check, provider, feature, needed):
+    with pytest.raises(HTTPException) as exc:
+        check("free", provider)
+    assert exc.value.status_code == 403
+    assert exc.value.detail["code"] == "plan_locked"
+    assert (exc.value.detail["feature"], exc.value.detail["needed_plan"]) == (feature, needed)
+    plans.ensure_payment_provider_allowed("free", "cod")
+    plans.ensure_courier_allowed("free", "steadfast")

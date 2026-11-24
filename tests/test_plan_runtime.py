@@ -316,8 +316,7 @@ async def test_plan_change_drops_the_cache_and_queues_revalidation(account_facto
     assert cache.site_key(acct.subdomain) in store, "the config was cached"
     queued.clear()
 
-    async with SessionLocal() as db:
-        await billing_actions.refresh_storefronts(db, uuid.UUID(acct.tenant_id))
+    await billing_actions.refresh_storefronts(uuid.UUID(acct.tenant_id))
     assert cache.site_key(acct.subdomain) not in store
     assert queued == [(queue.JOB_REVALIDATE_SITE, {"site_id": acct.site_id})]
 
@@ -329,8 +328,7 @@ async def test_the_helper_never_fails_a_plan_change(account_factory, monkeypatch
         raise RuntimeError("redis down")
 
     monkeypatch.setattr(cache, "invalidate_site", boom)
-    async with SessionLocal() as db:
-        await billing_actions.refresh_storefronts(db, uuid.UUID(acct.tenant_id))
+    await billing_actions.refresh_storefronts(uuid.UUID(acct.tenant_id))
 
 
 async def _invoices(tenant_id: str) -> int:

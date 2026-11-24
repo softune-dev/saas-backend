@@ -469,3 +469,34 @@ async def test_the_delete_itself_rechecks_so_a_late_change_survives(account):
         finally:
             await db.rollback()
     assert (await account.get("/auth/me")).status_code == 200  # the rollback restored everything
+
+
+async def test_expired_trial_delete_rechecks_the_plan(account):
+    tid = uuid.UUID(account.tenant_id)
+    cutoff = datetime.now(UTC) - CUTOFF
+    old = cutoff - timedelta(days=1)
+    async with SessionLocal() as db:
+        try:
+            for plan in ("free", "starter", "demo"):
+                await db.execute(update(Tenant).where(Tenant.id == tid).values(plan=plan, trial_expires_at=old))
+                assert (await db.execute(worker.delete_expired_trials_stmt([tid], cutoff))).scalars().all() == [], plan
+            await db.execute(update(Tenant).where(Tenant.id == tid).values(plan="trial", trial_expires_at=old))
+            assert (await db.execute(worker.delete_expired_trials_stmt([tid], cutoff))).scalars().all() == [tid]
+        finally:
+            await db.rollback()
+
+
+async def test_overdue_pause_rechecks_so_a_late_payment_is_not_paused(account):
+    tid = uuid.UUID(account.tenant_id)
+    now = datetime.now(UTC)
+    cutoff = now - timedelta(days=3)
+    late = cutoff - timedelta(days=1)
+    async with SessionLocal() as db:
+        try:
+            for plan, renews in (("free", late), ("trial", late), ("growth", now), ("growth", None)):
+                await db.execute(update(Tenant).where(Tenant.id == tid).values(plan=plan, status="active", plan_renews_at=renews))
+                assert (await db.execute(worker.pause_overdue_stmt(tid, cutoff))).first() is None, (plan, renews)
+            await db.execute(update(Tenant).where(Tenant.id == tid).values(plan="growth", status="active", plan_renews_at=late))
+            assert (await db.execute(worker.pause_overdue_stmt(tid, cutoff))).scalar_one() == tid
+        finally:
+            await db.rollback()

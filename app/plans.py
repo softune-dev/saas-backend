@@ -131,6 +131,10 @@ def ensure_courier_allowed(plan: str, provider: str) -> None:
     if provider == "steadfast":
         return
     feature = "ecourier" if provider == "ecourier" else "all_couriers"
+    if plan == "free":
+        # The structured lock, for the upgrade popup. Other plans keep their
+        # message.
+        ensure_feature(plan, feature)
     if not has_feature(plan, feature):
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
@@ -140,6 +144,8 @@ def ensure_courier_allowed(plan: str, provider: str) -> None:
 
 
 def ensure_payment_provider_allowed(plan: str, provider: str) -> None:
+    if provider in GATED_PAYMENT_PROVIDERS and plan == "free":
+        ensure_feature(plan, "gateways")
     if provider in GATED_PAYMENT_PROVIDERS and not has_feature(plan, "gateways"):
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,

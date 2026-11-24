@@ -366,7 +366,7 @@ class PlanInfoOut(BaseModel):
 class MeOut(BaseModel):
     user: UserOut
     tenant: TenantOut
-    # Only GET /auth/me fills this; PATCH /auth/me leaves it null.
+    # Filled by GET and PATCH /auth/me (app/plan_info.py).
     plan_info: PlanInfoOut | None = None
 
 

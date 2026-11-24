@@ -13,31 +13,29 @@ from datetime import UTC, datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import cache, crud, invoices as invoices_module, plans, queue
+from app.db import SessionLocal
 from app.models import Invoice, Site, Tenant
 
 log = logging.getLogger(__name__)
 
 
-async def refresh_storefronts(db: AsyncSession, tenant_id) -> None:
+async def refresh_storefronts(tenant_id) -> None:
     """Call after ANY write to tenant.plan. The public site config and the
     assistant index are cached per host and now depend on the plan (Free hides
     tracking ids and gateways), so a cached copy from the old plan must not be
     served until the TTL runs out. Every site of the tenant, since the plan is
     per tenant. Best-effort: a cache or queue hiccup must never fail a plan
-    change that is already saved (same stance as order_limit._close_storefronts,
-    which this mirrors but runs in the caller's session instead of its own,
-    because the request is still holding a connection)."""
+    change that is already saved. Its own session, because a failed read here
+    would need a rollback, and that expires every row the caller still has to
+    read for its confirmation email."""
     try:
-        sites, _ = await crud.list_scoped(db, Site, tenant_id)
+        async with SessionLocal() as own:
+            sites, _ = await crud.list_scoped(own, Site, tenant_id)
         for site in sites:
             await cache.invalidate_site(site.subdomain, site.custom_domain)
             await queue.publish(queue.JOB_REVALIDATE_SITE, {"site_id": str(site.id)})
     except Exception:
         log.exception("plan change: could not refresh the stores of tenant %s", tenant_id)
-        try:
-            await db.rollback()
-        except Exception:
-            pass
 
 
 def add_one_month(dt: datetime) -> datetime:
@@ -99,5 +97,5 @@ async def apply_paid_plan(db: AsyncSession, tenant: Tenant, plan: str) -> Invoic
     )
     await crud.save(db, invoice)
     await queue.publish(queue.JOB_GENERATE_INVOICE_PDF, {"invoice_id": str(invoice.id)})
-    await refresh_storefronts(db, tenant.id)
+    await refresh_storefronts(tenant.id)
     return invoice

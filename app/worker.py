@@ -19,7 +19,7 @@ from datetime import UTC, datetime, timedelta
 
 import aio_pika
 import httpx
-from sqlalchemy import Delete, Select, delete, func, select
+from sqlalchemy import Delete, Select, Update, delete, func, select, update
 
 from app import plans
 from app.config import settings
@@ -947,6 +947,22 @@ async def trial_end_notify_loop() -> None:
         await asyncio.sleep(TRIAL_SWEEP_INTERVAL_SECONDS)
 
 
+def _expired_trial(cutoff: datetime) -> tuple:
+    return (Tenant.plan == "trial", Tenant.trial_expires_at < cutoff)
+
+
+def delete_expired_trials_stmt(tenant_ids: list[uuid.UUID], cutoff: datetime) -> Delete:
+    """Re-checks the whole condition inside the DELETE, for the reason given in
+    delete_abandoned_stmt: a trial that pays or becomes free while its contact
+    is being saved must survive, with its media and domains."""
+    return (
+        delete(Tenant)
+        .where(Tenant.id.in_(tenant_ids), *_expired_trial(cutoff))
+        .returning(Tenant.id)
+        .execution_options(synchronize_session=False)
+    )
+
+
 async def sweep_expired_trials() -> None:
     from fastapi.concurrency import run_in_threadpool
 
@@ -956,9 +972,7 @@ async def sweep_expired_trials() -> None:
     async with SessionLocal() as db:
         expiring_tenant_ids = (
             await db.execute(
-                select(Tenant.id).where(
-                    Tenant.plan == "trial", Tenant.trial_expires_at < cutoff
-                )
+                select(Tenant.id).where(*_expired_trial(cutoff))
             )
         ).scalars().all()
         if not expiring_tenant_ids:
@@ -984,12 +998,16 @@ async def sweep_expired_trials() -> None:
             await db.rollback()
             log.exception("couldn't save contacts before deleting; skipping this sweep")
             return
-        result = await db.execute(delete(Tenant).where(Tenant.id.in_(expiring_tenant_ids)))
+        deleted_ids = set(
+            (await db.execute(delete_expired_trials_stmt(list(expiring_tenant_ids), cutoff))).scalars().all()
+        )
         await db.commit()
-        if result.rowcount:
-            log.info("trial sweep: deleted %d expired trial tenant(s)", result.rowcount)
+        if deleted_ids:
+            log.info("trial sweep: deleted %d expired trial tenant(s)", len(deleted_ids))
 
     for site in sites:
+        if site.tenant_id not in deleted_ids:
+            continue
         await cache.invalidate_site(site.subdomain, site.custom_domain)
         # Same reasoning as app/api/superadmin.py::delete_tenant's identical
         # fix — without this, an expired trial's subdomain stays attached
@@ -1143,6 +1161,28 @@ async def plan_renewal_notify_loop() -> None:
         await asyncio.sleep(PLAN_RENEWAL_SWEEP_INTERVAL_SECONDS)
 
 
+def _overdue_paid(cutoff: datetime) -> tuple:
+    return (
+        Tenant.plan.in_(plans.PAID_PLANS),
+        Tenant.status == "active",
+        Tenant.plan_renews_at.isnot(None),
+        Tenant.plan_renews_at < cutoff,
+    )
+
+
+def pause_overdue_stmt(tenant_id: uuid.UUID, cutoff: datetime) -> Update:
+    """Pauses one tenant only if it is still overdue right now. The sweep sends
+    an email per tenant, so by the time it reaches the last one that merchant
+    may have paid or become free."""
+    return (
+        update(Tenant)
+        .where(Tenant.id == tenant_id, *_overdue_paid(cutoff))
+        .values(status="payment_overdue", plan_overdue_since=func.now())
+        .returning(Tenant.id)
+        .execution_options(synchronize_session=False)
+    )
+
+
 async def sweep_overdue_plans() -> None:
     """The only place a paid tenant's login actually gets blocked for
     non-payment — PLAN_OVERDUE_GRACE_DAYS after plan_renews_at, with no
@@ -1160,25 +1200,26 @@ async def sweep_overdue_plans() -> None:
     async with SessionLocal() as db:
         to_pause = (
             await db.execute(
-                select(Tenant).where(
-                    Tenant.plan.in_(_PAID_PLANS),
-                    Tenant.status == "active",
-                    Tenant.plan_renews_at.isnot(None),
-                    Tenant.plan_renews_at < cutoff,
-                )
+                select(Tenant).where(*_overdue_paid(cutoff))
             )
         ).scalars().all()
         if not to_pause:
             return
 
+        paused = 0
         for tenant in to_pause:
             owner = (
                 await db.execute(
                     select(User).where(User.tenant_id == tenant.id, User.role == "owner")
                 )
             ).scalars().first()
-            tenant.status = "payment_overdue"
-            tenant.plan_overdue_since = func.now()
+            # Saved before the email, so nobody is told about a pause that did
+            # not happen.
+            still = (await db.execute(pause_overdue_stmt(tenant.id, cutoff))).first()
+            await db.commit()
+            if still is None:
+                continue
+            paused += 1
             if owner is None:
                 continue
             subject, html_body, text_body = mailer.plan_access_paused_email(
@@ -1189,8 +1230,7 @@ async def sweep_overdue_plans() -> None:
             sent = await mailer.send_email(owner.email, subject, html_body, text_body)
             if not sent:
                 log.warning("access-paused email: failed to send to %s", owner.email)
-        await db.commit()
-        log.info("plan renewal: paused access for %d overdue tenant(s)", len(to_pause))
+        log.info("plan renewal: paused access for %d overdue tenant(s)", paused)
 
 
 async def plan_overdue_sweep_loop() -> None:
