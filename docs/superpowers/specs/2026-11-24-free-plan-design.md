@@ -59,7 +59,7 @@ limits and locked features. **[you]**
 | Custom domain | Locked **[you]** | Yes | Yes | Yes |
 | Payments | COD, manual, Softune Pay **[you]** | same | + gateways | + gateways |
 | Couriers | Steadfast | + eCourier | All | All |
-| Theme | Chosen once | Chosen once | Switch | Switch |
+| Theme | Chosen once, at sign-up | Switch to any available theme **[you]** | Switch | Switch |
 | "Powered by SoftuneBD" badge | Shown | Removed | Removed | Removed |
 
 Rows with no mark keep today's behaviour or a suggestion the owner accepted.
