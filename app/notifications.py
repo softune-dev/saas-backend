@@ -31,9 +31,9 @@ _KNOWN_TYPES = {
     "site_unpublished",
     "payment_verified",
     "credit_purchase_verified",
-    # order_flagged was published by public.py but missing here and in the
-    # CHECK, so it was silently dropped; migration 087 fixes both.
-    "order_flagged",
+    # order_flagged is deliberately absent: the database now accepts it (087),
+    # but the dashboard has no icon/type for it yet, so it stays dropped here
+    # until the dashboard supports it.
     "order_limit",
 }
 
