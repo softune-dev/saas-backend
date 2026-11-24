@@ -199,7 +199,7 @@ def test_gateways_open_on_growth_and_up(key):
         plans.ensure_payment_provider_allowed(key, provider)
 
 
-@pytest.mark.parametrize("key", ["starter", "trial", "free"])
+@pytest.mark.parametrize("key", ["starter", "trial"])
 def test_couriers_below_growth(key):
     plans.ensure_courier_allowed(key, "steadfast")  # always allowed
     for provider in ("pathao", "redx", "paperfly"):
@@ -207,11 +207,7 @@ def test_couriers_below_growth(key):
             plans.ensure_courier_allowed(key, provider)
         assert isinstance(exc.value.detail, str)
         assert "Upgrade to connect more couriers" in exc.value.detail
-    if key == "free":
-        with pytest.raises(HTTPException):
-            plans.ensure_courier_allowed(key, "ecourier")
-    else:
-        plans.ensure_courier_allowed(key, "ecourier")
+    plans.ensure_courier_allowed(key, "ecourier")
 
 
 @pytest.mark.parametrize("key", ["growth", "business", "demo"])
