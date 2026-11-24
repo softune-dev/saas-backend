@@ -337,9 +337,37 @@ class TenantOut(ORMModel):
     created_at: datetime
 
 
+class PlanLimitsOut(BaseModel):
+    products: int | None  # None = unlimited
+    storage_bytes: int
+    orders_per_month: int | None  # None = unlimited
+    stores: int
+    ai_per_day: int
+    events: int
+
+
+class PlanUsageOut(BaseModel):
+    products: int
+    events: int
+    stores: int
+    orders_this_month: int
+    blocked_this_month: int
+
+
+class PlanInfoOut(BaseModel):
+    key: str
+    name: str
+    features: list[str]
+    limits: PlanLimitsOut
+    # null when the usage query failed; the plan itself is still right.
+    usage: PlanUsageOut | None
+
+
 class MeOut(BaseModel):
     user: UserOut
     tenant: TenantOut
+    # Only GET /auth/me fills this; PATCH /auth/me leaves it null.
+    plan_info: PlanInfoOut | None = None
 
 
 # =============================================================================

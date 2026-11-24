@@ -26,11 +26,11 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.plans import PAID_PLANS
 from app.models import DemoAccessRequest, Invoice, MarketingContact, Site, Tenant, User
 
 log = logging.getLogger(__name__)
 
-PAID_PLANS = ("starter", "growth", "business")
 # The automated tests create real tenants with these addresses. They must never
 # become marketing contacts, because contacts are kept forever.
 TEST_EMAIL_DOMAIN = "@softune-test-fixtures.dev"
@@ -38,9 +38,13 @@ TEST_EMAIL_DOMAIN = "@softune-test-fixtures.dev"
 
 def lifecycle_for(plan: str, ever_paid: bool, deleted: bool) -> str:
     """Where this person is in the journey. Deleted accounts are either
-    churned (never paid) or a former customer (paid at some point)."""
+    churned (never paid) or a former customer (paid at some point). A live
+    free account is "free", unless it once paid (it dropped down from a paid
+    plan): that person is a former customer, not a fresh free signup."""
     if deleted:
         return "former_customer" if ever_paid else "churned"
+    if plan == "free":
+        return "former_customer" if ever_paid else "free"
     return "customer" if plan in PAID_PLANS else "trial"
 
 

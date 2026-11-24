@@ -23,6 +23,7 @@ from app import metrics
 from app.config import settings
 from app.db import get_db
 from app.api.superadmin import site_logo_url
+from app.plans import PAID_PLANS
 from app.models import AiUsageLog, Invoice, Order, Site, SystemHealthSample, Tenant, User
 from app.schemas import ORMModel
 from app.security import SuperAdminUser
@@ -30,7 +31,6 @@ from app.security import SuperAdminUser
 router = APIRouter(prefix="/superadmin", tags=["superadmin-overview"])
 DB = Annotated[AsyncSession, Depends(get_db)]
 
-PAID_PLANS = ("starter", "growth", "business")
 
 
 # ----------------------------------------------------------------------------

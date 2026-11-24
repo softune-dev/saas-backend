@@ -44,7 +44,7 @@ DB = Annotated[AsyncSession, Depends(get_db)]
 
 async def _tenant_plan(db: AsyncSession, tenant_id: uuid.UUID) -> str:
     """Every AI call needs this to know the daily cap — see
-    app/ai.py's PLAN_AI_DAILY_CAP. Not scoped through crud.get_scoped since
+    the ai_per_day limit in app/plans.py. Not scoped through crud.get_scoped since
     a tenant looking up its OWN plan isn't an ownership check the way
     looking up a site/product/order is; there's nothing to leak by a
     tenant reading its own plan field.

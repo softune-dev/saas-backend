@@ -11,7 +11,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import crud, google_auth, mailer, queue, recaptcha
+from app import crud, google_auth, mailer, plan_info, queue, recaptcha
 from app.config import settings
 from app.db import get_db
 from app.models import Tenant, TrustedDevice, User
@@ -427,7 +427,9 @@ async def me(user: CurrentUser, db: DB) -> MeOut:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Account no longer exists")
     db_user, tenant = row
     return MeOut(
-        user=UserOut.model_validate(db_user), tenant=TenantOut.model_validate(tenant)
+        user=UserOut.model_validate(db_user),
+        tenant=TenantOut.model_validate(tenant),
+        plan_info=await plan_info.build(db, tenant),
     )
 
 

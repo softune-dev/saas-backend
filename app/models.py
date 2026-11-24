@@ -126,7 +126,7 @@ class Tenant(Base, TimestampMixin):
     )
     # Real purchasable balance for AI image generation (app/ai_images.py) —
     # deliberately separate from the daily-reset text-chat counter
-    # (PLAN_AI_DAILY_CAP, Redis-only, no column at all). Every change also
+    # (ai_per_day in app/plans.py, Redis-only, no column at all). Every change also
     # writes an AiImageCreditTransaction row (migrations/066) so the
     # balance is always auditable, never just trusted.
     ai_image_credits: Mapped[int] = mapped_column(Integer, default=0)
