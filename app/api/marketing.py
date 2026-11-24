@@ -21,18 +21,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import courier_crypto, crud
 from app.db import get_db
 from app.models import MarketingConnection, Site
+from app.plan_gate import require_feature
 from app.schemas import MarketingConnectionOut, MetaCapiConnectIn, MetaCapiSettingsIn
 from app.security import CurrentUser
 
 router = APIRouter(prefix="/sites/{site_id}/marketing", tags=["marketing"])
 DB = Annotated[AsyncSession, Depends(get_db)]
+# Server tracking is part of the "seo" feature. Per route, not on the router:
+# disconnecting stays open on every plan, so a merchant who dropped to free can
+# still remove their own Meta token.
+_tracking_gate = [Depends(require_feature("seo"))]
 
 
 async def _owned_site(db: AsyncSession, tenant_id: uuid.UUID, site_id: uuid.UUID) -> Site:
     return await crud.get_scoped(db, Site, tenant_id, site_id)
 
 
-@router.get("", response_model=list[MarketingConnectionOut])
+@router.get("", response_model=list[MarketingConnectionOut], dependencies=_tracking_gate)
 async def list_marketing_connections(
     site_id: uuid.UUID, user: CurrentUser, db: DB
 ) -> list[MarketingConnection]:
@@ -50,6 +55,7 @@ async def list_marketing_connections(
     "/meta-capi",
     response_model=MarketingConnectionOut,
     status_code=status.HTTP_201_CREATED,
+    dependencies=_tracking_gate,
 )
 async def connect_meta_capi(
     site_id: uuid.UUID, payload: MetaCapiConnectIn, user: CurrentUser, db: DB
@@ -85,7 +91,9 @@ async def connect_meta_capi(
     return connection
 
 
-@router.patch("/{connection_id}", response_model=MarketingConnectionOut)
+@router.patch(
+    "/{connection_id}", response_model=MarketingConnectionOut, dependencies=_tracking_gate
+)
 async def update_marketing_settings(
     site_id: uuid.UUID, connection_id: uuid.UUID, payload: MetaCapiSettingsIn, user: CurrentUser, db: DB
 ) -> MarketingConnection:

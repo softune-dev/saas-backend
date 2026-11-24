@@ -1031,7 +1031,8 @@ class OrderOut(ORMModel):
     items: list[OrderItemOut]
     channel: str
     device_id: str | None
-    fraud_status: str
+    # Null only when hidden by the plan (app/basic_plan.py); the column isn't.
+    fraud_status: str | None
     fraud_reason: str | None
     ip_address: str | None
     courier_provider: str | None

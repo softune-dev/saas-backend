@@ -18,6 +18,7 @@ from app.api import (
     events,
     fraud,
     help_desk,
+    locked_preview,
     marketing,
     mcp,
     media,
@@ -74,6 +75,7 @@ api_router.include_router(pay.admin_router, dependencies=_demo_guard)
 api_router.include_router(pay.device_router)
 api_router.include_router(marketing.router, dependencies=_demo_guard)
 api_router.include_router(fraud.router, dependencies=_demo_guard)
+api_router.include_router(locked_preview.router, dependencies=_demo_guard)
 api_router.include_router(help_desk.router, dependencies=_demo_guard)
 api_router.include_router(notifications.router, dependencies=_demo_guard)
 api_router.include_router(push.router, dependencies=_demo_guard)
