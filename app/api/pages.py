@@ -11,10 +11,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import blocks as block_registry
-from app import cache, crud, queue
+from app import cache, crud, plan_sites, queue
 from app.db import get_db
 from app.models import Site, SitePage
-from app.schemas import PageCreate, PageOut, PageUpdate
+from app.schemas import PageOut
 from app.security import CurrentUser
 
 router = APIRouter(tags=["pages"])
@@ -75,7 +75,7 @@ async def list_pages(site_id: uuid.UUID, user: CurrentUser, db: DB) -> list[Site
     "/sites/{site_id}/pages", response_model=PageOut, status_code=status.HTTP_201_CREATED
 )
 async def create_page(
-    site_id: uuid.UUID, payload: PageCreate, user: CurrentUser, db: DB
+    site_id: uuid.UUID, payload: plan_sites.AllowedPageCreate, user: CurrentUser, db: DB
 ) -> SitePage:
     site = await _owned_site(db, user.tenant_id, site_id)
 
@@ -112,7 +112,7 @@ async def get_page(
 async def update_page(
     site_id: uuid.UUID,
     page_id: uuid.UUID,
-    payload: PageUpdate,
+    payload: plan_sites.AllowedPageUpdate,
     user: CurrentUser,
     db: DB,
 ) -> SitePage:

@@ -17,9 +17,9 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import cache, crud, edge_config, queue, vercel
+from app import cache, crud, edge_config, plans, queue, vercel
 from app.config import settings
-from app.models import Site
+from app.models import Site, Tenant
 
 log = logging.getLogger(__name__)
 
@@ -67,6 +67,11 @@ async def promote(db: AsyncSession, site: Site) -> bool:
     request) if another site connected the same domain first."""
     pending = site.pending_custom_domain
     if not pending:
+        return False
+    # Here, not in the callers: both the dashboard and the worker sweep come
+    # through. The request stays pending, so upgrading again connects it.
+    plan = (await db.execute(select(Tenant.plan).where(Tenant.id == site.tenant_id))).scalar_one()
+    if not plans.has_feature(plan, "domain"):
         return False
     previous = site.custom_domain
     site.custom_domain = pending
