@@ -21,7 +21,7 @@ from app.models import Notification
 logger = logging.getLogger(__name__)
 
 # Mirrors the CHECK constraint in migrations/019_notifications.sql /
-# 021_order_blocked_notification.sql / 069_payment_claims_credits.sql —
+# 021_order_blocked_notification.sql / 069_payment_claims_credits.sql / 087_free_plan.sql —
 # kept in sync by hand, same as every other provider/type enum in this
 # codebase.
 _KNOWN_TYPES = {
@@ -31,6 +31,10 @@ _KNOWN_TYPES = {
     "site_unpublished",
     "payment_verified",
     "credit_purchase_verified",
+    # order_flagged was published by public.py but missing here and in the
+    # CHECK, so it was silently dropped; migration 087 fixes both.
+    "order_flagged",
+    "order_limit",
 }
 
 

@@ -1268,7 +1268,7 @@ class MarketingConnectionOut(ORMModel):
 #  Superadmin — platform operator, cross-tenant. See app/api/superadmin.py.
 # =============================================================================
 
-TenantPlan = Literal["trial", "demo", "starter", "growth", "business"]
+TenantPlan = Literal["free", "trial", "demo", "starter", "growth", "business"]
 TenantStatus = Literal["active", "suspended", "cancelled", "payment_overdue"]
 
 
