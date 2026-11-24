@@ -17,8 +17,9 @@ WHY "NO KEY UPDATE" AND NOT PLAIN "UPDATE"
 Inserting a product takes a shared lock on its tenant row (the foreign key).
 A plain FOR UPDATE would conflict with that, so it would also freeze every
 shopper's order insert while one merchant adds a product. FOR NO KEY UPDATE
-conflicts only with other FOR NO KEY UPDATE and FOR UPDATE lockers, which is
-exactly the other creators we want to serialise.
+lets those inserts through and still makes two creators wait for each other.
+(It also waits for an ordinary UPDATE of the same tenant row, such as a plan
+change; those are brief.)
 
 Plans with no limit (None) never take the lock: there is nothing to race for.
 

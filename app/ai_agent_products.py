@@ -423,7 +423,6 @@ async def create_product(db: AsyncSession, tenant_id: uuid.UUID, **args: Any) ->
     site = await _site(db, tenant_id)
     if not str(args.get("name") or "").strip() or args.get("price_taka") is None:
         return {"error": "A product needs a name and a price."}
-    await plan_limits.ensure_room_and_lock(db, tenant_id, "product")
     patch, notes = await _build(db, site, args, None)
     if "free_delivery" not in patch:
         # A product charges only what it stores itself, so a new one picks up
@@ -434,6 +433,9 @@ async def create_product(db: AsyncSession, tenant_id: uuid.UUID, **args: Any) ->
     patch["slug"] = await _unique_slug(db, site, patch.get("slug") or crud.slugify(patch["name"], "product"))
     # Not left to the column default (USD): an order takes its currency from
     # its products and sends it to the payment gateway.
+    # Last thing before the insert: bad model arguments fail above, so they can
+    # never leave the tenant row locked while the agent keeps streaming.
+    await plan_limits.ensure_room_and_lock(db, tenant_id, "product")
     row = Product(site_id=site.id, tenant_id=site.tenant_id, currency="BDT", **patch)
     row = await crud.save(db, row)
     await cache.invalidate_site(site.subdomain, site.custom_domain)

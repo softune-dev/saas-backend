@@ -213,6 +213,18 @@ async def test_ai_confirm_create_event_is_capped_on_free(account_factory):
     assert await _count(Event, free) == 3
 
 
+async def test_agent_and_mcp_create_discount_event_tool_is_capped_on_free(account_factory):
+    free = await account_factory("free")
+    await _seed_events(free, 3)
+    async with SessionLocal() as db:
+        out = await ai_agent_tools.run(
+            "create_discount_event", {"name": "Over", "discount_percent": 10}, db,
+            uuid.UUID(free.tenant_id), ai_agent._AGENT_HANDLERS,
+        )
+    assert "limit" in out["error"].lower()
+    assert await _count(Event, free) == 3
+
+
 # ---------------------------------------------------------------------------
 #  storage: site_storage_used_bytes
 # ---------------------------------------------------------------------------
@@ -281,8 +293,9 @@ def test_full_storage_count_caps_pages(fake_admin):
                ("image", "n"): {"resources": [_res(f"{root}/shop/hero/a", 1)], "next_cursor": "n"},
                ("video", None): {"resources": []}}
     fake = fake_admin(endless)
-    media.site_storage_used_bytes("shop", full=True)
+    used = media.site_storage_used_bytes("shop", full=True)
     assert len(fake.calls) <= media.FULL_SCAN_MAX_PAGES + 1
+    assert used >= media.plan_storage_limit("free"), "an uncounted remainder must refuse, not open the door"
 
 
 def test_only_free_plan_uses_the_full_count(monkeypatch):

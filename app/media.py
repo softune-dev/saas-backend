@@ -119,7 +119,10 @@ def site_storage_used_bytes(subdomain: str, *, full: bool = False) -> int:
             if not cursor:
                 break
         else:
+            # Thousands of tiny files: the rest is uncounted, so refuse rather
+            # than let an uncounted remainder become unlimited storage.
             log.warning("storage count for %s stopped at %d pages", subdomain, FULL_SCAN_MAX_PAGES)
+            total = max(total, get_plan("free").storage_bytes)
     return total
 
 
