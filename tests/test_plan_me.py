@@ -157,3 +157,9 @@ async def test_default_audiences_skip_free_owners_and_contacts(account_factory, 
         async with SessionLocal() as db:
             await db.execute(delete(MarketingContact).where(MarketingContact.email == email))
             await db.commit()
+
+
+async def test_profile_edit_returns_plan_info_too(account_factory):
+    acct = await account_factory("free")
+    body = (await acct.patch("/auth/me", json={"full_name": "New Name"})).json()
+    assert body["plan_info"]["key"] == "free" and body["plan_info"]["usage"]["stores"] == 1

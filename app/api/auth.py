@@ -449,7 +449,12 @@ async def update_me(payload: MeUpdate, user: CurrentUser, db: DB) -> MeOut:
     db_user, tenant = row
     db_user = crud.apply_updates(db_user, payload.model_dump(exclude_unset=True))
     db_user = await crud.save(db, db_user)
-    return MeOut(user=UserOut.model_validate(db_user), tenant=TenantOut.model_validate(tenant))
+    # Same shape as GET: the dashboard may put this straight into its session.
+    return MeOut(
+        user=UserOut.model_validate(db_user),
+        tenant=TenantOut.model_validate(tenant),
+        plan_info=await plan_info.build(db, tenant),
+    )
 
 
 @router.patch("/tenant", response_model=TenantOut, dependencies=[Depends(block_demo_writes)])
