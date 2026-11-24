@@ -14,9 +14,9 @@ from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import cache, crud, events as events_mod, media
+from app import cache, crud, media, plan_limits
 from app.db import get_db
-from app.models import Event, Product, Site, Tenant
+from app.models import Event, Product, Site
 from app.schemas import EventCreate, EventOut, EventUpdate, Page
 from app.security import CurrentUser
 
@@ -146,9 +146,8 @@ async def create_event(
     site_id: uuid.UUID, payload: EventCreate, user: CurrentUser, db: DB
 ) -> EventOut:
     site = await _owned_site(db, user.tenant_id, site_id)
-    tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
-    existing_count = await crud.count_scoped(db, Event, user.tenant_id)
-    events_mod.ensure_within_event_limit(existing_count, tenant.plan)
+    # Counts and locks the tenant row; the lock lasts until crud.save commits.
+    await plan_limits.ensure_room_and_lock(db, user.tenant_id, "event")
 
     products = await _resolve_products(db, user.tenant_id, site_id, payload.product_ids)
     if payload.is_active:

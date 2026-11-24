@@ -13,10 +13,10 @@ from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import cache, courier_booking, courier_crypto, crud, media, products, steadfast
+from app import cache, courier_booking, courier_crypto, crud, media, plan_limits, products, steadfast
 from app.db import get_db
 from app.products import first_image_url
-from app.models import Category, Inquiry, Order, OrderItem, Product, Site, Tenant
+from app.models import Category, Inquiry, Order, OrderItem, Product, Site
 from app.schemas import (
     CategoryCreate,
     CategoryOut,
@@ -225,14 +225,8 @@ async def create_product(
 ) -> Product:
     site = await _owned_site(db, user.tenant_id, site_id)
 
-    # Not crud.get_scoped: a tenant reading its OWN plan isn't an ownership
-    # check the way looking up a site/product is — same reasoning as
-    # app/api/ai.py's _tenant_plan. Tenant.id IS the tenant_id here.
-    tenant = (
-        await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))
-    ).scalar_one()
-    existing_count = await crud.count_scoped(db, Product, user.tenant_id)
-    products.ensure_within_product_limit(existing_count, tenant.plan)
+    # Counts and locks the tenant row; the lock lasts until crud.save commits.
+    await plan_limits.ensure_room_and_lock(db, user.tenant_id, "product")
 
     if payload.category_id:
         category = await crud.get_scoped(db, Category, user.tenant_id, payload.category_id)
