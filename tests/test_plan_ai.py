@@ -463,7 +463,7 @@ async def test_a_failed_generation_gives_back_the_credit_and_the_free_image(acco
 
     monkeypatch.setattr(images_api, "art_direct", art)
     monkeypatch.setattr(ai_images, "generate_image", image)
-    await _tenant_values(account, ai_image_credits=10, onboarding_free_images_remaining=3)
+    await _tenant_values(account, ai_image_credits=1000, onboarding_free_images_remaining=3)
     paid = {"prompt": "a calm banner", "tier": "premium", "include_text": False}
     free = {"prompt": "a calm banner", "tier": "standard", "include_text": False, "use_onboarding_free": True}
 
@@ -474,9 +474,9 @@ async def test_a_failed_generation_gives_back_the_credit_and_the_free_image(acco
     for stage in ("art", "image"):
         fail.update(art=stage == "art", image=stage == "image")
         assert (await account.post("/ai/images/generate", json=paid)).status_code >= 500
-        assert await state() == (10, 3), f"paid path did not refund when {stage} failed"
+        assert await state() == (1000, 3), f"paid path did not refund when {stage} failed"
         assert (await account.post("/ai/images/generate", json=free)).status_code >= 500
-        assert await state() == (10, 3), f"free path did not release when {stage} failed"
+        assert await state() == (1000, 3), f"free path did not release when {stage} failed"
 
 
 async def test_a_purchase_submitted_before_the_downgrade_still_settles(account_factory, monkeypatch):
