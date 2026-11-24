@@ -29,7 +29,7 @@ from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import contact_checks
-from app import ai_images, audit, cache, contacts as contacts_module, chat_credits as chat_credits_module, crud, invoices as invoices_module, mailer, media, queue, vercel
+from app import ai_images, audit, billing_actions, cache, contacts as contacts_module, chat_credits as chat_credits_module, crud, invoices as invoices_module, mailer, media, queue, vercel
 from app.config import settings
 from app.db import get_db
 from app.models import (
@@ -340,9 +340,18 @@ async def update_tenant(
     # why this is event-triggered rather than a recurring billing job.
     # "trial"/"demo" never get an invoice at all — there's nothing to bill
     # or document for a free plan.
-    if (
-        payload.plan is not None
-        and payload.plan != old_plan
+    plan_changed = payload.plan is not None and payload.plan != old_plan
+    if plan_changed and payload.plan == "free":
+        # Free is nothing to bill: no invoice, no renewal date, and nothing
+        # left that could make the overdue sweep treat it as a lapsed payer.
+        tenant.plan_renews_at = None
+        tenant.plan_renewal_reminded_at = None
+        tenant.plan_overdue_notified_at = None
+        tenant.plan_overdue_since = None
+        tenant.plan_deletion_warned_at = None
+        tenant = await crud.save(db, tenant)
+    elif (
+        plan_changed
         and payload.plan not in ("trial", "demo")
     ):
         # First-time conversion onto a paid plan starts the renewal clock —
@@ -367,6 +376,9 @@ async def update_tenant(
         )
         await crud.save(db, invoice)
         await queue.publish(queue.JOB_GENERATE_INVOICE_PDF, {"invoice_id": str(invoice.id)})
+
+    if plan_changed:
+        await billing_actions.refresh_storefronts(db, tenant.id)
 
     aggregates = (await _tenant_aggregates(db, [tenant.id]))[tenant.id]
     sites = (await _sites_for_tenants(db, [tenant.id]))[tenant.id]
@@ -405,6 +417,8 @@ async def confirm_plan_renewal(tenant_id: uuid.UUID, admin: SuperAdminUser, db: 
     tenant = (await db.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one_or_none()
     if tenant is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Tenant not found")
+    if tenant.plan == "free":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Free has no renewal to confirm.")
     if tenant.plan in ("trial", "demo"):
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY, "Only a paid plan has a renewal to confirm."
