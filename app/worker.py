@@ -111,6 +111,18 @@ async def handle_revalidate_site(payload: dict) -> None:
             log.warning("revalidate: could not reach %s (%s)", host, exc)
 
 
+async def _plan_has(db, tenant_id, feature: str) -> bool:
+    """Read the plan live at job time: a job queued on a paid plan must not
+    act after the merchant dropped to Free. A vanished tenant counts as no."""
+    from app import plan_gate
+    from fastapi import HTTPException
+
+    try:
+        return plans.has_feature(await plan_gate.tenant_plan(db, tenant_id), feature)
+    except HTTPException:
+        return False
+
+
 async def handle_attach_domain(payload: dict) -> None:
     """Attach a just-published site's subdomain to its template's Vercel
     project — see app/vercel.py's module docstring for the full why.
@@ -131,6 +143,15 @@ async def handle_attach_domain(payload: dict) -> None:
     if site is None:
         log.warning("attach_domain: site %s no longer exists, dropping job", site_id)
         return
+    # This job also attaches the plain subdomain of every freshly published
+    # site, which Free needs to be served at all. Only the CUSTOM domain part
+    # is a paid feature, decided live because the job may be queued before a
+    # downgrade.
+    async with SessionLocal() as db:
+        custom_ok = await _plan_has(db, site.tenant_id, "domain")
+    if not custom_ok and payload.get("domain"):
+        log.info("attach_domain: site %s may not use a custom domain on its plan, skipping", site_id)
+        return
     if site.template.framework != "nextjs":
         return
     project_id = site.template.vercel_project_id
@@ -146,7 +167,7 @@ async def handle_attach_domain(payload: dict) -> None:
         # The request was cancelled or replaced while this job waited.
         log.info("attach_domain: %s is no longer requested for site %s", requested, site_id)
         return
-    host = requested or site.custom_domain or f"{site.subdomain}.{settings.site_base_domain}"
+    host = requested or (site.custom_domain if custom_ok else None) or f"{site.subdomain}.{settings.site_base_domain}"
     await vercel.add_domain_to_project(host, project_id)
 
 
@@ -612,6 +633,11 @@ async def handle_send_meta_capi_event(payload: dict) -> None:
         ).scalar_one_or_none()
         if site is None:
             log.warning("meta capi: site %s no longer exists, dropping job", site_id)
+            return
+
+        # Tracking is a paid feature; the job may have been queued before a
+        # downgrade, so decide now.
+        if not await _plan_has(db, site.tenant_id, "seo"):
             return
 
         pixel_id = (site.seo or {}).get("facebook_pixel")

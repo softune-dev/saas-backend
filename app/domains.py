@@ -99,14 +99,24 @@ async def promote(db: AsyncSession, site: Site) -> bool:
     return True
 
 
+def pending_stmt():
+    """The sites the sweep looks at. A tenant whose plan has no custom domain
+    (Free) is left out: no Vercel call, and the request stays pending instead
+    of expiring, so upgrading again connects it. A separate function so a test
+    can run it for its own tenant without running the sweep."""
+    allowed = [key for key, plan in plans.PLANS.items() if "domain" in plan.features]
+    return select(Site).where(
+        Site.pending_custom_domain.is_not(None),
+        Site.tenant_id.in_(select(Tenant.id).where(Tenant.plan.in_(allowed))),
+    )
+
+
 async def sweep_pending(db: AsyncSession) -> tuple[int, int]:
     """Promote every pending domain that has connected and drop any that sat
     unconnected past PENDING_DOMAIN_TTL. Returns (promoted, expired). Run
     periodically by the worker, so a merchant who finishes their DNS setup
     and closes the tab still gets their domain."""
-    sites = (
-        await db.execute(select(Site).where(Site.pending_custom_domain.is_not(None)))
-    ).scalars().all()
+    sites = (await db.execute(pending_stmt())).scalars().all()
     promoted = expired = 0
     now = datetime.now(UTC)
     for site in sites:
