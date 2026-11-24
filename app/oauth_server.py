@@ -43,6 +43,7 @@ import jwt
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import activity
 from app.config import settings
 from app.models import OAuthClient, OAuthCode, OAuthToken, Tenant
 
@@ -344,4 +345,10 @@ async def authenticate_bearer(db: AsyncSession, raw_token: str) -> OAuthToken | 
     if token.last_used_at is None or (now - token.last_used_at).total_seconds() > 60:
         token.last_used_at = now
         await db.commit()
+    # Working through ChatGPT is using the shop. The commit hands this session's
+    # connection back to the pool first: touch() needs one of its own, and
+    # waiting for a second while holding the first is how a pool deadlocks.
+    if activity.due(token.tenant_id):
+        await db.commit()
+        await activity.touch(token.tenant_id)
     return token
