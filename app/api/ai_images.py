@@ -32,7 +32,7 @@ from app.ai_image_presets import (
 )
 from app.config import settings
 from app.db import get_db
-from app.media import IMAGE_MAX_BYTES, IMAGE_MAX_MEGAPIXELS, plan_storage_limit, site_storage_used_bytes
+from app.media import IMAGE_MAX_BYTES, IMAGE_MAX_MEGAPIXELS, plan_storage_limit, storage_used_for_plan
 from app.models import PaymentClaim, Site, Tenant, User
 from app.schemas import (
     CreditPurchaseSubmit,
@@ -441,7 +441,7 @@ async def save_to_gallery(payload: SaveImageToGalleryIn, user: CurrentUser, db: 
 
     tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
     limit = plan_storage_limit(tenant.plan)
-    used = site_storage_used_bytes(site.subdomain)
+    used = await run_in_threadpool(storage_used_for_plan, tenant.plan, site.subdomain)
     if used + len(image_bytes) > limit:
         raise HTTPException(
             status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,

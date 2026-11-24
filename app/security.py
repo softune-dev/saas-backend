@@ -14,6 +14,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import activity
 from app.config import settings
 from app.db import get_db
 from app.models import Tenant
@@ -334,9 +335,11 @@ class Principal:
 
 
 async def get_principal(
+    request: Request,
     creds: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
 ) -> Principal:
-    """Auth dependency. Reads identity from the token's claims — no database hit.
+    """Auth dependency. Reads identity from the token's claims — no database hit
+    (except activity.touch below, at most one tiny write per tenant per hour).
 
     TRADEOFF, chosen deliberately: skipping a per-request `SELECT ... FROM users`
     makes every authenticated endpoint one round-trip faster, which matters
@@ -355,7 +358,7 @@ async def get_principal(
         )
     payload = await decode_token(creds.credentials, expect="access")
     try:
-        return Principal(
+        principal = Principal(
             user_id=uuid.UUID(payload["sub"]),
             tenant_id=uuid.UUID(payload["tid"]),
             role=payload.get("role", "member"),
@@ -363,6 +366,14 @@ async def get_principal(
         )
     except (KeyError, ValueError):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Malformed token") from None
+    # A superadmin at work is not the merchant using their shop. Only a GET can
+    # be a poll, so anything else counts whatever its path. Runs before the
+    # request's first query, so no second pool connection is held meanwhile.
+    if not principal.is_superadmin:
+        await activity.touch(
+            principal.tenant_id, path=request.url.path if request.method == "GET" else ""
+        )
+    return principal
 
 
 CurrentUser = Annotated[Principal, Depends(get_principal)]

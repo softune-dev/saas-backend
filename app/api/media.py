@@ -25,7 +25,7 @@ from app.media import (
     VALID_CATEGORIES,
     VIDEO_MAX_BYTES,
     plan_storage_limit,
-    site_storage_used_bytes,
+    storage_used_for_plan,
 )
 from app.models import Category as CategoryModel
 from app.models import Product, Site, Tenant
@@ -48,7 +48,9 @@ async def _assert_storage_available(
 ) -> None:
     plan = await _tenant_plan(db, user.tenant_id)
     limit = plan_storage_limit(plan)
-    used = site_storage_used_bytes(site.subdomain)
+    # Blocking Cloudinary calls (the Free plan's full count is several) run
+    # off the event loop; the incoming file is part of the sum.
+    used = await run_in_threadpool(storage_used_for_plan, plan, site.subdomain)
     if used + incoming_bytes > limit:
         raise HTTPException(
             status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
@@ -269,7 +271,7 @@ async def list_all_media(site_id: uuid.UUID, user: CurrentUser, db: DB) -> dict:
         "total_count": len(images),
         "total_bytes": total_bytes,
         "by_category": by_category,
-        # Real per-plan ceiling — see app/media.py's PLAN_STORAGE_LIMIT_BYTES.
+        # Real per-plan ceiling — see plan_storage_limit in app/media.py (the table is app/plans.py).
         # Replaces the dashboard's old hardcoded 1GB display value.
         "limit_bytes": plan_storage_limit(plan),
         "plan": plan,

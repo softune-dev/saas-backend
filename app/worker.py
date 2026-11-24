@@ -19,8 +19,9 @@ from datetime import UTC, datetime, timedelta
 
 import aio_pika
 import httpx
-from sqlalchemy import delete, func, select
+from sqlalchemy import Delete, Select, delete, func, select
 
+from app import plans
 from app.config import settings
 from app.db import SessionLocal, engine
 from app.models import (
@@ -1186,6 +1187,41 @@ PLAN_DELETION_GRACE_DAYS = 30
 PLAN_DELETION_WARNING_LEAD_DAYS = 7
 
 
+def _abandoned_paid(cutoff: datetime) -> tuple:
+    """A paid account paused for non-payment since before `cutoff`. The plan
+    condition is what keeps this whole lifecycle off free stores, which have
+    their own, differently timed rules: a lapsed store moved to free may still
+    carry payment_overdue and an old plan_overdue_since."""
+    return (
+        Tenant.status == "payment_overdue",
+        Tenant.plan_overdue_since.isnot(None),
+        Tenant.plan_overdue_since < cutoff,
+        Tenant.plan.in_(plans.PAID_PLANS),
+    )
+
+
+# The three statements are functions so tests can check them against one tenant
+# of their own, without ever running a sweep.
+def deletion_warning_candidates_stmt(cutoff: datetime) -> Select:
+    return select(Tenant).where(*_abandoned_paid(cutoff), Tenant.plan_deletion_warned_at.is_(None))
+
+
+def deletion_candidates_stmt(cutoff: datetime) -> Select:
+    return select(Tenant.id).where(*_abandoned_paid(cutoff))
+
+
+def delete_abandoned_stmt(tenant_ids: list[uuid.UUID], cutoff: datetime) -> Delete:
+    """Re-checks the whole condition inside the DELETE: saving contacts takes a
+    while, and a merchant who pays or is moved to free in between must survive.
+    RETURNING because the caller may only clean up what really was deleted."""
+    return (
+        delete(Tenant)
+        .where(Tenant.id.in_(tenant_ids), *_abandoned_paid(cutoff))
+        .returning(Tenant.id)
+        .execution_options(synchronize_session=False)
+    )
+
+
 async def notify_plan_deletion_warning() -> None:
     """Sends mailer.plan_deletion_warning_email once, PLAN_DELETION_WARNING_LEAD_DAYS
     before sweep_abandoned_paid_accounts below would actually delete the
@@ -1198,16 +1234,7 @@ async def notify_plan_deletion_warning() -> None:
         days=PLAN_DELETION_GRACE_DAYS - PLAN_DELETION_WARNING_LEAD_DAYS
     )
     async with SessionLocal() as db:
-        at_risk = (
-            await db.execute(
-                select(Tenant).where(
-                    Tenant.status == "payment_overdue",
-                    Tenant.plan_overdue_since.isnot(None),
-                    Tenant.plan_overdue_since < cutoff,
-                    Tenant.plan_deletion_warned_at.is_(None),
-                )
-            )
-        ).scalars().all()
+        at_risk = (await db.execute(deletion_warning_candidates_stmt(cutoff))).scalars().all()
         if not at_risk:
             return
 
@@ -1257,15 +1284,7 @@ async def sweep_abandoned_paid_accounts() -> None:
 
     cutoff = datetime.now(UTC) - timedelta(days=PLAN_DELETION_GRACE_DAYS)
     async with SessionLocal() as db:
-        expiring_tenant_ids = (
-            await db.execute(
-                select(Tenant.id).where(
-                    Tenant.status == "payment_overdue",
-                    Tenant.plan_overdue_since.isnot(None),
-                    Tenant.plan_overdue_since < cutoff,
-                )
-            )
-        ).scalars().all()
+        expiring_tenant_ids = (await db.execute(deletion_candidates_stmt(cutoff))).scalars().all()
         if not expiring_tenant_ids:
             return
 
@@ -1285,12 +1304,17 @@ async def sweep_abandoned_paid_accounts() -> None:
             await db.rollback()
             log.exception("couldn't save contacts before deleting; skipping this sweep")
             return
-        result = await db.execute(delete(Tenant).where(Tenant.id.in_(expiring_tenant_ids)))
+        deleted_ids = set(
+            (await db.execute(delete_abandoned_stmt(list(expiring_tenant_ids), cutoff))).scalars()
+        )
         await db.commit()
-        if result.rowcount:
-            log.info("plan renewal: deleted %d abandoned paid tenant(s)", result.rowcount)
+        if deleted_ids:
+            log.info("plan renewal: deleted %d abandoned paid tenant(s)", len(deleted_ids))
 
     for site in sites:
+        # A tenant the DELETE spared is live: its media and domains stay.
+        if site.tenant_id not in deleted_ids:
+            continue
         await cache.invalidate_site(site.subdomain, site.custom_domain)
         project_id = site.template.vercel_project_id if site.template else None
         if project_id and site.template.framework == "nextjs":
