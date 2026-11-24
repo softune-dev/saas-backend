@@ -30,9 +30,10 @@ from pydantic import BaseModel, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import cache, crud
+from app import cache, crud, plans
 from app.db import get_db
 from app.models import Category, Order, OrderItem, PageView, Product, Site
+from app.plan_gate import tenant_plan
 from app.security import CurrentUser
 
 log = logging.getLogger(__name__)
@@ -134,6 +135,50 @@ async def _unique_visitors(
     ).scalar_one()
 
 
+async def _basic_analytics(db: AsyncSession, site_id: uuid.UUID) -> AnalyticsOut:
+    """Plans without full_analytics: revenue, orders and visitors for the last
+    7 days, the rest left blank. No change_percent either, since comparing
+    needs the week before. Counted the same way as the full report, but in
+    SQL: there are no order lines to walk here."""
+    now = datetime.now(UTC)
+    start = now - timedelta(days=7)
+    order_count, revenue_cents = (
+        await db.execute(
+            select(
+                func.count(Order.id),
+                func.coalesce(
+                    func.sum(Order.total_cents).filter(Order.status.not_in(_LOST_STATUSES)), 0
+                ),
+            ).where(Order.site_id == site_id, Order.created_at >= start)
+        )
+    ).one()
+    # The newest order of any age: a quiet week is common on a small store and
+    # must not show its revenue in dollars.
+    currency = (
+        await db.execute(
+            select(Order.currency)
+            .where(Order.site_id == site_id)
+            .order_by(Order.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return AnalyticsOut(
+        currency=currency or "USD",
+        revenue=StatOut(cents=revenue_cents),
+        orders=StatOut(count=order_count),
+        visits=StatOut(count=await _unique_visitors(db, site_id, start, now)),
+        aov=StatOut(),
+        refund_rate=StatOut(),
+        conversion_rate=StatOut(),
+        profit=StatOut(),
+        cost_data_coverage_percent=0.0,
+        revenue_curve=[],
+        category_shares=[],
+        best_sellers=[],
+        sales_report=[],
+    )
+
+
 @router.get("", response_model=AnalyticsOut)
 async def get_analytics(
     site_id: uuid.UUID,
@@ -142,6 +187,11 @@ async def get_analytics(
     weeks: Annotated[int, Query(ge=1, le=26)] = 8,
 ) -> AnalyticsOut:
     site = await crud.get_scoped(db, Site, user.tenant_id, site_id)
+
+    # Before the cache: a report stored while the tenant was paid must not be
+    # served after a downgrade.
+    if not plans.has_feature(await tenant_plan(db, user.tenant_id), "full_analytics"):
+        return await _basic_analytics(db, site_id)
 
     # This endpoint computes several aggregate queries over every order in
     # the window (see below) on EVERY request — expensive, and the numbers

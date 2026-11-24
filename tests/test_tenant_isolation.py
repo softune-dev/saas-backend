@@ -558,3 +558,50 @@ async def test_other_tenant_cannot_see_or_change_marketing_connections(two_accou
 
     mine = (await a.get(f"/sites/{site_a['id']}/marketing")).json()[0]
     assert mine["test_event_code"] is None, "A's connection must be untouched"
+
+
+async def test_other_tenant_cannot_count_through_locked_preview(two_accounts, account_factory):
+    """The count behind a blurred page is tenant data too: B gets 404 for A's
+    site, the same answer as for a site that exists nowhere, on a paid plan
+    and on a free one."""
+    a, b = two_accounts
+    free = await account_factory("free")
+    for feature in ("customers", "fraud"):
+        assert (await a.get(f"/sites/{a.site_id}/locked-preview/{feature}")).status_code == 200
+        for other in (b, free):
+            theirs = await other.get(f"/sites/{a.site_id}/locked-preview/{feature}")
+            nowhere = await other.get(f"/sites/{uuid.uuid4()}/locked-preview/{feature}")
+            assert theirs.status_code == nowhere.status_code == 404
+            assert theirs.json() == nowhere.json()
+            assert "count" not in theirs.text
+
+
+async def test_free_tenant_cannot_reach_another_tenants_orders_or_analytics(
+    two_accounts, account_factory
+):
+    """The free plan's shorter orders list and basic analytics are separate
+    code paths, so they get their own ownership proof: 404, never data. The
+    orders are A's real ones, asked for through A's site and through the free
+    tenant's own."""
+    a, _ = two_accounts
+    free = await account_factory("free")
+    product = (
+        await a.post(
+            f"/sites/{a.site_id}/products", json={"name": "Widget", "price_cents": 1000, "stock": 5}
+        )
+    ).json()
+    order = await a.post(
+        f"/sites/{a.site_id}/orders",
+        json={"customer": {"name": "Buyer"}, "items": [{"product_id": product["id"], "quantity": 1}]},
+    )
+    assert order.status_code == 201, order.text
+    oid = order.json()["id"]
+
+    assert (await free.get(f"/sites/{a.site_id}/orders")).status_code == 404
+    assert (await free.get(f"/sites/{a.site_id}/analytics")).status_code == 404
+    for site_id in (a.site_id, free.site_id):
+        url = f"/sites/{site_id}/orders/{oid}"
+        assert (await free.get(url)).status_code == 404
+        assert (await free.patch(url, json={"status": "cancelled"})).status_code == 404
+    assert (await free.get(f"/sites/{free.site_id}/orders")).json()["total"] == 0
+    assert (await a.get(f"/sites/{a.site_id}/orders/{oid}")).json()["status"] == "pending"

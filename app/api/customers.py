@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import cache, crud, risk_score as risk_score_module
 from app.db import get_db
 from app.models import AbandonedCheckout, Customer, FraudIpBlocklistEntry, Order, Product, Site
+from app.plan_gate import require_feature
 from app.schemas import (
     AbandonedCheckoutItemOut,
     AbandonedCheckoutOut,
@@ -26,7 +27,10 @@ from app.schemas import (
 )
 from app.security import CurrentUser
 
-router = APIRouter(tags=["customers"])
+# The whole router, so a route added here later is locked by default. Shoppers
+# never come through it: checkout writes customers and abandoned carts through
+# app/crud.py and app/api/public.py, which keep working on every plan.
+router = APIRouter(tags=["customers"], dependencies=[Depends(require_feature("customers"))])
 DB = Annotated[AsyncSession, Depends(get_db)]
 
 

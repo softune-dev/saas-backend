@@ -39,10 +39,14 @@ from app.models import (
     Product,
     Site,
 )
+from app.plan_gate import require_feature
 from app.security import CurrentUser
 
 router = APIRouter(tags=["manage"])
 DB = Annotated[AsyncSession, Depends(get_db)]
+# Per route: deleting orders, inquiries, notifications and payments stays open
+# on every plan.
+_customers_gate = [Depends(require_feature("customers"))]
 
 # Statuses where the goods physically left the shop: deleting the order
 # must not put them back in stock.
@@ -140,7 +144,11 @@ async def bulk_delete_orders(
 # ---- Customers -----------------------------------------------------------
 
 
-@router.delete("/sites/{site_id}/customers/{customer_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/sites/{site_id}/customers/{customer_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=_customers_gate,
+)
 async def delete_customer(
     site_id: uuid.UUID, customer_id: uuid.UUID, user: CurrentUser, db: DB
 ) -> None:
@@ -153,7 +161,11 @@ async def delete_customer(
     await cache.invalidate_dashboard(str(site_id))
 
 
-@router.post("/sites/{site_id}/customers/bulk-delete", response_model=DeletedOut)
+@router.post(
+    "/sites/{site_id}/customers/bulk-delete",
+    response_model=DeletedOut,
+    dependencies=_customers_gate,
+)
 async def bulk_delete_customers(
     site_id: uuid.UUID, payload: BulkIds, user: CurrentUser, db: DB
 ) -> DeletedOut:
@@ -174,7 +186,9 @@ async def bulk_delete_customers(
 
 
 @router.delete(
-    "/sites/{site_id}/abandoned-checkouts/{checkout_id}", status_code=status.HTTP_204_NO_CONTENT
+    "/sites/{site_id}/abandoned-checkouts/{checkout_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=_customers_gate,
 )
 async def delete_abandoned_checkout(
     site_id: uuid.UUID, checkout_id: uuid.UUID, user: CurrentUser, db: DB
@@ -186,7 +200,11 @@ async def delete_abandoned_checkout(
     await crud.delete(db, row)
 
 
-@router.delete("/sites/{site_id}/abandoned-checkouts", response_model=DeletedOut)
+@router.delete(
+    "/sites/{site_id}/abandoned-checkouts",
+    response_model=DeletedOut,
+    dependencies=_customers_gate,
+)
 async def clear_abandoned_checkouts(site_id: uuid.UUID, user: CurrentUser, db: DB) -> DeletedOut:
     """Clears the whole list (the ones still shown: not later converted)."""
     await _owned_site(db, user.tenant_id, site_id)
