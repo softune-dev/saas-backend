@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 
 from app import ai_images
 from app.api.ai_images import _apply_preset, _copy_instruction
@@ -190,7 +190,9 @@ async def test_demo_tenants_get_no_allowance():
         try:
             assert tenant.onboarding_free_images_remaining == 0
         finally:
-            await db.delete(tenant)
+            # A plain DELETE: db.delete() would try to null users.tenant_id first,
+            # fail, and leave this tenant behind in the real database.
+            await db.execute(delete(Tenant).where(Tenant.id == tenant.id))
             await db.commit()
 
 
