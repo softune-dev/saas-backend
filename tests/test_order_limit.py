@@ -550,3 +550,20 @@ async def test_paid_and_trial_stores_always_take_checkout_and_show_no_badge(acco
         await _set_counter(acct.tenant_id, 500)
         config = (await acct.client.get(f"/public/site/{acct.subdomain}")).json()
         assert (config["ordering"], config["badge"]) == ("checkout", False)
+
+
+async def test_a_received_order_counts_as_activity_on_every_plan(monkeypatch):
+    seen = []
+
+    async def spy(tenant_id, **kw):
+        seen.append(tenant_id)
+
+    async def nothing(*a, **kw):
+        return None
+
+    monkeypatch.setattr(order_limit.activity, "touch", spy)
+    monkeypatch.setattr(order_limit, "_count_unlimited", nothing)
+    ids = [uuid.uuid4(), uuid.uuid4()]
+    await order_limit.after_order(order_limit.Claim(order_limit.TenantPlan(ids[0], "free"), uuid.uuid4(), 7))
+    await order_limit.after_order(order_limit.Claim(order_limit.TenantPlan(ids[1], "starter"), uuid.uuid4(), None))
+    assert seen == ids
