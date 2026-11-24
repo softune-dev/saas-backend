@@ -33,9 +33,9 @@ from fastapi import HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import ai_actions, ai_agent_media, cache, crud, products
+from app import ai_actions, ai_agent_media, cache, crud, plan_limits, products
 from app.ai_agent_tools import _cents, _clip, _forget_tool_cache, _record, _site
-from app.models import Product, Site, Tenant
+from app.models import Product, Site
 
 UNITS = ("pcs", "kg", "g", "mg", "l", "ml")  # dashboard UNIT_OPTIONS
 MAX_IMAGES = 8
@@ -423,8 +423,7 @@ async def create_product(db: AsyncSession, tenant_id: uuid.UUID, **args: Any) ->
     site = await _site(db, tenant_id)
     if not str(args.get("name") or "").strip() or args.get("price_taka") is None:
         return {"error": "A product needs a name and a price."}
-    tenant = (await db.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one()
-    products.ensure_within_product_limit(await crud.count_scoped(db, Product, tenant_id), tenant.plan)
+    await plan_limits.ensure_room_and_lock(db, tenant_id, "product")
     patch, notes = await _build(db, site, args, None)
     if "free_delivery" not in patch:
         # A product charges only what it stores itself, so a new one picks up

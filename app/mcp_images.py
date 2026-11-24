@@ -90,7 +90,8 @@ async def add_image_to_gallery(db: AsyncSession, tenant_id, image: dict | None =
 
     site = await ai_agent_tools._site(db, tenant_id)
     tenant = (await db.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one()
-    if media.site_storage_used_bytes(site.subdomain) + len(data) > media.plan_storage_limit(tenant.plan):
+    used = await run_in_threadpool(media.storage_used_for_plan, tenant.plan, site.subdomain)
+    if used + len(data) > media.plan_storage_limit(tenant.plan):
         return {"error": "This store's media storage is full. Delete unused media in the dashboard first."}
 
     uploaded = await run_in_threadpool(media.upload_image, data, subdomain=site.subdomain, category="other")
