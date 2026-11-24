@@ -505,7 +505,7 @@ def image_request(slot: str, plan: dict, inputs: dict) -> tuple[dict, str]:
 
 async def store_image(site: Site, tenant: Tenant, image_bytes: bytes, category: str) -> str:
     limit = media.plan_storage_limit(tenant.plan)
-    used = await run_in_threadpool(media.site_storage_used_bytes, site.subdomain)
+    used = await run_in_threadpool(media.storage_used_for_plan, tenant.plan, site.subdomain)
     if used + len(image_bytes) > limit:
         raise HTTPException(
             status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,

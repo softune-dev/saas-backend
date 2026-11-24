@@ -22,8 +22,8 @@ from fastapi import HTTPException, status
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import cache, crud, events, media, products
-from app.models import Category, Event, HelpTicket, Order, Product, Site, Tenant
+from app import cache, crud, media, plan_limits, products
+from app.models import Category, Event, HelpTicket, Order, Product, Site
 
 
 async def _resolve_site(db: AsyncSession, tenant_id: uuid.UUID) -> Site:
@@ -257,9 +257,7 @@ async def create_product(db: AsyncSession, tenant_id: uuid.UUID, product: dict) 
     # writes a Product row directly (crud.save), not through
     # POST /sites/{site_id}/products, so it needs its own check or the AI
     # assistant would be a silent bypass of the limit.
-    tenant = (await db.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one()
-    existing_count = await crud.count_scoped(db, Product, tenant_id)
-    products.ensure_within_product_limit(existing_count, tenant.plan)
+    await plan_limits.ensure_room_and_lock(db, tenant_id, "product")
 
     category_id = await _resolve_category_id(db, site, product.get("category_name"))
 
@@ -452,9 +450,7 @@ async def create_event(
     # Same per-plan cap the manual "Create event" endpoint enforces
     # (app/api/events.py) — this path writes an Event row directly via
     # crud.save, not through that endpoint, so it needs its own check.
-    tenant = (await db.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one()
-    existing_count = await crud.count_scoped(db, Event, tenant_id)
-    events.ensure_within_event_limit(existing_count, tenant.plan)
+    await plan_limits.ensure_room_and_lock(db, tenant_id, "event")
 
     name = (name or "").strip()
     if not name:
