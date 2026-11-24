@@ -72,12 +72,15 @@ async def allowed_site_update(
 async def allowed_page_create(
     site_id: uuid.UUID, payload: PageCreate, user: CurrentUser, db: DB
 ) -> PageCreate:
+    if not payload.seo:
+        return payload
+    plan = await plan_gate.tenant_plan(db, user.tenant_id)
+    if plans.has_feature(plan, "seo"):
+        return payload
     if _changes(payload.seo, {}):
-        plan = await plan_gate.tenant_plan(db, user.tenant_id)
-        if not plans.has_feature(plan, "seo"):
-            await crud.get_scoped(db, Site, user.tenant_id, site_id)
-            plans.ensure_feature(plan, "seo")
-    return payload
+        await crud.get_scoped(db, Site, user.tenant_id, site_id)
+        plans.ensure_feature(plan, "seo")
+    return payload.model_copy(update={"seo": {}})
 
 
 async def allowed_page_update(
