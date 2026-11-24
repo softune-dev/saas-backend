@@ -171,8 +171,7 @@ async def account_factory(
     client: AsyncClient,
 ) -> AsyncGenerator[Callable[..., Awaitable[Account]], None]:
     """Create tenants on a chosen plan: `await account_factory("growth")`.
-    Every tenant it made is deleted afterwards. Not for "free" until the
-    migration that lets the tenants CHECK constraint accept it."""
+    Every tenant it made is deleted afterwards."""
     made: list[str] = []
 
     async def make(plan: str = "starter") -> Account:
