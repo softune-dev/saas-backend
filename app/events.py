@@ -1,27 +1,17 @@
 """Event validation, per-tenant plan limits, and discount math.
 
-Same reasoning as app/products.py's PLAN_PRODUCT_LIMIT: a plain dict, not a
-database column, because pricing isn't finalized. Unrecognized plans fall
-back to DEFAULT_EVENT_LIMIT rather than silently unlimited. These are
-tiered to prevent spam (a merchant flooding their homepage with dozens of
-"events"), not to cap catalog size the way PLAN_PRODUCT_LIMIT does — hence
-much smaller numbers.
+The per-plan event cap lives in app/plans.py. These are tiered to prevent
+spam (a merchant flooding their homepage with dozens of "events"), not to
+cap catalog size the way the product limit does — hence much smaller numbers.
 """
 
 from fastapi import HTTPException, status
 
-PLAN_EVENT_LIMIT: dict[str, int] = {
-    "demo": 3,
-    "trial": 3,
-    "starter": 3,
-    "growth": 10,
-    "business": 25,
-}
-DEFAULT_EVENT_LIMIT = 3
+from app.plans import get_plan
 
 
 def plan_event_limit(plan: str) -> int:
-    return PLAN_EVENT_LIMIT.get(plan, DEFAULT_EVENT_LIMIT)
+    return get_plan(plan).events
 
 
 def ensure_within_event_limit(current_count: int, plan: str) -> None:

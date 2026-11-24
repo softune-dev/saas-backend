@@ -30,34 +30,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import ai_log, ai_tools, cache, invoices as invoices_module
 from app.config import settings
+from app.plans import get_plan
 
 log = logging.getLogger(__name__)
 
-# Daily AI request cap per tenant plan. NOT finalized pricing — deliberately
-# just a dict, not a database column or migration, so it's a one-line change
-# whenever the real plan lineup settles.
-#   - demo: the one shared, read-only "click and look around" account
-#     (app/api/demo_access.py) — enough allowance to actually try
-#     the assistant, not a token amount. Distinct from trial below.
-#   - trial: self-serve 7-day signup (app/api/trial.py) — gets exactly the
-#     Starter cap, same as the plan it's a preview of. Was silently falling
-#     through to DEFAULT_AI_DAILY_CAP (80, Growth's cap) before this entry
-#     existed, which is wrong on purpose only for plan values that are truly
-#     unrecognized, not for a real, named plan we forgot to list.
-#   - starter: every paying customer gets real AI access, just a lower cap
-#     than the higher tiers — not 0.
-#   - growth / business: real paid-tier allowances.
-# Any OTHER plan value not listed falls back to DEFAULT_AI_DAILY_CAP (same
-# as growth) rather than silently 0 — an unrecognized plan should never
-# look like "AI isn't included."
-PLAN_AI_DAILY_CAP: dict[str, int] = {
-    "demo": 50,
-    "trial": 15,
-    "starter": 15,
-    "growth": 80,
-    "business": 120,
-}
-DEFAULT_AI_DAILY_CAP = 80
+# Daily AI request cap per tenant plan lives in app/plans.py (ai_per_day;
+# 0 means AI isn't included, which the checks below turn into a 403). Trial
+# and demo have their own entries there, so a real named plan can no longer
+# fall through to some other plan's cap.
 
 
 def _usage_key(tenant_id: str) -> str:
@@ -65,7 +45,7 @@ def _usage_key(tenant_id: str) -> str:
 
 
 def plan_cap(plan: str) -> int:
-    return PLAN_AI_DAILY_CAP.get(plan, DEFAULT_AI_DAILY_CAP)
+    return get_plan(plan).ai_per_day
 
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 

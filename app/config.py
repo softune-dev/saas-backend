@@ -268,6 +268,10 @@ class Settings(BaseSettings):
     # days of your trial ending or everything is permanently deleted") —
     # keep this in sync with that copy if it ever changes.
     trial_grace_days: int = 7
+
+    # Master switch for the Free plan rollout (see app/plans.py). Off until
+    # the later project that lets tenants actually sit on plan "free".
+    free_plan_enabled: bool = False
     # Which real (plan="demo") tenant's login the public "See a live demo"
     # button mints a token for (app/api/public.py) — a shared, read-only
     # account, decoupled from trial signup entirely. Not a secret: this

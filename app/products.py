@@ -85,6 +85,8 @@ from typing import Any
 
 from fastapi import HTTPException, status
 
+from app.plans import get_plan
+
 MAX_VARIANT_TYPES = 10
 MAX_VALUES_PER_TYPE = 30
 MAX_LABEL_LEN = 40
@@ -98,22 +100,11 @@ _HEX_COLOR = re.compile(r"^#[0-9A-Fa-f]{6}$")
 MAX_COMBINATIONS = 300
 MAX_SKU_LEN = 60
 
-# Per-tenant product cap by plan. Deliberately a plain dict, not a database
-# column — same reasoning as app/ai.py's PLAN_AI_DAILY_CAP: pricing isn't
-# finalized, so this stays a one-line change. Unrecognized plans fall back
-# to DEFAULT_PRODUCT_LIMIT rather than silently unlimited.
-PLAN_PRODUCT_LIMIT: dict[str, int] = {
-    "demo": 50,
-    "trial": 50,  # same as starter — a trial previews the Starter plan exactly
-    "starter": 50,
-    "growth": 200,
-    "business": 500,
-}
-DEFAULT_PRODUCT_LIMIT = 50
+# Per-tenant product cap by plan lives in app/plans.py (None = unlimited).
 
 
-def plan_product_limit(plan: str) -> int:
-    return PLAN_PRODUCT_LIMIT.get(plan, DEFAULT_PRODUCT_LIMIT)
+def plan_product_limit(plan: str) -> int | None:
+    return get_plan(plan).products
 
 
 def ensure_within_product_limit(current_count: int, plan: str) -> None:
@@ -122,7 +113,7 @@ def ensure_within_product_limit(current_count: int, plan: str) -> None:
     check — callers (the manual create endpoint and the AI create-product
     action) each do their own tenant-scoped count via crud.count_scoped."""
     limit = plan_product_limit(plan)
-    if current_count >= limit:
+    if limit is not None and current_count >= limit:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
             f"Product limit reached ({limit} on your current plan). Upgrade to add more products.",

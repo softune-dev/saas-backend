@@ -1,30 +1,137 @@
-"""Plan-gated feature access — payment gateways, couriers, and theme
-switching are "grow into this" features held back on Starter. Trial is
-treated the same as Starter (locked), matching app/products.py's
-PLAN_PRODUCT_LIMIT: a trial previews the Starter plan exactly, so it must
-not preview features Starter itself doesn't have.
+"""The one plan table: every limit, feature and price lives here.
 
-Centralized here, not re-derived per caller, so the actual rule (which
-plans, which providers) lives in exactly one place.
+Before this, product caps, storage, AI, event limits and prices each had
+their own dict in a different module (products, media, ai, ai_tools, events,
+invoices) and they drifted — ai_tools had no "trial" entry, so a trial was
+told 80 AI requests a day instead of 15. Those modules now read from PLANS
+through get_plan(), so changing a number is a one-line edit in one file.
+
+This module imports only the standard library and fastapi, so any other
+module (including app/ai.py's import chain) can use it without a cycle.
+
+Gating rule of thumb: anything a merchant cannot do on their plan is a
+FEATURE here and is refused with ensure_feature(), which raises a structured
+403 the dashboard turns into an upgrade prompt. Numeric limits (products,
+events, storage, AI per day) keep their own plain-string messages.
 """
+
+from dataclasses import dataclass
 
 from fastapi import HTTPException, status
 
-_LOCKED_PLANS = {"starter", "trial"}
+FEATURES: frozenset[str] = frozenset(
+    {
+        "customers", "pos", "dropship", "seo", "fraud", "domain", "ai",
+        "chatgpt", "theme_switch", "gateways", "ecourier", "all_couriers",
+        "full_analytics", "no_badge",
+    }
+)
+
+
+@dataclass(frozen=True)
+class Plan:
+    key: str
+    name: str
+    price_cents: int  # integer cents, CLAUDE.md rule 7
+    products: int | None  # None = unlimited
+    storage_bytes: int  # per site, see app/media.py
+    orders_per_month: int | None  # None = unlimited
+    stores: int
+    ai_per_day: int  # 0 = AI not included
+    events: int
+    features: frozenset[str]
+
+
+_MB = 1024 * 1024
+_GB = 1024 * _MB
+
+# Plans are cumulative: each paid tier is the one below it plus a few more.
+_STARTER_FEATURES = frozenset(
+    {
+        "customers", "pos", "seo", "fraud", "domain", "ai", "chatgpt",
+        "theme_switch", "ecourier", "full_analytics", "no_badge",
+    }
+)
+_GROWTH_FEATURES = _STARTER_FEATURES | {"gateways", "all_couriers", "dropship"}
+
+PLANS: dict[str, Plan] = {
+    p.key: p
+    for p in (
+        Plan("free", "Free", 0, 10, 100 * _MB, 50, 1, 0, 3, frozenset()),
+        Plan("starter", "Starter", 49_900, 50, 500 * _MB, None, 1, 30, 3, _STARTER_FEATURES),
+        Plan("growth", "Growth", 149_900, 500, 2 * _GB, None, 1, 100, 10, _GROWTH_FEATURES),
+        Plan("business", "Business", 399_900, None, 3 * _GB, None, 2, 150, 25, _GROWTH_FEATURES),
+        # A trial previews Starter exactly, so it must not preview a feature
+        # Starter doesn't give: it keeps theme switching locked as it always
+        # did, with Starter's other limits and the old 15 AI requests a day.
+        Plan(
+            "trial", "Trial", 0, 50, 500 * _MB, None, 1, 15, 3,
+            _STARTER_FEATURES - {"theme_switch"},
+        ),
+        # The shared read-only demo account: everything unlocked.
+        Plan("demo", "Demo", 0, 50, 800 * _MB, None, 1, 50, 3, FEATURES),
+    )
+}
+PAID_PLANS: tuple[str, ...] = ("starter", "growth", "business")
+
+
+def get_plan(key: str | None) -> Plan:
+    """An unrecognised or missing plan is treated as the most restricted one.
+    The old per-module dicts fell back to Starter-ish defaults; a typo'd plan
+    value should never hand out paid limits."""
+    return PLANS.get(key or "", PLANS["free"])
+
+
+def _check_feature(feature: str) -> None:
+    if feature not in FEATURES:
+        # A typo'd feature name would otherwise lock (or unlock) everyone
+        # silently, so it fails loudly the first time the code path runs.
+        raise ValueError(f"Unknown plan feature: {feature!r}")
+
+
+def has_feature(key: str, feature: str) -> bool:
+    _check_feature(feature)
+    return feature in get_plan(key).features
+
+
+def needed_plan(feature: str) -> str:
+    """The cheapest paid plan that includes the feature (what to upsell)."""
+    _check_feature(feature)
+    for key in PAID_PLANS:
+        if feature in PLANS[key].features:
+            return key
+    raise ValueError(f"No paid plan includes {feature!r}")
+
+
+def ensure_feature(key: str, feature: str) -> None:
+    if has_feature(key, feature):
+        return
+    needed = needed_plan(feature)
+    raise HTTPException(
+        status.HTTP_403_FORBIDDEN,
+        {
+            "code": "plan_locked",
+            "feature": feature,
+            "needed_plan": needed,
+            "message": f"This is available on the {PLANS[needed].name} plan and above.",
+        },
+    )
+
 
 # Real payment gateways needing a merchant credential/account. Cash on
 # Delivery and Manual (customer pays the merchant's own number, then
 # submits a transaction id/screenshot to verify by hand) need no gateway
-# account and stay free on every plan — only these four are gated.
+# account and stay open on every plan — only these four are gated.
 GATED_PAYMENT_PROVIDERS = {"bkash", "nagad", "sslcommerz", "rocket"}
-
-# Only these two couriers are connectable on Starter/Trial; every other
-# provider (Pathao, RedX, Paperfly, ...) needs an upgrade first.
-STARTER_ALLOWED_COURIERS = {"steadfast", "ecourier"}
 
 
 def ensure_courier_allowed(plan: str, provider: str) -> None:
-    if plan in _LOCKED_PLANS and provider not in STARTER_ALLOWED_COURIERS:
+    # Steadfast is open to everyone, eCourier needs "ecourier", every other
+    # courier (Pathao, RedX, Paperfly, ...) needs "all_couriers".
+    if provider == "steadfast":
+        return
+    feature = "ecourier" if provider == "ecourier" else "all_couriers"
+    if not has_feature(plan, feature):
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
             f"{provider.title()} isn't available on your current plan. "
@@ -33,7 +140,7 @@ def ensure_courier_allowed(plan: str, provider: str) -> None:
 
 
 def ensure_payment_provider_allowed(plan: str, provider: str) -> None:
-    if plan in _LOCKED_PLANS and provider in GATED_PAYMENT_PROVIDERS:
+    if provider in GATED_PAYMENT_PROVIDERS and not has_feature(plan, "gateways"):
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
             f"{provider.title()} isn't available on your current plan. "
@@ -42,7 +149,7 @@ def ensure_payment_provider_allowed(plan: str, provider: str) -> None:
 
 
 def ensure_theme_switch_allowed(plan: str) -> None:
-    if plan in _LOCKED_PLANS:
+    if not has_feature(plan, "theme_switch"):
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
             "Switching themes isn't available on your current plan. "

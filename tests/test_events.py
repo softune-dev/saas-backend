@@ -1,7 +1,7 @@
 """Events — sale/promo campaigns with a real checkout discount."""
 
 from app import recaptcha
-from app.events import PLAN_EVENT_LIMIT, round_discounted_cents
+from app.events import plan_event_limit, round_discounted_cents
 
 
 async def _product(account, site, **kw) -> dict:
@@ -91,7 +91,7 @@ async def test_product_from_another_site_is_rejected(account, site, template_id)
 
 
 async def test_event_plan_limit_is_enforced(account, site):
-    limit = PLAN_EVENT_LIMIT["starter"]  # conftest's account fixture registers plan="starter"
+    limit = plan_event_limit("starter")  # conftest's account fixture registers plan="starter"
     for i in range(limit):
         response = await account.post(
             f"/sites/{site['id']}/events", json={"name": f"Event {i}", "discount_percent": 10}

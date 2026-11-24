@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import cache, crud, invoices as invoices_module, media, risk_score as risk_score_module
 from app.config import settings
+from app.plans import get_plan
 from app.models import (
     Category,
     CourierConnection,
@@ -418,14 +419,6 @@ async def _get_media_stats(db: AsyncSession, tenant_id: uuid.UUID) -> dict:
     }
 
 
-# Mirrors app/ai.py's PLAN_AI_DAILY_CAP — duplicated, not imported, since
-# app/ai.py imports THIS module (ai_tools), so importing back would be
-# circular. Same tradeoff this codebase already makes between app/media.py's
-# and app/ai.py's own separate per-plan dicts — keep in sync if it changes.
-_PLAN_AI_DAILY_CAP: dict[str, int] = {"demo": 50, "starter": 15, "growth": 80, "business": 120}
-_DEFAULT_AI_DAILY_CAP = 80
-
-
 async def _get_billing_status(db: AsyncSession, tenant_id: uuid.UUID) -> dict:
     tenant = (
         await db.execute(select(Tenant).where(Tenant.id == tenant_id))
@@ -433,7 +426,7 @@ async def _get_billing_status(db: AsyncSession, tenant_id: uuid.UUID) -> dict:
     if tenant is None:
         return {"error": "No account found."}
     plan = tenant.plan
-    ai_cap = _PLAN_AI_DAILY_CAP.get(plan, _DEFAULT_AI_DAILY_CAP)
+    ai_cap = get_plan(plan).ai_per_day
 
     # Same cache key format + raw-integer-counter shape as app/ai.py's
     # _usage_key/get_usage (client.incr writes a plain int, not JSON).

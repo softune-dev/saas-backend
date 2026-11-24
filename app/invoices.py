@@ -11,27 +11,16 @@ import html
 
 from app.config import settings
 from app.mailer import BRAND, INK, LINE, MUTED, SURFACE
+from app.plans import PLANS
 
-# Real plan lineup — mirrors dashboard/components/billing/billing-data.ts
-# and landing/components/pricing.tsx exactly (same ids, same BDT prices).
-# There is no payment gateway yet; this is the price an invoice records
-# when the team manually switches a tenant onto a paid plan, not something
-# a merchant self-serves into. Money as integer cents (CLAUDE.md rule 7).
-PLAN_PRICES_CENTS: dict[str, int] = {
-    "trial": 0,
-    "demo": 0,
-    "starter": 49_900,
-    "growth": 149_900,
-    "business": 399_900,
-}
+# Prices and names come from app/plans.py (the one plan table), which mirrors
+# dashboard/components/billing/billing-data.ts and landing/components/
+# pricing.tsx. There is no payment gateway yet; this is the price an invoice
+# records when the team manually switches a tenant onto a paid plan, not
+# something a merchant self-serves into. Money as integer cents (rule 7).
+PLAN_PRICES_CENTS: dict[str, int] = {key: p.price_cents for key, p in PLANS.items()}
 
-PLAN_NAMES: dict[str, str] = {
-    "trial": "Trial",
-    "demo": "Demo",
-    "starter": "Starter",
-    "growth": "Growth",
-    "business": "Business",
-}
+PLAN_NAMES: dict[str, str] = {key: p.name for key, p in PLANS.items()}
 
 
 def _format_money(cents: int, currency: str) -> str:

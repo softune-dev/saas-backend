@@ -14,7 +14,7 @@ never leave residue behind.
 """
 
 import uuid
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -76,11 +76,23 @@ async def client() -> AsyncGenerator[AsyncClient, None]:
 class Account:
     """A registered tenant plus a ready-to-use authorised client."""
 
-    def __init__(self, client: AsyncClient, email: str, tenant_id: str, token: str):
+    def __init__(
+        self,
+        client: AsyncClient,
+        email: str,
+        tenant_id: str,
+        token: str,
+        site_id: str = "",
+        subdomain: str = "",
+    ):
         self.client = client
         self.email = email
         self.tenant_id = tenant_id
         self.token = token
+        # The site created with the account. A free tenant cannot create a
+        # second one, so tests of plan limits reuse this instead.
+        self.site_id = site_id
+        self.subdomain = subdomain
         self.headers = {"Authorization": f"Bearer {token}"}
 
     async def get(self, url: str, **kw):
@@ -96,7 +108,7 @@ class Account:
         return await self.client.delete(url, headers=self.headers, **kw)
 
 
-async def _register(client: AsyncClient) -> Account:
+async def _register(client: AsyncClient, plan: str = "starter") -> Account:
     """Create a brand-new isolated tenant. Random email so parallel runs never clash.
 
     POST /auth/register no longer exists (public self-signup was closed —
@@ -124,14 +136,18 @@ async def _register(client: AsyncClient) -> Account:
             # all of them). Tests that specifically need demo-plan behavior
             # (test_auth.py) create their own tenant inline instead of
             # using this fixture.
-            plan="starter",
+            plan=plan,
             template_key="aurora",
             site_name=f"Test Site {suffix}",
             subdomain=f"test-fixture-{suffix}",
             full_name="Test User",
+            # A trial tenant is stamped with an expiry, as real signup does.
+            trial_days=7 if plan == "trial" else None,
         )
     token = create_access_token(user.id, user.tenant_id, user.role)
-    return Account(client, email, str(user.tenant_id), token)
+    return Account(
+        client, email, str(user.tenant_id), token, str(_site.id), _site.subdomain
+    )
 
 
 async def _cleanup(tenant_ids: list[str]) -> None:
@@ -148,6 +164,24 @@ async def account(client: AsyncClient) -> AsyncGenerator[Account, None]:
     acct = await _register(client)
     yield acct
     await _cleanup([acct.tenant_id])
+
+
+@pytest.fixture
+async def account_factory(
+    client: AsyncClient,
+) -> AsyncGenerator[Callable[..., Awaitable[Account]], None]:
+    """Create tenants on a chosen plan: `await account_factory("growth")`.
+    Every tenant it made is deleted afterwards. Not for "free" until the
+    migration that lets the tenants CHECK constraint accept it."""
+    made: list[str] = []
+
+    async def make(plan: str = "starter") -> Account:
+        acct = await _register(client, plan)
+        made.append(acct.tenant_id)
+        return acct
+
+    yield make
+    await _cleanup(made)
 
 
 @pytest.fixture
