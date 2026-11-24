@@ -10,7 +10,7 @@ import uuid
 from datetime import UTC, date, datetime
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import OperationalError
 
@@ -270,8 +270,10 @@ async def test_deleting_orders_and_the_site_does_not_reset_the_count(account_fac
     assert await _count(Order, acct.tenant_id) == 0
     assert (await _order(acct, product)).status_code == 403
 
-    res = await acct.delete(f"/sites/{acct.site_id}")
-    assert res.status_code == 204, res.text
+    # Straight from the database: Free may not delete its only store over HTTP.
+    async with SessionLocal() as db:
+        await db.execute(delete(Site).where(Site.id == uuid.UUID(acct.site_id)))
+        await db.commit()
     assert (await _counter(acct.tenant_id))[0] == 50
     async with SessionLocal() as db:
         tenant = await order_limit.load_tenant(db, uuid.UUID(acct.tenant_id))
@@ -314,7 +316,7 @@ async def test_an_order_that_fails_after_the_claim_does_not_count(account_factor
 
 
 async def test_dashboard_orders_do_not_count(account_factory):
-    acct = await account_factory("free")
+    acct = await account_factory("starter")  # Free has no Store Sale
     product = await _open_store(acct)
     res = await acct.post(
         f"/sites/{acct.site_id}/orders",
