@@ -33,7 +33,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import cache, crud, notifications, plan_gate, plans, queue
+from app import activity, cache, crud, notifications, plan_gate, plans, queue
 from app.config import settings
 from app.db import SessionLocal
 from app.models import Site, TenantOrderMonth
@@ -205,9 +205,8 @@ async def claim_for_order(db: AsyncSession, tenant: TenantPlan, site: Site) -> C
 async def after_order(claimed: Claim) -> None:
     """Runs as a background task once the order is committed and the shopper
     has their answer. Nothing here can fail or slow an order."""
-    # ACTIVITY HOOK (free plan task 5): a received storefront order also
-    # refreshes tenants.last_active_at. Call app/activity.py's touch for
-    # claimed.tenant.id here; it runs for every plan and after the commit.
+    # A received order means the store is in use. touch() never raises.
+    await activity.touch(claimed.tenant.id)
     limit = plans.get_plan(claimed.tenant.plan).orders_per_month
     if limit is None:
         await _count_unlimited(claimed.tenant)
