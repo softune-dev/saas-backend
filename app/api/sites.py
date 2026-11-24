@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import cache, crud, domains, notifications, plans, queue, vercel
+from app import cache, crud, domains, notifications, plan_sites, plans, queue, vercel
 from app.db import get_db
 from app.models import Site, SitePage, Template, Tenant
 from app.config import settings
@@ -19,7 +19,6 @@ from app.schemas import (
     SiteCreate,
     SiteOut,
     SiteSwitchTheme,
-    SiteUpdate,
     TemplateOut,
 )
 from app.security import CurrentUser
@@ -82,6 +81,7 @@ async def create_site(payload: SiteCreate, user: CurrentUser, db: DB) -> Site:
     if template is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Template not found or inactive")
 
+    await plan_sites.ensure_store_room(db, user.tenant_id, payload.subdomain)
     site = await crud.provision_site(
         db,
         tenant_id=user.tenant_id,
@@ -140,7 +140,7 @@ async def get_provision_status(
 
 @router.patch("/sites/{site_id}", response_model=SiteOut)
 async def update_site(
-    site_id: uuid.UUID, payload: SiteUpdate, user: CurrentUser, db: DB
+    site_id: uuid.UUID, payload: plan_sites.AllowedSiteUpdate, user: CurrentUser, db: DB
 ) -> Site:
     site = await crud.get_scoped(db, Site, user.tenant_id, site_id)
     old_domain = site.custom_domain
@@ -245,6 +245,9 @@ async def switch_theme(
     """
     site = await crud.get_scoped(db, Site, user.tenant_id, site_id)
     tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
+    if tenant.plan == "free":
+        # The structured lock, for the upgrade popup. Trial keeps its message.
+        plans.ensure_feature(tenant.plan, "theme_switch")
     plans.ensure_theme_switch_allowed(tenant.plan)
     old_template = site.template
 
@@ -389,6 +392,7 @@ async def complete_onboarding(site_id: uuid.UUID, user: CurrentUser, db: DB) -> 
 @router.delete("/sites/{site_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_site(site_id: uuid.UUID, user: CurrentUser, db: DB) -> None:
     site = await crud.get_scoped(db, Site, user.tenant_id, site_id)
+    await plan_sites.ensure_may_delete_store(db, user.tenant_id)
     subdomain, custom = site.subdomain, site.custom_domain
     # Pages, products, categories and orders all go with it via ON DELETE CASCADE
     # in the schema — one statement, no orphans left behind.
