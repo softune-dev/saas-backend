@@ -23,7 +23,7 @@ from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import ai_plan, cache, crud, invoices as invoices_module, media, risk_score as risk_score_module
+from app import ai_plan, cache, plan_gate, plans, crud, invoices as invoices_module, media, risk_score as risk_score_module
 from app.config import settings
 from app.plans import get_plan
 from app.models import (
@@ -323,7 +323,7 @@ async def _get_site_info(db: AsyncSession, tenant_id: uuid.UUID) -> dict:
     about = site.about or {}
     currency = await _tenant_currency(db, tenant_id)
 
-    return {
+    info = {
         "site_name": site.name,
         "site_status": site.status,
         "subdomain": f"{site.subdomain}.{settings.site_base_domain}",
@@ -369,6 +369,18 @@ async def _get_site_info(db: AsyncSession, tenant_id: uuid.UUID) -> dict:
         "privacy_policy_published": bool(legal.get("privacy", {}).get("published")),
         "terms_published": bool(legal.get("terms", {}).get("published")),
     }
+    # A stream or ChatGPT call that began before a downgrade must not read what
+    # the plan no longer includes: drop those keys instead of blanking them.
+    plan = await plan_gate.tenant_plan(db, tenant_id)
+    if not plans.has_feature(plan, "seo"):
+        for key in [k for k in info if k.startswith(("seo_", "og_")) or k in (
+            "meta_description", "keywords", "favicon_set", "indexing_hidden", "sitemap_enabled",
+            "google_analytics_connected", "search_console_connected", "facebook_pixel_connected",
+        )]:
+            info.pop(key)
+    if not plans.has_feature(plan, "domain"):
+        info.pop("custom_domain")
+    return info
 
 
 async def _get_media_stats(db: AsyncSession, tenant_id: uuid.UUID) -> dict:

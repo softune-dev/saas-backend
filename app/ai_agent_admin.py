@@ -21,7 +21,7 @@ from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import ai_actions, ai_tools, cache, crud, domains, edge_config, queue, vercel
+from app import ai_actions, ai_tools, cache, crud, domains, edge_config, plans, queue, vercel
 from app.ai_agent_settings import _result, patch_column
 from app.ai_agent_tools import _clip, _forget_tool_cache, _record, _site
 from app.models import (
@@ -139,8 +139,13 @@ async def get_store_admin_info(
 ) -> dict:
     site = await _site(db, tenant_id)
     if section == "settings":
-        return {"seo": site.seo or {}, "contact": site.business or {}, "about": site.about or {},
-                "shipping": site.shipping or {}, "courier_rules": site.courier_rules or {}}
+        plan = (await _tenant(db, tenant_id)).plan
+        out = {"seo": site.seo or {}, "contact": site.business or {}, "about": site.about or {},
+               "shipping": site.shipping or {}, "courier_rules": site.courier_rules or {}}
+        # Keys the plan lacks are dropped (a stream begun before a downgrade).
+        if not plans.has_feature(plan, "seo"):
+            out.pop("seo")
+        return out
     if section == "legal":
         return {"legal": site.legal or {}}
     if section == "domain":

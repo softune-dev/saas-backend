@@ -106,13 +106,14 @@ class ChatOut(BaseModel):
 @chat_router.post("", response_model=ChatOut)
 async def chat(payload: ChatIn, user: CurrentUser, db: DB) -> ChatOut:
     plan = await _tenant_plan(db, user.tenant_id)
-    # The plan the daily counter sees. Free has no AI (cap 0), except this
-    # one sign-up door; see ai_plan.ONBOARDING_CHAT_PLAN for how it is bounded.
-    cap_plan = plan
+    # Free has no AI. The one sign-up door is text-only chat while onboarding is
+    # unfinished and the store is new (ai_plan.onboarding_chat_open), bounded by
+    # ai._check_onboarding_chat.
+    door = False
     if not plans.has_feature(plan, "ai"):
-        if not await ai_plan.onboarding_open(db, user.tenant_id):
+        if not await ai_plan.onboarding_chat_open(db, user.tenant_id):
             plans.ensure_feature(plan, "ai")
-        cap_plan = ai_plan.ONBOARDING_CHAT_PLAN
+        door = True
     history = [t.model_dump() for t in payload.history]
     async with ai_log.track(
         "chat",
@@ -122,7 +123,7 @@ async def chat(payload: ChatIn, user: CurrentUser, db: DB) -> ChatOut:
         meta={"plan": plan},
     ) as tracker:
         reply, tools_used, pending_action = await ai.chat_reply(
-            payload.message, history, str(user.tenant_id), db, cap_plan
+            payload.message, history, str(user.tenant_id), db, plan, text_only=door
         )
         tracker.output = {
             "reply": reply,

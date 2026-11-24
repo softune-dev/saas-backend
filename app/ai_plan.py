@@ -105,10 +105,10 @@ async def tenant_has_feature(db: AsyncSession, tenant_id: uuid.UUID, feature: st
 
 
 # Sign-up chat: a Free store has no AI, but the setup wizard's products step
-# asks /ai/chat for product text until onboarding is finished. That one door
-# is bounded by reusing the trial's daily message counter (15 a day, then the
-# normal 429), so it can't become a free assistant.
-ONBOARDING_CHAT_PLAN = "trial"
+# asks /ai/chat for product text. That one door is text-only (no tools), capped
+# per day (ai._check_onboarding_chat) and shut once onboarding is done or the
+# store is older than this, so a downgraded or abandoned store can't keep it.
+ONBOARDING_CHAT_DAYS = 7
 
 
 async def onboarding_open(db: AsyncSession, tenant_id: uuid.UUID) -> bool:
@@ -127,3 +127,16 @@ async def onboarding_open(db: AsyncSession, tenant_id: uuid.UUID) -> bool:
         )
     ).first()
     return row is not None and row[0] is None
+
+
+async def onboarding_chat_open(db: AsyncSession, tenant_id: uuid.UUID) -> bool:
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import select
+
+    from app.models import Tenant
+
+    if not await onboarding_open(db, tenant_id):
+        return False
+    created = (await db.execute(select(Tenant.created_at).where(Tenant.id == tenant_id))).scalar_one_or_none()
+    return created is not None and datetime.now(UTC) - created <= timedelta(days=ONBOARDING_CHAT_DAYS)
