@@ -62,16 +62,74 @@ def plan_storage_limit(plan: str) -> int:
     return get_plan(plan).storage_bytes
 
 
-def site_storage_used_bytes(subdomain: str) -> int:
-    """Live total across all four upload categories for one site's
-    Cloudinary folder — same per-category listing list_all_media already
-    does, exposed standalone so the upload path can check it BEFORE
-    accepting a file, not just report it after the fact."""
-    return sum(
-        (r.get("bytes") or 0)
-        for category in sorted(VALID_CATEGORIES)
-        for r in list_images(subdomain, category)
-    )
+# The full count is one prefix listing per resource type, 500 files a page.
+# Cloudinary's Admin API is rate limited (hourly), so the walk is capped: 10
+# pages x 500 = 5000 files per type, far more than 100 MB of real uploads.
+FULL_SCAN_PAGE_SIZE = 500
+FULL_SCAN_MAX_PAGES = 10
+
+
+def site_storage_used_bytes(subdomain: str, *, full: bool = False) -> int:
+    """Live total for one site's Cloudinary folder, so the upload path can
+    check it BEFORE accepting a file, not just report it after the fact.
+
+    full=False is the long-standing count, kept byte-for-byte for paying
+    plans: images only, the first 100 per category (a paying plan's ceiling is
+    far above what that undercounts, and the extra calls are not worth it).
+
+    full=True is for the Free plan, whose 100 MB is small enough that the
+    shortcuts matter: it counts videos too and follows next_cursor. It lists
+    the whole site prefix once per resource type instead of once per category.
+    Like the short count it leaves out "_system" (our own screenshots).
+
+    Both are blocking SDK calls: callers on the event loop use
+    run_in_threadpool. A Cloudinary outage raises here and the upload is
+    refused (the caller 500s), exactly as it does for the short count.
+    """
+    if not full:
+        return sum(
+            (r.get("bytes") or 0)
+            for category in sorted(VALID_CATEGORIES)
+            for r in list_images(subdomain, category)
+        )
+
+    _ensure_configured()
+    root = settings.cloudinary_root_folder.strip("/")
+    prefix = f"{root}/{subdomain}/"
+    system_prefix = f"{prefix}_system/"
+    total = 0
+    for resource_type in ("image", "video"):
+        cursor = None
+        for _ in range(FULL_SCAN_MAX_PAGES):
+            kwargs: dict[str, Any] = {
+                "type": "upload",
+                "prefix": prefix,
+                "resource_type": resource_type,
+                "max_results": FULL_SCAN_PAGE_SIZE,
+            }
+            if cursor:
+                kwargs["next_cursor"] = cursor
+            result = cloudinary.api.resources(**kwargs)
+            total += sum(
+                (r.get("bytes") or 0)
+                for r in result.get("resources", [])
+                if not r.get("public_id", "").startswith(system_prefix)
+            )
+            cursor = result.get("next_cursor")
+            if not cursor:
+                break
+        else:
+            # Thousands of tiny files: the rest is uncounted, so refuse rather
+            # than let an uncounted remainder become unlimited storage.
+            log.warning("storage count for %s stopped at %d pages", subdomain, FULL_SCAN_MAX_PAGES)
+            total = max(total, get_plan("free").storage_bytes)
+    return total
+
+
+def storage_used_for_plan(plan: str, subdomain: str) -> int:
+    """The count each upload path should check against the plan's limit: the
+    thorough one for Free, today's for everyone else."""
+    return site_storage_used_bytes(subdomain, full=get_plan(plan).key == "free")
 
 
 _configured = False
