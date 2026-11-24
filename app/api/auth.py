@@ -57,6 +57,8 @@ from app.security import (
 _LOGIN_OTP_TTL_MINUTES = 10
 _LOGIN_OTP_MAX_ATTEMPTS = 5
 _TRUSTED_DEVICE_DAYS = 30
+# How stale users.last_login_at may get before a token refresh rewrites it.
+_LOGIN_STAMP_EVERY = timedelta(hours=6)
 
 # Local instance (not security.py's private _bearer) so /auth/logout can read
 # the bearer header without an unauthenticated request 401ing before the
@@ -394,14 +396,21 @@ async def refresh(payload: RefreshIn, db: DB) -> TokenOut:
     # A session kept alive for weeks never passes through /login again, so
     # without this "last login" goes stale for exactly the people who use the
     # dashboard most. Not activity (app/activity.py): an idle tab refreshes by
-    # itself. Best effort, after the tokens are built: the dashboard logs a
-    # person out when a refresh fails, and a timestamp is not worth that.
-    try:
-        user.last_login_at = datetime.now(UTC)
-        await db.commit()
-    except Exception:  # noqa: BLE001
-        log.warning("couldn't record the refresh of user %s", user_id, exc_info=True)
-        await db.rollback()
+    # itself. Every few hours is precise enough for "last login" and spares the
+    # users row a write every 30 minutes per open tab. Best effort, after the
+    # tokens are built: the dashboard logs a person out when a refresh fails,
+    # and a timestamp is not worth that.
+    now = datetime.now(UTC)
+    if user.last_login_at is None or now - user.last_login_at >= _LOGIN_STAMP_EVERY:
+        try:
+            user.last_login_at = now
+            await db.commit()
+        except Exception:  # noqa: BLE001
+            log.warning("couldn't record the refresh of user %s", user_id, exc_info=True)
+            try:
+                await db.rollback()
+            except Exception:  # noqa: BLE001 - a dead connection; get_db closes it
+                pass
     return tokens
 
 

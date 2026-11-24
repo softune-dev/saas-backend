@@ -109,10 +109,11 @@ def _remember(tenant_id: uuid.UUID) -> None:
 
 
 async def _write(tenant_id: uuid.UUID) -> None:
-    async with SessionLocal() as db:
-        # Autocommit: one statement needs no BEGIN/COMMIT, which saves two
-        # round trips and never leaves a transaction open if we are cancelled.
-        await db.connection(execution_options={"isolation_level": "AUTOCOMMIT"})
+    # An ordinary short transaction, not autocommit: on the port-6543
+    # transaction pooler a statement outside a transaction can have its prepare
+    # and execute land on different backends (app/db.py). If we are cancelled
+    # mid-way, closing the session rolls the transaction back.
+    async with SessionLocal() as db, db.begin():
         await db.execute(touch_stmt(tenant_id))
 
 

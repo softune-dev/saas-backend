@@ -335,6 +335,25 @@ async def test_token_refresh_records_a_login_but_not_activity(account):
     assert await _last_active(account) == before
 
 
+@pytest.mark.parametrize("age, rewritten", [(timedelta(hours=1), False), (timedelta(hours=7), True)])
+async def test_refresh_rewrites_last_login_only_when_hours_old(account, age, rewritten):
+    owner = await _owner(account)
+    async with SessionLocal() as db:
+        await db.execute(update(User).where(User.id == owner.id).values(last_login_at=func.now() - age))
+        await db.commit()
+    before = (await _owner(account)).last_login_at
+    res = await account.client.post(
+        "/auth/refresh",
+        json={"refresh_token": create_refresh_token(owner.id, owner.tenant_id, owner.role)},
+    )
+    assert res.status_code == 200, res.text
+    after = (await _owner(account)).last_login_at
+    if rewritten:
+        assert after > before and _is_recent(after)
+    else:
+        assert after == before
+
+
 async def test_finishing_signup_records_a_login(client, monkeypatch):
     from app import crud
     from app.api import trial
