@@ -1254,6 +1254,7 @@ async def sweep_overdue_plans() -> None:
                 invoices_module.PLAN_NAMES.get(tenant.plan, tenant.plan.title()),
                 amount_taka,
                 months=months,
+                deletion_days=PLAN_DELETION_GRACE_DAYS,
             )
             sent = await mailer.send_email(owner.email, subject, html_body, text_body)
             if not sent:

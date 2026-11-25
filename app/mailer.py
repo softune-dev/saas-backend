@@ -803,6 +803,7 @@ def plan_payment_due_email(
 
 def plan_access_paused_email(
     recipient_name: str | None, plan_name: str, amount_taka: int, months: int = 1,
+    deletion_days: int = 30,
 ) -> tuple[str, str, str]:
     """Sent once, the moment app/worker.py's sweep_overdue_plans actually
     flips Tenant.status to "payment_overdue" (grace_days after the due
@@ -817,6 +818,11 @@ def plan_access_paused_email(
     greeting_text = f"Hi {recipient_name}," if recipient_name else "Hi,"
     subject = f"Access paused — your {plan_name} plan"
     billing_url = f"{DASHBOARD}/settings/billing"
+    # Must match worker.PLAN_DELETION_GRACE_DAYS, like plan_payment_due_email.
+    kept = (
+        "Your store, products, orders and settings are kept as you left them. An account "
+        f"that stays unpaid for {deletion_days} days from now is deleted. We email you first."
+    )
 
     body_html = f"""\
 <tr>
@@ -825,8 +831,7 @@ def plan_access_paused_email(
     <h1 style="margin:0 0 10px 0;font-size:22px;line-height:1.3;font-weight:400;color:{INK};">Dashboard access is paused</h1>
     <p style="margin:0 0 16px 0;font-size:15px;line-height:1.55;color:{MUTED};">
       Your {html.escape(plan_name)} plan (৳{amount_taka:,}{_per(months)}) is still unpaid, so login is
-      paused for now. Nothing is deleted or at risk — your store, products, orders, and
-      every setting are exactly as you left them, waiting for you.
+      paused for now. {kept}
     </p>
     <p style="margin:0 0 24px 0;font-size:15px;line-height:1.55;color:{MUTED};">
       {_renewal_contact_line()} We'll restore access as soon as it's confirmed —
@@ -836,12 +841,11 @@ def plan_access_paused_email(
   </td>
 </tr>
 """
-    html_body = _shell(f"{plan_name} access paused — your data is safe", body_html)
+    html_body = _shell(f"{plan_name} access paused", body_html)
     text_body = (
         f"{greeting_text}\n\n"
         f"Your {plan_name} plan (৳{amount_taka:,}{_per(months)}) is still unpaid, so login is paused "
-        "for now. Nothing is deleted or at risk — your store, products, orders, and every "
-        "setting are exactly as you left them, waiting for you.\n\n"
+        f"for now. {kept}\n\n"
         f"{_renewal_contact_line()} We'll restore access as soon as it's confirmed — "
         "usually within a few hours.\n\n"
         f"Billing: {billing_url}\n\n"

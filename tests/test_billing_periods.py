@@ -104,6 +104,9 @@ def test_emails_quote_the_period():
     _s, _h, text = mailer.plan_payment_due_email("A", "Starter", 499, grace_days=7)
     assert "access will pause in 7 days" in text
     assert "unpaid for 30 days after that is deleted" in text and "ever deleted" not in text
+    _s, html_body, text = mailer.plan_access_paused_email("A", "Starter", 499)
+    for body in (html_body, text):
+        assert "unpaid for 30 days from now is deleted" in body and "at risk" not in body
 
 
 # ---------------------------------------------------------------------------
