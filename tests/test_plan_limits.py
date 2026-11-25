@@ -414,3 +414,38 @@ async def test_ai_setup_image_works_for_a_new_free_store(account_factory, monkey
         tenant = (await db.execute(select(Tenant).where(Tenant.id == uuid.UUID(free.tenant_id)))).scalar_one()
         urls = [await setup.store_image(site, tenant, b"x" * (MB // 2), "hero") for _ in range(5)]
     assert len(urls) == 5
+
+
+async def test_free_gallery_lists_videos_and_can_delete_them(account_factory, fake_admin, monkeypatch):
+    free = await account_factory("free")
+    root = media.settings.cloudinary_root_folder.strip("/")
+    base = f"{root}/{free.subdomain}"
+    fake_admin({
+        ("image", None): {"resources": [_res(f"{base}/_system/s", 9), _res(f"{base}/hero/a", 10)], "next_cursor": "c"},
+        ("image", "c"): {"resources": [_res(f"{base}/products/b", 20)]},
+        ("video", None): {"resources": [_res(f"{base}/products/v", 1000)]},
+    })
+    body = (await free.get(f"/sites/{free.site_id}/media/all")).json()
+    assert body["total_bytes"] == 1030 and body["total_count"] == 3
+    assert [i["public_id"] for i in body["images"] if i["kind"] == "video"] == [f"{base}/products/v"]
+    assert body["by_category"]["products"] == {"count": 2, "bytes": 1020}
+
+    destroyed = []
+    monkeypatch.setattr(
+        media.cloudinary.uploader, "destroy", lambda pid, **kw: destroyed.append((pid, kw.get("resource_type", "image")))
+    )
+    url = f"/sites/{free.site_id}/media/{base}/products/v"
+    assert (await free.delete(f"{url}?kind=video")).status_code == 204
+    assert (await free.delete(f"/sites/{free.site_id}/media/{base}/hero/a")).status_code == 204
+    assert destroyed == [(f"{base}/products/v", "video"), (f"{base}/hero/a", "image")]
+    # Another store's file stays a 404, whatever the kind.
+    assert (await free.delete(f"/sites/{free.site_id}/media/{root}/other/products/v?kind=video")).status_code == 404
+
+
+async def test_paid_gallery_is_unchanged(account_factory, fake_admin):
+    starter = await account_factory("starter")
+    fake = fake_admin({("image", None): {"resources": [_res("a", 5)]}})
+    body = (await starter.get(f"/sites/{starter.site_id}/media/all")).json()
+    assert body["total_count"] == len(media.VALID_CATEGORIES)
+    assert all("resource_type" not in c for c in fake.calls)
+    assert all("kind" not in i for i in body["images"])

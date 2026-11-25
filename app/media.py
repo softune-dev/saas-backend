@@ -312,6 +312,51 @@ def list_images(subdomain: str, category: str) -> list[dict]:
     ]
 
 
+def list_everything(subdomain: str) -> list[dict]:
+    """Every image AND video of a site, without list_images' 100 per category.
+
+    For the Free gallery: what counts toward its 100 MB must be visible there,
+    or a merchant who is full has nothing to delete. Same scan and page cap as
+    site_storage_used_bytes(full=True), and the same "_system" left out.
+    """
+    _ensure_configured()
+    root = settings.cloudinary_root_folder.strip("/")
+    prefix = f"{root}/{subdomain}/"
+    out: list[dict] = []
+    for resource_type in ("image", "video"):
+        cursor = None
+        for _ in range(FULL_SCAN_MAX_PAGES):
+            kwargs: dict[str, Any] = {
+                "type": "upload",
+                "prefix": prefix,
+                "resource_type": resource_type,
+                "max_results": FULL_SCAN_PAGE_SIZE,
+            }
+            if cursor:
+                kwargs["next_cursor"] = cursor
+            result = cloudinary.api.resources(**kwargs)
+            for r in result.get("resources", []):
+                category = r["public_id"][len(prefix) :].split("/", 1)[0]
+                if category == "_system":
+                    continue
+                out.append(
+                    {
+                        "url": r["secure_url"],
+                        "public_id": r["public_id"],
+                        "created_at": r.get("created_at"),
+                        "bytes": r.get("bytes"),
+                        "width": r.get("width"),
+                        "height": r.get("height"),
+                        "kind": resource_type,
+                        "category": category if category in VALID_CATEGORIES else "other",
+                    }
+                )
+            cursor = result.get("next_cursor")
+            if not cursor:
+                break
+    return out
+
+
 def owns(public_id: str, subdomain: str) -> bool:
     """True if `public_id` lives inside this site's own folder tree.
 
@@ -326,6 +371,14 @@ def owns(public_id: str, subdomain: str) -> bool:
 def delete_image(public_id: str) -> None:
     _ensure_configured()
     cloudinary.uploader.destroy(public_id)
+
+
+def delete_video(public_id: str) -> None:
+    """Cloudinary keeps images and videos apart: destroy() without a resource
+    type looks for an image and silently finds nothing. Only called for an
+    explicit delete in the gallery, never by the automatic cleanups."""
+    _ensure_configured()
+    cloudinary.uploader.destroy(public_id, resource_type="video")
 
 
 # Matches ".../upload/v1712345678/{public_id}.jpg" (also handles the
