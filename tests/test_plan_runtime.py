@@ -7,6 +7,7 @@ domains.pending_stmt, filtered to the test's tenants. Vercel, Meta, the cache
 and the queue are faked.
 """
 
+import dataclasses
 import uuid
 from datetime import UTC, datetime
 
@@ -14,6 +15,7 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import func, select
 
+from app import plans
 from app import audit, billing_actions, cache, domains, marketing, queue, vercel, worker
 from app import courier_crypto
 from app.api import superadmin
@@ -127,7 +129,7 @@ async def test_starter_config_is_unchanged(account_factory):
     ]
 
 
-async def test_free_config_hides_tracking_and_gateways_but_keeps_the_row(account_factory):
+async def test_free_config_hides_tracking_but_offers_every_payment_method(account_factory):
     acct = await account_factory("free")
     await _seed(acct)
     cfg = await _config(acct)
@@ -138,7 +140,7 @@ async def test_free_config_hides_tracking_and_gateways_but_keeps_the_row(account
     assert seo["keywords"] == SEO["keywords"]
     assert seo["google_search_console"] == SEO["google_search_console"]
     assert seo["favicon"] == SEO["favicon"]
-    assert sorted(m["provider"] for m in cfg["site"]["payment_methods"]) == ["cod", "manual"]
+    assert sorted(m["provider"] for m in cfg["site"]["payment_methods"]) == ["bkash", "cod", "manual", "nagad"]
 
     async with SessionLocal() as db:
         stored = (await db.get(Site, uuid.UUID(acct.site_id))).seo
@@ -179,21 +181,32 @@ async def _order(acct, product_id, **extra):
     )
 
 
-async def test_free_checkout_and_gateway_payment(account_factory):
+async def test_free_checkout_accepts_a_gateway(account_factory):
     acct = await account_factory("free")
     await _seed(acct)
     product = await _product(acct)
 
-    refused = await _order(acct, product, payment_method="bkash")
-    assert refused.status_code == 400
-    assert (await _order(acct, product, payment_method="sslcommerz")).status_code == 400
+    placed = await _order(acct, product, payment_method="bkash")
+    assert placed.status_code == 201, placed.text
 
+
+def _without_gateways(monkeypatch):
+    """Free as it would be if gateways were ever made paid-only again."""
+    monkeypatch.setitem(plans.PLANS, "free", dataclasses.replace(plans.PLANS["free"], features=frozenset()))
+
+
+async def test_a_plan_without_gateways_is_refused_at_checkout_and_at_payment(account_factory, monkeypatch):
+    """All the gates still follow the one plan feature."""
+    acct = await account_factory("free")
+    await _seed(acct)
+    product = await _product(acct)
+    _without_gateways(monkeypatch)
+
+    assert (await _order(acct, product, payment_method="bkash")).status_code == 400
     placed = await _order(acct, product, payment_method="cod")
     assert placed.status_code == 201, placed.text
-    number = placed.json()["order_number"]
-
-    # The connection exists and is "connected", yet Free cannot start a gateway session.
-    res = await acct.client.post(f"/public/site/{acct.subdomain}/orders/{number}/pay/bkash")
+    # The connection exists and is "connected", yet no gateway session may start.
+    res = await acct.client.post(f"/public/site/{acct.subdomain}/orders/{placed.json()['order_number']}/pay/bkash")
     assert res.status_code == 400
 
 
@@ -289,13 +302,19 @@ async def test_pending_domain_sweep_skips_free_tenants(account_factory):
     assert still.pending_custom_domain, "the request stays pending on Free"
 
 
-async def test_assistant_does_not_offer_hidden_gateways(account_factory):
+async def test_assistant_offers_exactly_what_checkout_offers(account_factory, monkeypatch):
     acct = await account_factory("free")
     await _seed(acct)
-    async with SessionLocal() as db:
-        site = await db.get(Site, uuid.UUID(acct.site_id))
-        data = await assistant_service._site_data(db, site, AssistantSettings())
-    assert sorted(p["provider"] for p in data["payment_methods"]) == ["cod", "manual"]
+
+    async def offered() -> list[str]:
+        async with SessionLocal() as db:
+            site = await db.get(Site, uuid.UUID(acct.site_id))
+            data = await assistant_service._site_data(db, site, AssistantSettings())
+        return sorted(p["provider"] for p in data["payment_methods"])
+
+    assert await offered() == ["bkash", "cod", "manual", "nagad"]
+    _without_gateways(monkeypatch)
+    assert await offered() == ["cod", "manual"]
 
 
 # ---------------------------------------------------------------------------

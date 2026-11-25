@@ -267,13 +267,14 @@ async def get_site_config(host: str, db: DB) -> dict:
     # What the plan changes on the storefront: ordering and the badge.
     plan_flags, ttl = await order_limit.storefront_flags(db, site.tenant_id)
 
-    # Free shows no tracking and no payment gateways. Hidden here, in the
-    # PUBLIC copy only: the stored row keeps the merchant's ids and connections
-    # so they come back the moment the plan does. A plan change drops this
-    # cache (billing_actions.refresh_storefronts). Paid plans are untouched.
+    # Free shows no tracking. Hidden here, in the PUBLIC copy only: the stored
+    # row keeps the merchant's ids so they come back the moment the plan does. A
+    # plan change drops this cache (billing_actions.refresh_storefronts). A plan
+    # without gateways would hide those the same way; every plan has them now.
     seo = site.seo
     if await _on_free_plan(db, site.tenant_id):
         seo = {**seo, **{key: "" for key in _TRACKING_KEYS}}
+    if not plans.has_feature(await plan_gate.tenant_plan(db, site.tenant_id), "gateways"):
         payment_methods = [
             m for m in payment_methods if m["provider"] not in plans.GATED_PAYMENT_PROVIDERS
         ]
@@ -969,7 +970,7 @@ async def create_public_order(
     # Live from the database, like the config's hidden gateways: a client cannot
     # pick a method the storefront never offered (no extra query, plan is here).
     if (
-        plans.get_plan(tenant.plan).key == "free"
+        not plans.has_feature(tenant.plan, "gateways")
         and payload.payment_method not in _FREE_PAYMENT_METHODS
     ):
         raise HTTPException(
@@ -1462,7 +1463,7 @@ async def init_gateway_payment(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unknown or unsupported gateway '{provider}'")
 
     site, order = await _find_order_by_number(host, order_number, db)
-    if await _on_free_plan(db, site.tenant_id):
+    if not plans.has_feature(await plan_gate.tenant_plan(db, site.tenant_id), "gateways"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{provider} isn't set up for this store.")
     if order.status != "pending":
         raise HTTPException(status.HTTP_409_CONFLICT, "This order has already been paid or cancelled.")

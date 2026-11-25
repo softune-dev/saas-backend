@@ -64,9 +64,9 @@ async def _site_data(db: AsyncSession, site: Site, settings: AssistantSettings) 
         )
     ).scalars().all()
 
-    # The storefront hides gateways on Free (api/public.py), so the assistant
-    # must not offer them either. Only the display list changes.
-    if plans.get_plan(await plan_gate.tenant_plan(db, site.tenant_id)).key == "free":
+    # The assistant must not offer a gateway the storefront hides (api/public.py).
+    # Only the display list changes.
+    if not plans.has_feature(await plan_gate.tenant_plan(db, site.tenant_id), "gateways"):
         payments = [p for p in payments if p.provider not in plans.GATED_PAYMENT_PROVIDERS]
 
     return {

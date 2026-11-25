@@ -580,6 +580,9 @@ NOT know.
   uploaded files are removed. Softune keeps the owner's contact details and the
   store setup (settings, pages, categories, products); the merchant can ask
   support@softunebd.com to erase that too.
+- Every plan, including Free, has the same payment methods: Cash on Delivery,
+  manual wallet payments, Softune Pay, and bKash, Nagad and SSLCommerz with the
+  merchant's own accounts.
 - There is no free trial.
 - Paid plans, total price per period: {prices}.
 - A paid plan that is not renewed moves to Free: extra data is kept and locked,
