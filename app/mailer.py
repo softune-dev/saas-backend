@@ -899,6 +899,64 @@ def plan_deletion_warning_email(
     return subject, html_body, text_body
 
 
+def free_inactivity_warning_email(
+    recipient_name: str | None, *, number: int, idle_days: int, delete_on: str
+) -> tuple[str, str, str]:
+    """One of the three warnings before an unused Free account is deleted
+    (app/inactivity.py). Says plainly what happens, when, and that logging in
+    once is enough."""
+    greeting = f"Hi {html.escape(recipient_name)}," if recipient_name else "Hi,"
+    greeting_text = f"Hi {recipient_name}," if recipient_name else "Hi,"
+    final = number == 3
+    subject = (
+        f"Last warning: your free store will be deleted on {delete_on}"
+        if final
+        else f"Log in to keep your free store (deleted on {delete_on})"
+    )
+    heading = "Your free store is about to be deleted" if final else "Your free store has been quiet"
+    what = (
+        f"Nothing has happened in your store for {idle_days} days. If it stays unused, your store, "
+        f"products, orders and uploaded files will be permanently deleted on {delete_on}. This cannot be undone."
+    )
+    kept = "We keep your account details and your store setup, so you can start again later."
+    keep = "To keep it, just log in to your dashboard before then. That is all it takes."
+
+    body_html = f"""\
+<tr>
+  <td style="padding:28px 36px 8px 36px;">
+    <p style="margin:0 0 8px 0;font-size:14px;color:{INK};">{greeting}</p>
+    <h1 style="margin:0 0 10px 0;font-size:22px;line-height:1.3;font-weight:400;color:{INK};">{heading}</h1>
+    <p style="margin:0 0 16px 0;font-size:15px;line-height:1.55;color:{MUTED};">{what}</p>
+    <p style="margin:0 0 24px 0;font-size:15px;line-height:1.55;color:{INK};">{keep}</p>
+    {_btn(DASHBOARD, "Log in and keep my store")}
+    <p style="margin:20px 0 0 0;font-size:13px;line-height:1.5;color:{MUTED};">{kept}</p>
+    <p style="margin:20px 0 0 0;font-size:13px;line-height:1.5;color:{MUTED};">
+      The Free plan is free as long as you're active.
+    </p>
+  </td>
+</tr>
+"""
+    html_body = _shell(f"Log in before {delete_on} to keep your store", body_html)
+    text_body = (
+        f"{greeting_text}\n\n{what}\n\n{keep}\n\n{DASHBOARD}\n\n{kept}\n\n"
+        "The Free plan is free as long as you're active.\n\n"
+        "Softune — softunebd.com"
+    )
+    return subject, html_body, text_body
+
+
+def inactivity_run_stopped_email(count: int, limit: int) -> tuple[str, str, str]:
+    """Internal: the inactivity job wanted to delete too many accounts at once
+    and deleted none."""
+    subject = f"Inactivity deletion stopped: {count} accounts at once"
+    text = (
+        f"The inactivity job found {count} Free accounts due for deletion, more than the limit of {limit}.\n"
+        "It deleted none of them. Check tenants.last_active_at and the worker logs before doing anything. "
+        "Set INACTIVITY_DELETION=report on the server to see the list without any action."
+    )
+    return subject, f"<pre style=\"font-family:inherit;white-space:pre-wrap;\">{html.escape(text)}</pre>", text
+
+
 def _format_money(cents: int, currency: str) -> str:
     symbol = "৳" if currency == "BDT" else ""
     amount = f"{cents / 100:,.2f}"

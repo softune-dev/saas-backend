@@ -576,6 +576,10 @@ NOT know.
   Free account with no activity for {plans.FREE_INACTIVE_DAYS} days is deleted after warning emails
   ({plans.FORMER_PAID_INACTIVE_DAYS} days if it has paid before). Logging in, using the dashboard,
   editing a product or receiving an order counts as activity.
+- When an account or store is deleted, the store, orders, customer records and
+  uploaded files are removed. Softune keeps the owner's contact details and the
+  store setup (settings, pages, categories, products); the merchant can ask
+  support@softunebd.com to erase that too.
 - There is no free trial.
 - Paid plans, total price per period: {prices}.
 - A paid plan that is not renewed moves to Free: extra data is kept and locked,

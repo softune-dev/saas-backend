@@ -23,7 +23,7 @@ from sqlalchemy import delete, select
 from app.crud import create_tenant_owner_and_site
 from app.db import SessionLocal, engine
 from app.main import app
-from app.models import Tenant, Template
+from app.models import DeletedAccount, Tenant, Template
 from app.security import create_access_token
 
 
@@ -149,10 +149,12 @@ async def _register(client: AsyncClient, plan: str = "starter") -> Account:
 
 
 async def _cleanup(tenant_ids: list[str]) -> None:
-    """One DELETE per tenant removes every row it owns, via ON DELETE CASCADE."""
+    """One DELETE per tenant removes every row it owns, via ON DELETE CASCADE.
+    deleted_accounts has no foreign key, so a test's records are removed by id."""
     async with SessionLocal() as db:
         for tid in tenant_ids:
             await db.execute(delete(Tenant).where(Tenant.id == tid))
+            await db.execute(delete(DeletedAccount).where(DeletedAccount.tenant_id == tid))
         await db.commit()
 
 

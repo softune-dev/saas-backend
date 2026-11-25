@@ -21,7 +21,7 @@ import aio_pika
 import httpx
 from sqlalchemy import Delete, Select, Update, delete, func, select, update
 
-from app import plan_lapse, plans
+from app import account_archive, inactivity, plan_lapse, plans
 from app.config import settings
 from app.db import SessionLocal, engine
 from app.models import (
@@ -1249,10 +1249,20 @@ async def sweep_abandoned_paid_accounts() -> None:
             await db.rollback()
             log.exception("couldn't save contacts before deleting; skipping this sweep")
             return
-        deleted_ids = set(
-            (await db.execute(delete_abandoned_stmt(list(expiring_tenant_ids), cutoff))).scalars()
-        )
-        await db.commit()
+        deleted_ids: set[uuid.UUID] = set()
+        for tenant_id in expiring_tenant_ids:
+            # The record and the deletion happen together or not at all.
+            try:
+                await account_archive.archive(db, tenant_id, "unpaid")
+                gone = (await db.execute(delete_abandoned_stmt([tenant_id], cutoff))).scalar_one_or_none()
+                if gone is None:
+                    await db.rollback()
+                    continue
+                await db.commit()
+                deleted_ids.add(gone)
+            except Exception:  # noqa: BLE001 - this one is kept; the others go on
+                await db.rollback()
+                log.exception("couldn't archive and delete tenant %s; kept", tenant_id)
         if deleted_ids:
             log.info("plan renewal: deleted %d abandoned paid tenant(s)", len(deleted_ids))
 
@@ -1277,6 +1287,18 @@ async def plan_deletion_sweep_loop() -> None:
             await sweep_abandoned_paid_accounts()
         except Exception:  # noqa: BLE001 - a failed sweep must not kill the worker
             log.exception("plan deletion sweep failed")
+        await asyncio.sleep(PLAN_RENEWAL_SWEEP_INTERVAL_SECONDS)
+
+
+async def inactivity_loop() -> None:
+    """Unused Free accounts: three warnings, then deletion. Does nothing unless
+    INACTIVITY_DELETION is set (app/inactivity.py)."""
+    log.info("inactivity deletion mode: %s", settings.inactivity_deletion)
+    while True:
+        try:
+            await inactivity.run()
+        except Exception:  # noqa: BLE001 - a failed sweep must not kill the worker
+            log.exception("inactivity sweep failed")
         await asyncio.sleep(PLAN_RENEWAL_SWEEP_INTERVAL_SECONDS)
 
 
@@ -1330,6 +1352,7 @@ async def main() -> None:
         asyncio.create_task(plan_overdue_sweep_loop())
         asyncio.create_task(plan_deletion_warning_loop())
         asyncio.create_task(plan_deletion_sweep_loop())
+        asyncio.create_task(inactivity_loop())
         await asyncio.Future()  # sleep forever
 
 

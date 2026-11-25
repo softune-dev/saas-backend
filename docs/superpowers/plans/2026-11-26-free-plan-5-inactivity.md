@@ -1,6 +1,6 @@
 # Free plan, part 5b: deleting inactive Free stores
 
-Status: **waiting for Kallol's approval. Nothing here is built.**
+Status: **approved 26 Nov 2026 and built** (not deployed).
 Spec: `../specs/2026-11-24-free-plan-design.md` (Inactivity).
 
 Deletion removes a store, its products, orders and media for good. A mistake cannot be
@@ -51,9 +51,18 @@ product edit or a received order. All clocks started when migration 087 ran (24 
 
 ## Database
 
-Three columns, added to migration 089 (not yet run):
-`inactivity_warning_stage` (0 to 3), `inactivity_warned_at`, and `inactivity_warned_for`
-(the `last_active_at` the warnings belong to, so new activity voids them).
+Migration 090 (additive, run before deploying) adds two tables, so a missed migration
+cannot break queries on `tenants`: `tenant_inactivity` (stage, when warned, and the
+`last_active_at` the warnings belong to) and `deleted_accounts`.
+
+## What is kept after a deletion (owner's decision, added during the build)
+
+Every deletion (inactivity, unpaid, admin, a merchant deleting a store) writes a
+`deleted_accounts` row in the same transaction: no deletion without its record. Kept:
+account, users, store settings, pages, categories, products, events, order and customer
+counts. Not kept: orders and customer records (shoppers' data), secrets, uploaded files
+(deleted with the store, so image links in the record stop working). Disclosed in the
+landing Privacy page and Terms; an erase request is honoured by deleting the row.
 
 ## Tests
 

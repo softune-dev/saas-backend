@@ -261,6 +261,11 @@ class Settings(BaseSettings):
     # and every plan's limits apply. FREE_PLAN_ENABLED=false in the environment
     # puts the old "pause the account" behaviour back.
     free_plan_enabled: bool = True
+    # Deleting unused Free accounts (app/inactivity.py): "off" does nothing,
+    # "report" only logs who would be warned or deleted, "on" sends the warnings
+    # and deletes. Off unless the server says otherwise: a developer's worker
+    # uses the live database.
+    inactivity_deletion: str = "off"
     # Which real (plan="demo") tenant's login the public "See a live demo"
     # button mints a token for (app/api/public.py) — a shared, read-only
     # account, decoupled from trial signup entirely. Not a secret: this

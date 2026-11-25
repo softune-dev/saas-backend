@@ -1085,6 +1085,41 @@ class Invoice(Base):
     )
 
 
+class DeletedAccount(Base):
+    """What is kept after an account or store is deleted (migrations/090,
+    app/account_archive.py). No foreign key to tenants: it must outlive them."""
+
+    __tablename__ = "deleted_accounts"
+
+    id: Mapped[uuid.UUID] = _pk()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    reason: Mapped[str] = mapped_column(Text)
+    email: Mapped[str | None] = mapped_column(Text, nullable=True)
+    full_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    phone: Mapped[str | None] = mapped_column(Text, nullable=True)
+    shop_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    subdomain: Mapped[str | None] = mapped_column(Text, nullable=True)
+    custom_domain: Mapped[str | None] = mapped_column(Text, nullable=True)
+    plan: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ever_paid: Mapped[bool] = mapped_column(Boolean, default=False)
+    snapshot: Mapped[dict] = mapped_column(JSONB)
+    deleted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class TenantInactivity(Base):
+    """The inactivity warnings sent to one Free account (migrations/090,
+    app/inactivity.py). `warned_for` is the last_active_at they belong to."""
+
+    __tablename__ = "tenant_inactivity"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    stage: Mapped[int] = mapped_column(SmallInteger)
+    warned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    warned_for: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class PaymentClaim(Base):
     """One row per "I already sent the money" submission — a plan upgrade
     from the dashboard Billing page (app/api/billing.py's
