@@ -331,7 +331,6 @@ def manual_payment_submitted_email(
     tenant_name: str,
     tenant_slug: str,
     current_plan: str,
-    trial_expires_at: str | None,
     owner_name: str | None,
     owner_email: str,
     site_subdomain: str | None,
@@ -357,7 +356,6 @@ def manual_payment_submitted_email(
         ("Owner", f"{owner_name or '—'} <{owner_email}>"),
         ("Store", site_subdomain or "—"),
         ("Current plan", current_plan),
-        ("Trial ends", trial_expires_at or "—"),
         ("Requesting plan", f"{requested_plan_name} (৳{amount_taka:,})"),
         ("Sent from (bKash number)", sender_number),
         ("Transaction ID", trx_id),
@@ -502,16 +500,16 @@ def chat_credit_purchase_submitted_email(
 
 
 def welcome_email(recipient_name: str | None = None) -> tuple[str, str, str]:
-    """Sent once after POST /trial/complete — the store already exists."""
+    """Sent once after signup — the Free store already exists."""
     greeting = f"Hi {html.escape(recipient_name)}," if recipient_name else "Hi,"
     greeting_text = f"Hi {recipient_name}," if recipient_name else "Hi,"
     subject = "Your Softune store is ready"
 
     items = [
         ("Theme editor", "Colors, fonts, and sections — live preview, no code."),
-        ("Payments that Bangladesh uses", "COD, bKash, Nagad, and SSLCommerz."),
-        ("Couriers, connected", "Steadfast, Pathao, RedX, and eCourier."),
-        ("Seven days, no card", "Full dashboard access. Upgrade when you're ready."),
+        ("Payments that Bangladesh uses", "Cash on Delivery, manual bKash, Nagad and Rocket, and Softune Pay."),
+        ("Courier, connected", "Steadfast, with your own merchant account."),
+        ("Free, no card", "10 products and 50 orders a month. Free as long as you're active."),
     ]
     rows_html = "".join(
         f'<tr>'
@@ -530,7 +528,7 @@ def welcome_email(recipient_name: str | None = None) -> tuple[str, str, str]:
     <p style="margin:0 0 8px 0;font-size:14px;color:{INK};">{greeting}</p>
     <h1 style="margin:0 0 10px 0;font-size:22px;line-height:1.3;font-weight:400;color:{INK};">Your store is live</h1>
     <p style="margin:0 0 24px 0;font-size:15px;line-height:1.55;color:{MUTED};">
-      The 7-day trial is on. Open the dashboard, add a product, and publish when it looks right.
+      You are on the Free plan. Open the dashboard, add a product, and make the store yours.
     </p>
     {_btn(DASHBOARD, "Open dashboard")}
   </td>
@@ -542,10 +540,10 @@ def welcome_email(recipient_name: str | None = None) -> tuple[str, str, str]:
   </td>
 </tr>
 """
-    html_body = _shell("Your Softune store is ready — 7-day trial, no card", body_html)
+    html_body = _shell("Your Softune store is ready — Free plan, no card", body_html)
     text_body = (
         f"{greeting_text}\n\n"
-        "Your store is live. The 7-day trial is on — no credit card.\n\n"
+        "Your store is live on the Free plan — no credit card.\n\n"
         f"Open dashboard: {DASHBOARD}\n\n"
         f"{rows_text}\n\n"
         "Questions? Reply to this email.\n\n"
@@ -554,55 +552,6 @@ def welcome_email(recipient_name: str | None = None) -> tuple[str, str, str]:
     return subject, html_body, text_body
 
 
-def trial_ended_email(recipient_name: str | None = None, grace_days: int = 4) -> tuple[str, str, str]:
-    """Sent once when a trial's trial_expires_at passes — see
-    app/worker.py's notify_ended_trials sweep, the counterpart to
-    welcome_email above (start of the same lifecycle, not the account
-    deletion itself — that's still trial_grace_days later, per
-    sweep_expired_trials). Login is already blocked at this point
-    (app/api/auth.py's _check_tenant_access), so the whole point of this
-    email is telling them why, and that the store isn't gone yet."""
-    greeting = f"Hi {html.escape(recipient_name)}," if recipient_name else "Hi,"
-    greeting_text = f"Hi {recipient_name}," if recipient_name else "Hi,"
-    subject = "Your Softunebd trial has ended"
-    pricing_url = f"{SITE}/pricing"
-
-    body_html = f"""\
-<tr>
-  <td style="padding:28px 36px 8px 36px;">
-    <p style="margin:0 0 8px 0;font-size:14px;color:{INK};">{greeting}</p>
-    <h1 style="margin:0 0 10px 0;font-size:22px;line-height:1.3;font-weight:400;color:{INK};">Your trial has ended</h1>
-    <p style="margin:0 0 16px 0;font-size:15px;line-height:1.55;color:{MUTED};">
-      Your 7-day Softunebd trial is over, so the dashboard is locked for now. Your store,
-      products, and orders are all still there — nothing is deleted.
-    </p>
-    <p style="margin:0 0 24px 0;font-size:15px;line-height:1.55;color:{MUTED};">
-      Pick a plan and you're back in immediately. If we don't hear from you, your trial
-      data stays put for {grace_days} more day{"s" if grace_days != 1 else ""} before it's removed.
-    </p>
-    {_btn(pricing_url, "See plans and upgrade")}
-  </td>
-</tr>
-<tr>
-  <td style="padding:8px 36px 32px 36px;">
-    <p style="margin:0;font-size:13px;line-height:1.55;color:{MUTED};">
-      Not ready, or have a question first? Just reply to this email — a real person reads these.
-    </p>
-  </td>
-</tr>
-"""
-    html_body = _shell("Your Softunebd trial has ended — your store is still there", body_html)
-    text_body = (
-        f"{greeting_text}\n\n"
-        "Your 7-day Softunebd trial is over, so the dashboard is locked for now. "
-        "Your store, products, and orders are all still there — nothing is deleted.\n\n"
-        f"Pick a plan and you're back in immediately: {pricing_url}\n\n"
-        f"If we don't hear from you, your trial data stays put for {grace_days} more "
-        f"day{'s' if grace_days != 1 else ''} before it's removed.\n\n"
-        "Questions? Reply to this email.\n\n"
-        "Softunebd — softunebd.com"
-    )
-    return subject, html_body, text_body
 
 
 def _renewal_contact_line() -> str:
@@ -950,6 +899,64 @@ def plan_deletion_warning_email(
     return subject, html_body, text_body
 
 
+def free_inactivity_warning_email(
+    recipient_name: str | None, *, number: int, idle_days: int, delete_on: str
+) -> tuple[str, str, str]:
+    """One of the three warnings before an unused Free account is deleted
+    (app/inactivity.py). Says plainly what happens, when, and that logging in
+    once is enough."""
+    greeting = f"Hi {html.escape(recipient_name)}," if recipient_name else "Hi,"
+    greeting_text = f"Hi {recipient_name}," if recipient_name else "Hi,"
+    final = number == 3
+    subject = (
+        f"Last warning: your free store will be deleted on {delete_on}"
+        if final
+        else f"Log in to keep your free store (deleted on {delete_on})"
+    )
+    heading = "Your free store is about to be deleted" if final else "Your free store has been quiet"
+    what = (
+        f"Nothing has happened in your store for {idle_days} days. If it stays unused, your store, "
+        f"products, orders and uploaded files will be permanently deleted on {delete_on}. This cannot be undone."
+    )
+    kept = "We keep your account details and your store setup, so you can start again later."
+    keep = "To keep it, just log in to your dashboard before then. That is all it takes."
+
+    body_html = f"""\
+<tr>
+  <td style="padding:28px 36px 8px 36px;">
+    <p style="margin:0 0 8px 0;font-size:14px;color:{INK};">{greeting}</p>
+    <h1 style="margin:0 0 10px 0;font-size:22px;line-height:1.3;font-weight:400;color:{INK};">{heading}</h1>
+    <p style="margin:0 0 16px 0;font-size:15px;line-height:1.55;color:{MUTED};">{what}</p>
+    <p style="margin:0 0 24px 0;font-size:15px;line-height:1.55;color:{INK};">{keep}</p>
+    {_btn(DASHBOARD, "Log in and keep my store")}
+    <p style="margin:20px 0 0 0;font-size:13px;line-height:1.5;color:{MUTED};">{kept}</p>
+    <p style="margin:20px 0 0 0;font-size:13px;line-height:1.5;color:{MUTED};">
+      The Free plan is free as long as you're active.
+    </p>
+  </td>
+</tr>
+"""
+    html_body = _shell(f"Log in before {delete_on} to keep your store", body_html)
+    text_body = (
+        f"{greeting_text}\n\n{what}\n\n{keep}\n\n{DASHBOARD}\n\n{kept}\n\n"
+        "The Free plan is free as long as you're active.\n\n"
+        "Softune — softunebd.com"
+    )
+    return subject, html_body, text_body
+
+
+def inactivity_run_stopped_email(count: int, limit: int) -> tuple[str, str, str]:
+    """Internal: the inactivity job wanted to delete too many accounts at once
+    and deleted none."""
+    subject = f"Inactivity deletion stopped: {count} accounts at once"
+    text = (
+        f"The inactivity job found {count} Free accounts due for deletion, more than the limit of {limit}.\n"
+        "It deleted none of them. Check tenants.last_active_at and the worker logs before doing anything. "
+        "Set INACTIVITY_DELETION=report on the server to see the list without any action."
+    )
+    return subject, f"<pre style=\"font-family:inherit;white-space:pre-wrap;\">{html.escape(text)}</pre>", text
+
+
 def _format_money(cents: int, currency: str) -> str:
     symbol = "৳" if currency == "BDT" else ""
     amount = f"{cents / 100:,.2f}"
@@ -1279,13 +1286,13 @@ def invoice_email(
 
 def demo_followup_email() -> tuple[str, str, str]:
     """One-click send from the superadmin demo-requests list. Pitch is
-    'you've seen the demo — start a trial', not the welcome intro."""
-    subject = "Build your own store — 7 days free, no card"
+    'you've seen the demo — open your own free store', not the welcome intro."""
+    subject = "Build your own store — free to start, no card"
     signup = f"{SITE}/signup"
     bullets = [
         "Your shop name, theme, and products",
-        "COD, bKash, Nagad, and SSLCommerz",
-        "Seven days, no credit card",
+        "Cash on Delivery, manual bKash and Nagad, and Softune Pay",
+        "Free plan, no credit card",
     ]
     bullets_html = "".join(
         f'<tr>'
@@ -1302,22 +1309,22 @@ def demo_followup_email() -> tuple[str, str, str]:
     <p style="margin:0 0 8px 0;font-size:14px;font-weight:400;color:{BRAND};">You tried the demo</p>
     <h1 style="margin:0 0 12px 0;font-size:22px;line-height:1.3;font-weight:400;color:{INK};">Now make it yours</h1>
     <p style="margin:0 0 18px 0;font-size:15px;line-height:1.55;color:{MUTED};">
-      The demo is a shared, read-only shop. A trial is your shop for seven days.
+      The demo is a shared, read-only shop. A free store is yours.
     </p>
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 22px 0;">{bullets_html}</table>
-    {_btn(signup, "Start free trial")}
+    {_btn(signup, "Create your free store")}
     <p style="margin:20px 0 0 0;font-size:13px;line-height:1.5;color:{MUTED};">
       About five minutes. Pick a theme, add your shop name, and you&apos;re in.
     </p>
   </td>
 </tr>
 """
-    html_body = _shell("Start your free 7-day trial — no card required", body_html)
+    html_body = _shell("Open your free store — no card required", body_html)
     text_body = (
         "You tried the demo. Now make it yours.\n\n"
-        "The demo is a shared, read-only shop. A trial is your shop for seven days.\n\n"
+        "The demo is a shared, read-only shop. A free store is yours.\n\n"
         f"{bullets_text}\n\n"
-        f"Start free trial: {signup}\n\n"
+        f"Create your free store: {signup}\n\n"
         "About five minutes. Pick a theme, add your shop name, and you're in.\n\n"
         "Softune — softunebd.com"
     )

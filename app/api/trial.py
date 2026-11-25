@@ -1,6 +1,9 @@
-"""Self-serve 7-day trial signup — replaces the old lead-capture funnel.
+"""Self-serve signup: a real store on the Free plan.
 
-Creates a REAL Tenant + User immediately (plan="trial"), not a staging row
+The paths still start with /trial/ because the landing site calls them; only
+what they create changed.
+
+Creates a REAL Tenant + User immediately (plan="free"), not a staging row
 that a superadmin later converts. The only pre-verification state is the
 signup itself (email/password/OTP/shop basics) — that lives in Redis
 (app/cache.py), keyed by an opaque `signup_token` returned to the client,
@@ -11,10 +14,7 @@ Theme/template choice is NOT sent to the backend until POST /trial/complete
 — the frontend wizard holds it in local state only, so browsing themes
 never touches the database (see landing's onboarding wizard).
 
-Trial lifetime: POST /trial/complete stamps trial_started_at/trial_expires_at
-(trial_days from now) on the Tenant. Login is rejected once that passes
-(app/api/auth.py). A background sweep (app/worker.py) hard-deletes the
-tenant trial_grace_days after that — see migrations/047_trial_tenants.sql.
+One Free store per email and per phone number (app/free_signup.py).
 """
 
 import json
@@ -26,7 +26,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import cache, crud, google_auth, mailer, queue, recaptcha
+from app import cache, crud, free_signup, google_auth, mailer, queue, recaptcha
 from app.config import settings
 from app.db import get_db
 from app.models import Site, SitePage, Tenant, User
@@ -232,10 +232,11 @@ async def verify_otp(payload: TrialVerifyOtpIn) -> dict:
 
 
 @router.patch("/details", response_model=TrialSignupTokenOut)
-async def update_details(payload: TrialDetailsIn) -> dict:
+async def update_details(payload: TrialDetailsIn, db: DB) -> dict:
     pending = await _load_pending(payload.signup_token)
     if not pending["email_verified"]:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Verify your email first.")
+    await free_signup.ensure_phone_available(db, payload.phone)
 
     pending["shop_name"] = payload.shop_name
     pending["phone"] = payload.phone
@@ -297,14 +298,17 @@ async def complete(payload: TrialCompleteIn, db: DB) -> dict:
     # info — Site Settings -> Contact reads it from here), separate from
     # Tenant.business (legal/tax identity, unrelated). `type` is the same
     # field the dashboard's own onboarding writes for its "Shop category /
-    # niche" question (step-shop-basics.tsx) — reusing it here means a
-    # trial that converts to a paid plan already has it set, nothing to
-    # re-ask.
+    # niche" question (step-shop-basics.tsx) — reusing it here means the
+    # dashboard already has it, nothing to re-ask.
     business_overrides = {}
     if pending.get("phone"):
         business_overrides["phone"] = pending["phone"]
     if pending.get("category"):
         business_overrides["type"] = pending["category"]
+
+    # The lock lasts until create_tenant_owner_and_site commits.
+    await free_signup.lock_phone(db, pending["phone"])
+    await free_signup.ensure_phone_available(db, pending["phone"])
 
     user, site = await crud.create_tenant_owner_and_site(
         db,
@@ -313,16 +317,15 @@ async def complete(payload: TrialCompleteIn, db: DB) -> dict:
         full_name=pending.get("full_name"),
         phone=pending.get("phone"),
         workspace_name=pending["shop_name"],
-        plan="trial",
+        plan="free",
         template_key=payload.template_key,
         site_name=pending["shop_name"],
         subdomain=subdomain,
-        trial_days=settings.trial_days,
         site_theme_overrides=theme_overrides,
         site_business_overrides=business_overrides or None,
     )
 
-    # Auto-publish — a trial merchant should see a live site the moment
+    # Auto-publish — a new merchant should see a live site the moment
     # they land in the dashboard, not have to find and click Publish first
     # with nothing but a template default in it. Same steps
     # POST /sites/{id}/publish takes (app/api/sites.py), minus the
@@ -359,9 +362,7 @@ async def complete(payload: TrialCompleteIn, db: DB) -> dict:
 
     await cache.drop(_redis_key(payload.signup_token))
 
-    # No invoice for the trial itself — a trial is free, so there's nothing
-    # to bill or document. Invoices now only start once superadmin sets a
-    # real paid plan (see app/api/superadmin.py's update_tenant).
+    # No invoice: the store is free. Invoices start with a paid plan.
 
     subject, html_body, text_body = mailer.welcome_email(user.full_name)
     await queue.publish(

@@ -367,7 +367,6 @@ async def create_tenant_owner_and_site(
     password_hash: str | None = None,
     full_name: str | None = None,
     phone: str | None = None,
-    trial_days: int | None = None,
     site_theme_overrides: dict | None = None,
     site_business_overrides: dict | None = None,
 ) -> tuple["User", "Site"]:
@@ -389,11 +388,9 @@ async def create_tenant_owner_and_site(
     trial.py's Redis-staged signup) without ever handling the plaintext a
     second time.
 
-    trial_days, if given, stamps Tenant.trial_started_at/trial_expires_at
-    (see migrations/047) — used only by the self-serve trial signup path.
     site_theme_overrides/site_business_overrides shallow-merge onto the new
     Site's theme/business JSONB after the template's own defaults, for
-    callers (trial signup) that collect a couple of fields (color/font,
+    callers (signup) that collect a couple of fields (color/font,
     tagline) up front instead of leaving the site fully blank.
     phone lands on User.phone (personal account contact, shown/edited on
     the dashboard's own Account page) — separate from but initially the
@@ -441,15 +438,12 @@ async def create_tenant_owner_and_site(
         plan=plan,
         onboarding_free_images_remaining=0 if plan == "demo" else settings.onboarding_free_images,
     )
-    from datetime import UTC, datetime, timedelta
+    from datetime import UTC, datetime
 
     now = datetime.now(UTC)
     # Explicit even though the column defaults to now(): a new account starts
     # "active" at creation (migrations/087).
     tenant.last_active_at = now
-    if trial_days is not None:
-        tenant.trial_started_at = now
-        tenant.trial_expires_at = now + timedelta(days=trial_days)
     db.add(tenant)
     # flush (not commit) sends the INSERT so tenant.id is populated, while the
     # transaction stays open and still rolls back as one unit.

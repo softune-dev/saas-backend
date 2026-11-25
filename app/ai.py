@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import ai_log, ai_tools, cache, invoices as invoices_module
 from app.config import settings
+from app import plans
 from app.plans import get_plan
 
 log = logging.getLogger(__name__)
@@ -545,38 +546,49 @@ async def generate_text(
 
 
 def _softune_facts() -> str:
-    """Trial, price and policy facts the chat may state as true. Built from
-    the real config and the same price table the invoices use, so the
-    prompt can't drift from what the platform actually enforces.
+    """Plan, price and policy facts the chat may state as true. Built from the
+    plan table the app enforces, so the prompt can't drift from it.
 
-    Exists because the assistant had none of this: asked "will I be charged
-    after 7 days?" by a worried new merchant (ai_usage_logs, Oct 2026), it
-    invented answers — "no time limit", "your store won't shut down", "100%
-    safe" — all false (login is blocked when the trial ends, the account is
-    deleted trial_grace_days later). Every line here was checked against the
-    code that enforces it (app/api/auth.py, app/worker.py, app/invoices.py,
-    landing /refund) — keep it that way when editing; an unchecked claim is
-    exactly the bug this block exists to prevent.
+    Exists because the assistant had none of this: asked by a worried new
+    merchant whether they would be charged (ai_usage_logs, Oct 2026), it
+    invented answers. Every line here must match the code that enforces it
+    (app/plans.py, app/plan_lapse.py, app/order_limit.py, app/worker.py,
+    landing /refund) — an unchecked claim is exactly the bug this block exists
+    to prevent.
     """
-    prices = ", ".join(
-        f"{invoices_module.PLAN_NAMES[key]} ৳{invoices_module.PLAN_PRICES_CENTS[key] // 100:,}"
-        for key in ("starter", "growth", "business")
+    prices = "; ".join(
+        f"{invoices_module.PLAN_NAMES[key]} "
+        + ", ".join(f"৳{cents // 100:,} for {months} month{'s' if months > 1 else ''}" for months, cents in plans.PERIOD_PRICES_CENTS[key].items())
+        for key in plans.PAID_PLANS
     )
+    free = plans.PLANS["free"]
     return f"""
 
-SOFTUNE FACTS — answer trial, billing, price, refund and policy questions
+SOFTUNE FACTS — answer plan, billing, price, refund and policy questions
 ONLY from this block and from get_billing_status. Anything not stated here,
 returned by a tool, or covered by a documentation article is something you do
 NOT know.
-- Free trial: {settings.trial_days} days, no credit card. get_billing_status
-  gives the exact expiry date and days left — quote those, don't estimate.
-- When the trial ends without a paid plan: the merchant is locked out of the
-  dashboard straight away, and the account — store, products, everything — is
-  permanently deleted {settings.trial_grace_days} days after the trial ends.
-  Choosing a plan before that deletion keeps everything. NEVER say the trial
-  has no time limit or that nothing happens when it ends. Don't claim
-  anything about whether the public storefront stays online meanwhile.
-- Paid plans, per month: {prices}.
+- Free plan: ৳0, no credit card. {free.products} products, {free.orders_per_month} orders a month,
+  {free.storage_bytes // (1024 * 1024)}MB media storage, {free.stores} store. Sale events are unlimited on every plan.
+- After the month's {free.orders_per_month} orders on Free, checkout switches to ordering by
+  WhatsApp until the next calendar month.
+- Free is free as long as the account is active, NEVER say "free forever": a
+  Free account with no activity for {plans.FREE_INACTIVE_DAYS} days is deleted after warning emails
+  ({plans.FORMER_PAID_INACTIVE_DAYS} days if it has paid before). Logging in, using the dashboard,
+  editing a product or receiving an order counts as activity.
+- When an account or store is deleted, the store, orders, customer records and
+  uploaded files are removed. Softune keeps the owner's contact details and the
+  store setup (settings, pages, categories, products); the merchant can ask
+  support@softunebd.com to erase that too.
+- Every plan, including Free, has Cash on Delivery, manual wallet payments and
+  Softune Pay. The official bKash, Nagad and SSLCommerz connections, with the
+  merchant's own accounts, are locked on Free; Starter, Growth and Business all
+  have the same ones.
+- There is no free trial.
+- Paid plans, total price per period: {prices}.
+- A paid plan that is not renewed moves to Free: extra data is kept and locked,
+  the 10 best-selling products stay visible, and a custom domain keeps working
+  for 30 more days.
 - Paying: Softune never charges automatically and holds no card. The
   merchant sends the money by bKash, Nagad or bank transfer, then submits the
   Transaction ID (TrxID) on the Billing page, and Softune confirms it.

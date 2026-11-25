@@ -27,13 +27,28 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.plans import PAID_PLANS
-from app.models import DemoAccessRequest, Invoice, MarketingContact, Site, Tenant, User
+from app.models import DemoAccessRequest, Invoice, MarketingContact, PaymentClaim, Site, Tenant, User
 
 log = logging.getLogger(__name__)
 
 # The automated tests create real tenants with these addresses. They must never
 # become marketing contacts, because contacts are kept forever.
 TEST_EMAIL_DOMAIN = "@softune-test-fixtures.dev"
+
+
+async def paid_before(db: AsyncSession, tenant_ids: list[uuid.UUID]) -> set[uuid.UUID]:
+    """Which of these tenants show any sign of ever having paid. Generous on
+    purpose: the inactivity job gives such an account its longer period."""
+    sources = (
+        select(Invoice.tenant_id).where(Invoice.tenant_id.in_(tenant_ids), Invoice.amount_cents > 0),
+        select(PaymentClaim.tenant_id).where(PaymentClaim.tenant_id.in_(tenant_ids), PaymentClaim.status == "verified"),
+        select(MarketingContact.tenant_id).where(MarketingContact.tenant_id.in_(tenant_ids), MarketingContact.ever_paid.is_(True)),
+        select(Tenant.id).where(Tenant.id.in_(tenant_ids), Tenant.plan_renews_at.isnot(None)),
+    )
+    found: set[uuid.UUID] = set()
+    for stmt in sources:
+        found.update((await db.execute(stmt)).scalars())
+    return found
 
 
 def lifecycle_for(plan: str, ever_paid: bool, deleted: bool) -> str:

@@ -453,7 +453,9 @@ async def test_other_tenant_cannot_delete_orders(two_accounts, template_id):
     assert (await a.get(f"/sites/{site['id']}/orders/{order['id']}")).status_code == 200
 
 
-async def test_deleting_an_unshipped_order_puts_stock_back(account, template_id):
+async def test_deleting_an_unshipped_order_puts_stock_back(account_factory, template_id):
+    # Business: these open a second store, and Starter has room for one.
+    account = await account_factory("business")
     site, product, order = await _site_with_order(account, template_id, stock=10, qty=3)
     after_order = (await account.get(f"/sites/{site['id']}/products/{product['id']}")).json()
     assert after_order["stock"] == 7
@@ -464,7 +466,9 @@ async def test_deleting_an_unshipped_order_puts_stock_back(account, template_id)
     assert restored["stock"] == 10
 
 
-async def test_deleting_a_fulfilled_order_keeps_stock_out(account, template_id):
+async def test_deleting_a_fulfilled_order_keeps_stock_out(account_factory, template_id):
+    # Business: these open a second store, and Starter has room for one.
+    account = await account_factory("business")
     site, product, order = await _site_with_order(account, template_id, stock=10, qty=3)
     await account.patch(f"/sites/{site['id']}/orders/{order['id']}", json={"status": "fulfilled"})
 

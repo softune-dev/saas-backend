@@ -330,6 +330,7 @@ async def test_free_cannot_delete_its_only_store(account_factory):
 
 
 async def test_paid_tenant_can_still_delete_a_store(account_factory, template_id):
-    starter = await account_factory("starter")
-    extra = (await starter.post("/sites", json=_new_site(template_id))).json()
-    assert (await starter.delete(f"/sites/{extra['id']}")).status_code == 204
+    # Business: the paid plan with room for a second store.
+    paid = await account_factory("business")
+    extra = (await paid.post("/sites", json=_new_site(template_id))).json()
+    assert (await paid.delete(f"/sites/{extra['id']}")).status_code == 204

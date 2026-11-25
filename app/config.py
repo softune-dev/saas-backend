@@ -256,22 +256,16 @@ class Settings(BaseSettings):
     # multi-step form, short enough that an abandoned signup just vanishes
     # on its own instead of needing manual cleanup.
     trial_signup_ttl_minutes: int = 45
-    # How long a trial tenant can log in for. Login is rejected once
-    # Tenant.trial_expires_at (trial_started_at + this) passes — see
-    # app/api/auth.py.
-    trial_days: int = 7
-    # Extra days AFTER trial_expires_at before app/worker.py's sweep hard-
-    # deletes the tenant — total lifetime of an unpurchased trial is
-    # trial_days + this. A real purchase within that window just changes
-    # `plan` away from "trial", which takes it out of the sweep's filter.
-    # 7: the window the merchant sees on the Billing page ("pay within 7
-    # days of your trial ending or everything is permanently deleted") —
-    # keep this in sync with that copy if it ever changes.
-    trial_grace_days: int = 7
 
-    # Master switch for the Free plan rollout (see app/plans.py). Off until
-    # the later project that lets tenants actually sit on plan "free".
-    free_plan_enabled: bool = False
+    # The Free plan (app/plans.py): paid plans that are not renewed drop to Free,
+    # and every plan's limits apply. FREE_PLAN_ENABLED=false in the environment
+    # puts the old "pause the account" behaviour back.
+    free_plan_enabled: bool = True
+    # Deleting unused Free accounts (app/inactivity.py): "off" does nothing,
+    # "report" only logs who would be warned or deleted, "on" sends the warnings
+    # and deletes. Off unless the server says otherwise: a developer's worker
+    # uses the live database.
+    inactivity_deletion: str = "off"
     # Which real (plan="demo") tenant's login the public "See a live demo"
     # button mints a token for (app/api/public.py) — a shared, read-only
     # account, decoupled from trial signup entirely. Not a secret: this

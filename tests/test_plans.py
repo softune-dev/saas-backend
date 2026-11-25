@@ -22,20 +22,20 @@ from app.models import Tenant
 MB = 1024 * 1024
 GB = 1024 * MB
 
-STARTER_FEATURES = {
+STARTER_FEATURES = {"gateways", 
     "customers", "pos", "seo", "fraud", "domain", "ai", "chatgpt",
     "theme_switch", "ecourier", "full_analytics", "no_badge",
 }
-GROWTH_FEATURES = STARTER_FEATURES | {"gateways", "all_couriers", "dropship"}
+GROWTH_FEATURES = STARTER_FEATURES | {"all_couriers", "dropship"}
 
 # key: (products, storage, orders, stores, ai/day, events, price)
 LIMITS = {
-    "free": (10, 100 * MB, 50, 1, 0, 3, 0),
-    "starter": (50, 500 * MB, None, 1, 30, 3, 49_900),
-    "growth": (500, 2 * GB, None, 1, 100, 10, 149_900),
-    "business": (None, 3 * GB, None, 2, 150, 25, 399_900),
-    "trial": (50, 500 * MB, None, 1, 15, 3, 0),
-    "demo": (50, 800 * MB, None, 1, 50, 3, 0),
+    "free": (10, 100 * MB, 50, 1, 0, None, 0),
+    "starter": (50, 500 * MB, None, 1, 30, None, 49_900),
+    "growth": (500, 2 * GB, None, 1, 100, None, 149_900),
+    "business": (None, 3 * GB, None, 2, 150, None, 399_900),
+    "trial": (50, 500 * MB, None, 1, 15, None, 0),
+    "demo": (50, 800 * MB, None, 1, 50, None, 0),
 }
 FEATURE_SETS = {
     "free": set(),
@@ -79,7 +79,8 @@ def test_unknown_or_missing_plan_falls_to_free():
 
 def test_needed_plan_is_the_cheapest_paid_plan_with_the_feature():
     assert plans.needed_plan("domain") == "starter"
-    assert plans.needed_plan("gateways") == "growth"
+    assert plans.needed_plan("gateways") == "starter"
+    assert plans.needed_plan("all_couriers") == "growth"
     assert plans.needed_plan("dropship") == "growth"
 
 
@@ -183,20 +184,19 @@ def test_starter_may_switch_themes_trial_may_not():
         plans.ensure_theme_switch_allowed("free")
 
 
-@pytest.mark.parametrize("key", ["starter", "trial"])
-def test_gateways_locked_below_growth_and_cash_always_open(key):
-    with pytest.raises(HTTPException) as exc:
-        plans.ensure_payment_provider_allowed(key, "bkash")
-    assert isinstance(exc.value.detail, str)
-    assert "Upgrade to unlock payment gateways" in exc.value.detail
-    plans.ensure_payment_provider_allowed(key, "cod")
-    plans.ensure_payment_provider_allowed(key, "manual")
-
-
-@pytest.mark.parametrize("key", ["growth", "business", "demo"])
-def test_gateways_open_on_growth_and_up(key):
-    for provider in ("bkash", "nagad", "sslcommerz", "rocket"):
+@pytest.mark.parametrize("key", ["starter", "growth", "business", "trial", "demo"])
+def test_gateways_open_on_every_paid_plan(key):
+    for provider in sorted(plans.GATED_PAYMENT_PROVIDERS) + ["cod", "manual"]:
         plans.ensure_payment_provider_allowed(key, provider)
+
+
+def test_gateways_locked_on_free_but_cash_and_manual_open():
+    for provider in sorted(plans.GATED_PAYMENT_PROVIDERS):
+        with pytest.raises(HTTPException) as exc:
+            plans.ensure_payment_provider_allowed("free", provider)
+        assert exc.value.status_code == 403 and exc.value.detail["needed_plan"] == "starter"
+    for provider in ("cod", "manual"):
+        plans.ensure_payment_provider_allowed("free", provider)
 
 
 @pytest.mark.parametrize("key", ["starter", "trial"])
@@ -229,7 +229,7 @@ def test_require_feature_rejects_an_unknown_feature_at_decoration_time():
 def _gated_app() -> FastAPI:
     gate_app = FastAPI()
 
-    @gate_app.get("/gateways", dependencies=[Depends(plan_gate.require_feature("gateways"))])
+    @gate_app.get("/gateways", dependencies=[Depends(plan_gate.require_feature("all_couriers"))])
     async def gateways() -> dict:
         return {"ok": True}
 
@@ -265,7 +265,7 @@ async def test_ensure_uses_the_live_plan(account_factory):
     async with SessionLocal() as db:
         await plan_gate.ensure(db, tid, "seo")  # starter has it
         with pytest.raises(HTTPException) as exc:
-            await plan_gate.ensure(db, tid, "gateways")
+            await plan_gate.ensure(db, tid, "all_couriers")
     assert exc.value.detail["code"] == "plan_locked"
     assert exc.value.detail["needed_plan"] == "growth"
 
@@ -295,7 +295,7 @@ async def test_require_feature_lets_a_plan_that_has_it_through(account_factory):
 @pytest.mark.parametrize(
     ("check", "provider", "feature", "needed"),
     [
-        (plans.ensure_payment_provider_allowed, "bkash", "gateways", "growth"),
+        (plans.ensure_payment_provider_allowed, "bkash", "gateways", "starter"),
         (plans.ensure_courier_allowed, "ecourier", "ecourier", "starter"),
         (plans.ensure_courier_allowed, "pathao", "all_couriers", "growth"),
     ],

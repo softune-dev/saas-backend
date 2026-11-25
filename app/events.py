@@ -1,8 +1,7 @@
 """Event validation, per-tenant plan limits, and discount math.
 
-The per-plan event cap lives in app/plans.py. These are tiered to prevent
-spam (a merchant flooding their homepage with dozens of "events"), not to
-cap catalog size the way the product limit does — hence much smaller numbers.
+Events are unlimited on every plan. The limit check stays, driven by
+app/plans.py, so a cap is one number away if spam ever needs one.
 """
 
 from fastapi import HTTPException, status
@@ -10,7 +9,7 @@ from fastapi import HTTPException, status
 from app.plans import get_plan
 
 
-def plan_event_limit(plan: str) -> int:
+def plan_event_limit(plan: str) -> int | None:
     return get_plan(plan).events
 
 
@@ -19,7 +18,7 @@ def ensure_within_event_limit(current_count: int, plan: str) -> None:
     cap. Takes a plain count rather than a db/tenant_id — same shape as
     app/products.py's ensure_within_product_limit."""
     limit = plan_event_limit(plan)
-    if current_count >= limit:
+    if limit is not None and current_count >= limit:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
             f"Event limit reached ({limit} on your current plan). Upgrade to add more events.",

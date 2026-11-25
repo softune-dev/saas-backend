@@ -23,7 +23,7 @@ from sqlalchemy import delete, select
 from app.crud import create_tenant_owner_and_site
 from app.db import SessionLocal, engine
 from app.main import app
-from app.models import Tenant, Template
+from app.models import DeletedAccount, Tenant, Template
 from app.security import create_access_token
 
 
@@ -141,8 +141,6 @@ async def _register(client: AsyncClient, plan: str = "starter") -> Account:
             site_name=f"Test Site {suffix}",
             subdomain=f"test-fixture-{suffix}",
             full_name="Test User",
-            # A trial tenant is stamped with an expiry, as real signup does.
-            trial_days=7 if plan == "trial" else None,
         )
     token = create_access_token(user.id, user.tenant_id, user.role)
     return Account(
@@ -151,10 +149,12 @@ async def _register(client: AsyncClient, plan: str = "starter") -> Account:
 
 
 async def _cleanup(tenant_ids: list[str]) -> None:
-    """One DELETE per tenant removes every row it owns, via ON DELETE CASCADE."""
+    """One DELETE per tenant removes every row it owns, via ON DELETE CASCADE.
+    deleted_accounts has no foreign key, so a test's records are removed by id."""
     async with SessionLocal() as db:
         for tid in tenant_ids:
             await db.execute(delete(Tenant).where(Tenant.id == tid))
+            await db.execute(delete(DeletedAccount).where(DeletedAccount.tenant_id == tid))
         await db.commit()
 
 
@@ -187,9 +187,12 @@ async def account_factory(
 async def two_accounts(
     client: AsyncClient,
 ) -> AsyncGenerator[tuple[Account, Account], None]:
-    """Two unrelated tenants — the fixture the isolation tests are built on."""
-    a = await _register(client)
-    b = await _register(client)
+    """Two unrelated tenants — the fixture the isolation tests are built on.
+    Business, because those tests open a second store per tenant and every
+    plan's store limit applies (FREE_PLAN_ENABLED); isolation does not depend
+    on the plan."""
+    a = await _register(client, "business")
+    b = await _register(client, "business")
     yield a, b
     await _cleanup([a.tenant_id, b.tenant_id])
 
@@ -213,14 +216,8 @@ async def template_id() -> str:
 
 @pytest.fixture
 async def site(account: Account, template_id: str) -> dict:
-    """A site belonging to `account`, ready to hang pages and products off."""
-    response = await account.post(
-        "/sites",
-        json={
-            "template_id": template_id,
-            "name": "Test Site",
-            "subdomain": f"test-{uuid.uuid4().hex[:10]}",
-        },
-    )
-    assert response.status_code == 201, f"site create failed: {response.text}"
+    """The site belonging to `account`, ready to hang pages and products off.
+    Its own store, made with the account: Starter has room for one only."""
+    response = await account.get(f"/sites/{account.site_id}")
+    assert response.status_code == 200, f"site read failed: {response.text}"
     return response.json()

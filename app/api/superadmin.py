@@ -27,7 +27,7 @@ from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import contact_checks
+from app import account_archive, contact_checks
 from app import ai_images, audit, billing_actions, cache, contacts as contacts_module, chat_credits as chat_credits_module, crud, invoices as invoices_module, mailer, media, plan_lapse, plans, queue, vercel
 from app.config import settings
 from app.db import get_db
@@ -547,6 +547,8 @@ async def delete_tenant(tenant_id: uuid.UUID, admin: SuperAdminUser, db: DB) -> 
     # Same fix as this session's test-cleanup fixture hit earlier: trust
     # the database's own cascade instead of the ORM's.
     tenant_name, tenant_plan = tenant.name, tenant.plan
+    # In the same transaction as the DELETE: no deletion without its record.
+    await account_archive.archive(db, tenant_id, "admin")
     await db.execute(text("DELETE FROM tenants WHERE id = :id"), {"id": tenant_id})
     await db.commit()
     await audit.record(

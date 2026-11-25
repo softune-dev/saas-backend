@@ -14,7 +14,6 @@ silently.
 
 import json
 import logging
-import math
 import uuid
 from datetime import UTC, date, datetime, timedelta
 
@@ -145,12 +144,11 @@ TOOL_DECLARATIONS = [
     {
         "name": "get_billing_status",
         "description": (
-            "The merchant's current plan, how long their free trial has left "
-            "(exact expiry date and days remaining) or when their paid plan "
+            "The merchant's current plan, when their paid plan "
             "renews, the real monthly price of each plan, today's AI "
             "assistant usage against the plan's daily cap, and storage usage "
             "against the plan's limit. Call this for any question about "
-            "their plan, trial length, what happens when it ends, billing, "
+            "their plan, what happens if it is not renewed, billing, "
             "price, or usage limits."
         ),
         "parameters": {"type": "OBJECT", "properties": {}},
@@ -479,20 +477,7 @@ async def _get_billing_status(db: AsyncSession, tenant_id: uuid.UUID) -> dict:
             for key in ("starter", "growth", "business")
         },
     }
-    # The assistant used to get none of this, so asked "how long do I have /
-    # will I be charged?" it guessed — and told a worried merchant a 7-day
-    # trial had no time limit. Login is blocked at trial_expires_at
-    # (app/api/auth.py) and the tenant is hard-deleted trial_grace_days later
-    # (app/worker.py's sweep_expired_trials), so give it the real dates.
-    if plan == "trial" and tenant.trial_expires_at is not None:
-        remaining = tenant.trial_expires_at - datetime.now(UTC)
-        result["trial_expires_at"] = tenant.trial_expires_at.date().isoformat()
-        result["trial_days_left"] = max(0, math.ceil(remaining.total_seconds() / 86400))
-        result["trial_ended"] = remaining.total_seconds() <= 0
-        result["data_permanently_deleted_on"] = (
-            tenant.trial_expires_at + timedelta(days=settings.trial_grace_days)
-        ).date().isoformat()
-    elif tenant.plan_renews_at is not None:
+    if tenant.plan_renews_at is not None:
         result["plan_renews_on"] = tenant.plan_renews_at.date().isoformat()
     return result
 

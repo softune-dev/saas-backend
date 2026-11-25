@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import cache, crud, domains, notifications, plan_sites, plans, queue, vercel
+from app import account_archive, cache, crud, domains, notifications, plan_sites, plans, queue, vercel
 from app.db import get_db
 from app.models import Site, SitePage, Template, Tenant
 from app.config import settings
@@ -400,6 +400,8 @@ async def delete_site(site_id: uuid.UUID, user: CurrentUser, db: DB) -> None:
     site = await crud.get_scoped(db, Site, user.tenant_id, site_id)
     await plan_sites.ensure_may_delete_store(db, user.tenant_id)
     subdomain, custom = site.subdomain, site.custom_domain
+    # Keeps the store's setup and products; committed together with the delete.
+    await account_archive.archive(db, user.tenant_id, "store deleted", site_id=site.id)
     # Pages, products, categories and orders all go with it via ON DELETE CASCADE
     # in the schema — one statement, no orphans left behind.
     await crud.delete(db, site)

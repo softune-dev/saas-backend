@@ -38,7 +38,7 @@ class Plan:
     orders_per_month: int | None  # None = unlimited
     stores: int
     ai_per_day: int  # 0 = AI not included
-    events: int
+    events: int | None  # None = unlimited, which every plan is
     features: frozenset[str]
 
 
@@ -48,31 +48,37 @@ _GB = 1024 * _MB
 # Plans are cumulative: each paid tier is the one below it plus a few more.
 _STARTER_FEATURES = frozenset(
     {
-        "customers", "pos", "seo", "fraud", "domain", "ai", "chatgpt",
+        # Every paid plan has the same payment gateways; Free has none.
+        "gateways", "customers", "pos", "seo", "fraud", "domain", "ai", "chatgpt",
         "theme_switch", "ecourier", "full_analytics", "no_badge",
     }
 )
-_GROWTH_FEATURES = _STARTER_FEATURES | {"gateways", "all_couriers", "dropship"}
+_GROWTH_FEATURES = _STARTER_FEATURES | {"all_couriers", "dropship"}
 
 PLANS: dict[str, Plan] = {
     p.key: p
     for p in (
-        Plan("free", "Free", 0, 10, 100 * _MB, 50, 1, 0, 3, frozenset()),
-        Plan("starter", "Starter", 49_900, 50, 500 * _MB, None, 1, 30, 3, _STARTER_FEATURES),
-        Plan("growth", "Growth", 149_900, 500, 2 * _GB, None, 1, 100, 10, _GROWTH_FEATURES),
-        Plan("business", "Business", 399_900, None, 3 * _GB, None, 2, 150, 25, _GROWTH_FEATURES),
+        Plan("free", "Free", 0, 10, 100 * _MB, 50, 1, 0, None, frozenset()),
+        Plan("starter", "Starter", 49_900, 50, 500 * _MB, None, 1, 30, None, _STARTER_FEATURES),
+        Plan("growth", "Growth", 149_900, 500, 2 * _GB, None, 1, 100, None, _GROWTH_FEATURES),
+        Plan("business", "Business", 399_900, None, 3 * _GB, None, 2, 150, None, _GROWTH_FEATURES),
         # A trial previews Starter exactly, so it must not preview a feature
         # Starter doesn't give: it keeps theme switching locked as it always
         # did, with Starter's other limits and the old 15 AI requests a day.
         Plan(
-            "trial", "Trial", 0, 50, 500 * _MB, None, 1, 15, 3,
+            "trial", "Trial", 0, 50, 500 * _MB, None, 1, 15, None,
             _STARTER_FEATURES - {"theme_switch"},
         ),
         # The shared read-only demo account: everything unlocked.
-        Plan("demo", "Demo", 0, 50, 800 * _MB, None, 1, 50, 3, FEATURES),
+        Plan("demo", "Demo", 0, 50, 800 * _MB, None, 1, 50, None, FEATURES),
     )
 }
 PAID_PLANS: tuple[str, ...] = ("starter", "growth", "business")
+
+# A Free store left unused this long is deleted, after warning emails: "free as
+# long as you're active". Longer for someone who has paid before.
+FREE_INACTIVE_DAYS = 30
+FORMER_PAID_INACTIVE_DAYS = 90
 
 # What a merchant pays in total for a period, in integer cents. Written out
 # instead of computed from a discount: these are the numbers on the pricing
@@ -139,7 +145,8 @@ def ensure_feature(key: str, feature: str) -> None:
 # Real payment gateways needing a merchant credential/account. Cash on
 # Delivery and Manual (customer pays the merchant's own number, then
 # submits a transaction id/screenshot to verify by hand) need no gateway
-# account and stay open on every plan — only these four are gated.
+# account and are never gated. These four need the "gateways" feature, which
+# every paid plan has and Free does not.
 GATED_PAYMENT_PROVIDERS = {"bkash", "nagad", "sslcommerz", "rocket"}
 
 

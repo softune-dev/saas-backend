@@ -21,7 +21,7 @@ import aio_pika
 import httpx
 from sqlalchemy import Delete, Select, Update, delete, func, select, update
 
-from app import plan_lapse, plans
+from app import account_archive, inactivity, plan_lapse, plans
 from app.config import settings
 from app.db import SessionLocal, engine
 from app.models import (
@@ -893,164 +893,8 @@ async def notification_cleanup_loop() -> None:
 
 
 # ---------------------------------------------------------------------------
-#  Trial expiry sweep — the only place expired trial tenants actually get
-#  deleted. Login itself already rejects a trial past trial_expires_at (see
-#  app/api/auth.py's _check_tenant_access), so this isn't what blocks
-#  access; it's just the cleanup, running trial_grace_days later. Every FK
-#  to tenants.id in this schema is ondelete="CASCADE", so one DELETE here
-#  takes the tenant's site/products/orders/etc. with it — no manual
-#  multi-table cleanup needed.
-# ---------------------------------------------------------------------------
-
-TRIAL_SWEEP_INTERVAL_SECONDS = 60 * 60  # hourly
-
-
-async def notify_ended_trials() -> None:
-    """Sends mailer.trial_ended_email once per tenant the moment
-    trial_expires_at passes — well before sweep_expired_trials' later,
-    separate hard-delete trial_grace_days after that. Same hourly cadence,
-    deliberately a different function: expiry (block access, tell the
-    owner) and deletion (actually remove the data) are different moments
-    with different consequences, and conflating them risked either sending
-    the email too late (right as data disappears, not when it's blocked)
-    or too early (before login is even affected)."""
-    from app import mailer
-
-    async with SessionLocal() as db:
-        expired = (
-            await db.execute(
-                select(Tenant).where(
-                    Tenant.plan == "trial",
-                    Tenant.trial_expires_at < func.now(),
-                    Tenant.trial_ended_notified_at.is_(None),
-                )
-            )
-        ).scalars().all()
-        if not expired:
-            return
-
-        for tenant in expired:
-            owner = (
-                await db.execute(
-                    select(User).where(User.tenant_id == tenant.id, User.role == "owner")
-                )
-            ).scalars().first()
-            tenant.trial_ended_notified_at = func.now()
-            if owner is None:
-                continue
-            subject, html_body, text_body = mailer.trial_ended_email(
-                owner.full_name, grace_days=settings.trial_grace_days
-            )
-            sent = await mailer.send_email(owner.email, subject, html_body, text_body)
-            if not sent:
-                log.warning("trial-ended email: failed to send to %s", owner.email)
-        await db.commit()
-        log.info("trial expiry: notified %d tenant(s)", len(expired))
-
-
-async def trial_end_notify_loop() -> None:
-    while True:
-        try:
-            await notify_ended_trials()
-        except Exception:  # noqa: BLE001 - a failed sweep must not kill the worker
-            log.exception("trial-ended notification sweep failed")
-        await asyncio.sleep(TRIAL_SWEEP_INTERVAL_SECONDS)
-
-
-def _expired_trial(cutoff: datetime) -> tuple:
-    return (Tenant.plan == "trial", Tenant.trial_expires_at < cutoff)
-
-
-def delete_expired_trials_stmt(tenant_ids: list[uuid.UUID], cutoff: datetime) -> Delete:
-    """Re-checks the whole condition inside the DELETE, for the reason given in
-    delete_abandoned_stmt: a trial that pays or becomes free while its contact
-    is being saved must survive, with its media and domains."""
-    return (
-        delete(Tenant)
-        .where(Tenant.id.in_(tenant_ids), *_expired_trial(cutoff))
-        .returning(Tenant.id)
-        .execution_options(synchronize_session=False)
-    )
-
-
-async def sweep_expired_trials() -> None:
-    from fastapi.concurrency import run_in_threadpool
-
-    from app import cache, contacts, media, vercel
-
-    cutoff = datetime.now(UTC) - timedelta(days=settings.trial_grace_days)
-    async with SessionLocal() as db:
-        expiring_tenant_ids = (
-            await db.execute(
-                select(Tenant.id).where(*_expired_trial(cutoff))
-            )
-        ).scalars().all()
-        if not expiring_tenant_ids:
-            return
-
-        # Read every affected site's hostnames BEFORE the cascade delete —
-        # once the rows are gone there's nothing left to read them from.
-        # Without this, the storefront cache (keyed by subdomain) keeps
-        # serving a deleted trial's theme/template to anyone who later
-        # reuses the same subdomain, until the cache TTL expires — a real
-        # bug (see app/api/superadmin.py::delete_tenant's own fix for the
-        # single-tenant version of this same gap).
-        sites = (
-            await db.execute(select(Site).where(Site.tenant_id.in_(expiring_tenant_ids)))
-        ).scalars().all()
-
-        # Save these people to the permanent contact list FIRST. If that
-        # fails, nothing is deleted this round (the next sweep retries), so
-        # a contact is never lost.
-        try:
-            await contacts.upsert_tenants(db, list(expiring_tenant_ids), deleted=True)
-        except Exception:  # noqa: BLE001
-            await db.rollback()
-            log.exception("couldn't save contacts before deleting; skipping this sweep")
-            return
-        deleted_ids = set(
-            (await db.execute(delete_expired_trials_stmt(list(expiring_tenant_ids), cutoff))).scalars().all()
-        )
-        await db.commit()
-        if deleted_ids:
-            log.info("trial sweep: deleted %d expired trial tenant(s)", len(deleted_ids))
-
-    for site in sites:
-        if site.tenant_id not in deleted_ids:
-            continue
-        await cache.invalidate_site(site.subdomain, site.custom_domain)
-        # Same reasoning as app/api/superadmin.py::delete_tenant's identical
-        # fix — without this, an expired trial's subdomain stays attached
-        # to its template's Vercel project forever, orphaned domains a
-        # later tenant reusing the same subdomain (nothing in the DB stops
-        # that) can collide with if they pick a different template.
-        project_id = site.template.vercel_project_id if site.template else None
-        if project_id and site.template.framework == "nextjs":
-            await vercel.remove_domain_from_project(
-                f"{site.subdomain}.{settings.site_base_domain}", project_id
-            )
-            if site.custom_domain:
-                await vercel.remove_domain_from_project(site.custom_domain, project_id)
-        # Cloudinary has no FK to tenants.id — the DELETE above only takes
-        # DB rows with it, the site's uploaded media has always been left
-        # behind here (previously cleaned up by hand, see
-        # media.delete_site_folder's own docstring). This is the actual
-        # "wiped from existence" step for a trial that never converted.
-        await run_in_threadpool(media.delete_site_folder, site.subdomain)
-
-
-async def trial_sweep_loop() -> None:
-    while True:
-        try:
-            await sweep_expired_trials()
-        except Exception:  # noqa: BLE001 - a failed sweep must not kill the worker
-            log.exception("trial expiry sweep failed")
-        await asyncio.sleep(TRIAL_SWEEP_INTERVAL_SECONDS)
-
-
-# ---------------------------------------------------------------------------
 #  Paid-plan renewal reminders — three escalating emails on the same hourly
-#  cadence as the trial sweeps above, but for a RECURRING subscription that
+#  cadence, for a RECURRING subscription that
 #  never gets hard-deleted. CLAUDE.md rule 8's immutability instinct extended
 #  one step further: not just order history, a paying customer's whole
 #  account is never at risk from a late payment, only their login. All three
@@ -1060,7 +904,7 @@ async def trial_sweep_loop() -> None:
 #  confirms every renewal by hand, same as the initial purchase.
 # ---------------------------------------------------------------------------
 
-PLAN_RENEWAL_SWEEP_INTERVAL_SECONDS = 60 * 60  # hourly, matches the trial sweeps
+PLAN_RENEWAL_SWEEP_INTERVAL_SECONDS = 60 * 60  # hourly
 PLAN_RENEWAL_REMINDER_DAYS = 3  # how many days before plan_renews_at the first email fires
 PLAN_OVERDUE_GRACE_DAYS = 7  # days after plan_renews_at before login is actually paused
 
@@ -1212,8 +1056,7 @@ async def sweep_overdue_plans() -> None:
     plan_renews_at forward and this filter would no longer match). Sets
     status="payment_overdue" and stamps plan_overdue_since (the anchor
     sweep_abandoned_paid_accounts counts its own, much longer, 1-month
-    window from) — this sweep itself never deletes anything, deliberately
-    distinct from sweep_expired_trials above, which does.
+    window from) — this sweep itself never deletes anything.
     """
     from app import invoices as invoices_module
     from app import mailer
@@ -1406,10 +1249,20 @@ async def sweep_abandoned_paid_accounts() -> None:
             await db.rollback()
             log.exception("couldn't save contacts before deleting; skipping this sweep")
             return
-        deleted_ids = set(
-            (await db.execute(delete_abandoned_stmt(list(expiring_tenant_ids), cutoff))).scalars()
-        )
-        await db.commit()
+        deleted_ids: set[uuid.UUID] = set()
+        for tenant_id in expiring_tenant_ids:
+            # The record and the deletion happen together or not at all.
+            try:
+                await account_archive.archive(db, tenant_id, "unpaid")
+                gone = (await db.execute(delete_abandoned_stmt([tenant_id], cutoff))).scalar_one_or_none()
+                if gone is None:
+                    await db.rollback()
+                    continue
+                await db.commit()
+                deleted_ids.add(gone)
+            except Exception:  # noqa: BLE001 - this one is kept; the others go on
+                await db.rollback()
+                log.exception("couldn't archive and delete tenant %s; kept", tenant_id)
         if deleted_ids:
             log.info("plan renewal: deleted %d abandoned paid tenant(s)", len(deleted_ids))
 
@@ -1434,6 +1287,18 @@ async def plan_deletion_sweep_loop() -> None:
             await sweep_abandoned_paid_accounts()
         except Exception:  # noqa: BLE001 - a failed sweep must not kill the worker
             log.exception("plan deletion sweep failed")
+        await asyncio.sleep(PLAN_RENEWAL_SWEEP_INTERVAL_SECONDS)
+
+
+async def inactivity_loop() -> None:
+    """Unused Free accounts: three warnings, then deletion. Does nothing unless
+    INACTIVITY_DELETION is set (app/inactivity.py)."""
+    log.info("inactivity deletion mode: %s", settings.inactivity_deletion)
+    while True:
+        try:
+            await inactivity.run()
+        except Exception:  # noqa: BLE001 - a failed sweep must not kill the worker
+            log.exception("inactivity sweep failed")
         await asyncio.sleep(PLAN_RENEWAL_SWEEP_INTERVAL_SECONDS)
 
 
@@ -1483,12 +1348,11 @@ async def main() -> None:
         asyncio.create_task(notification_cleanup_loop())
         asyncio.create_task(pending_domain_sweep_loop())
         asyncio.create_task(contact_sync_loop())
-        asyncio.create_task(trial_end_notify_loop())
-        asyncio.create_task(trial_sweep_loop())
         asyncio.create_task(plan_renewal_notify_loop())
         asyncio.create_task(plan_overdue_sweep_loop())
         asyncio.create_task(plan_deletion_warning_loop())
         asyncio.create_task(plan_deletion_sweep_loop())
+        asyncio.create_task(inactivity_loop())
         await asyncio.Future()  # sleep forever
 
 

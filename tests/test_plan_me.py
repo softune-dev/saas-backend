@@ -90,7 +90,7 @@ async def test_free_plan_info_is_exact(account_factory):
         "features": [],
         "limits": {
             "products": 10, "storage_bytes": 100 * 1024 * 1024, "orders_per_month": 50,
-            "stores": 1, "ai_per_day": 0, "events": 3,
+            "stores": 1, "ai_per_day": 0, "events": None,
         },
         "usage": {
             "products": 2, "events": 1, "stores": 1,
