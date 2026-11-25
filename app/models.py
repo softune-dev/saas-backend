@@ -147,6 +147,10 @@ class Tenant(Base, TimestampMixin):
     # When the merchant last did something real (migrations/087), so a later
     # sweep can tell an abandoned free store from a live one. Server default
     # now(): existing tenants' clocks start when the migration ran.
+    # The period last paid for, so a reminder quotes the same price, and when a
+    # paid plan dropped to Free (app/plan_lapse.py). See migrations/088.
+    plan_months: Mapped[int] = mapped_column(SmallInteger, default=1, server_default=text("1"))
+    plan_lapsed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_active_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -410,6 +414,9 @@ class Product(Base, TimestampMixin):
     # sales figure, see ProductOut's comment in schemas.py.
     initial_sold_count: Mapped[int] = mapped_column(Integer, default=0)
     free_delivery: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Kept but not on the store: the tenant lapsed to Free with more products
+    # than it allows. Set only by app/plan_lapse.py, never by a merchant.
+    plan_hidden: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
     delivery_charge_cents: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # [{name, charge_cents}, ...] — multiple delivery-charge options a
     # merchant can offer for this product (e.g. "Inside Dhaka" / "Outside
@@ -1056,6 +1063,7 @@ class Invoice(Base):
     never gets an updated_at since invoices are never edited."""
 
     __tablename__ = "invoices"
+    __table_args__ = (CheckConstraint("months IN (1, 3, 6, 12)", name="invoices_months_check"),)
 
     id: Mapped[uuid.UUID] = _pk()
     tenant_id: Mapped[uuid.UUID] = mapped_column(
@@ -1064,6 +1072,7 @@ class Invoice(Base):
     invoice_number: Mapped[str] = mapped_column(Text)
     plan: Mapped[str] = mapped_column(Text)
     amount_cents: Mapped[int] = mapped_column(Integer)
+    months: Mapped[int] = mapped_column(SmallInteger, default=1, server_default=text("1"))
     currency: Mapped[str] = mapped_column(Text, default="BDT")
     period_label: Mapped[str] = mapped_column(Text)
     tenant_business_snapshot: Mapped[dict] = mapped_column(JSONB, default=dict)
@@ -1098,6 +1107,9 @@ class PaymentClaim(Base):
     an updated_at."""
 
     __tablename__ = "payment_claims"
+    __table_args__ = (
+        CheckConstraint("months IN (1, 3, 6, 12)", name="payment_claims_months_check"),
+    )
 
     id: Mapped[uuid.UUID] = _pk()
     tenant_id: Mapped[uuid.UUID] = mapped_column(
@@ -1114,6 +1126,8 @@ class PaymentClaim(Base):
     pack_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     credits: Mapped[int | None] = mapped_column(Integer, nullable=True)
     amount_cents: Mapped[int] = mapped_column(Integer)
+    # How many months a plan claim pays for (migrations/088).
+    months: Mapped[int] = mapped_column(SmallInteger, default=1, server_default=text("1"))
     sender_number: Mapped[str] = mapped_column(Text)
     trx_id: Mapped[str] = mapped_column(Text)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)

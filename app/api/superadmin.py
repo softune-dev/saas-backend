@@ -18,10 +18,9 @@ orders, etc.) — an operator who needs to see a customer's storefront data
 still does that the same way as today, not through here.
 """
 
-import calendar
 import uuid
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.concurrency import run_in_threadpool
@@ -29,7 +28,7 @@ from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import contact_checks
-from app import ai_images, audit, billing_actions, cache, contacts as contacts_module, chat_credits as chat_credits_module, crud, invoices as invoices_module, mailer, media, queue, vercel
+from app import ai_images, audit, billing_actions, cache, contacts as contacts_module, chat_credits as chat_credits_module, crud, invoices as invoices_module, mailer, media, plan_lapse, plans, queue, vercel
 from app.config import settings
 from app.db import get_db
 from app.models import (
@@ -319,13 +318,50 @@ async def create_account(
 async def update_tenant(
     tenant_id: uuid.UUID, payload: SuperAdminTenantUpdate, admin: SuperAdminUser, db: DB
 ) -> dict:
-    tenant = (await db.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one_or_none()
+    tenant = await billing_actions.lock_tenant(db, tenant_id)
     if tenant is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Tenant not found")
     old_plan = tenant.plan
     old_status = tenant.status
     tenant = crud.apply_updates(tenant, payload.model_dump(exclude_unset=True))
+    plan_changed = payload.plan is not None and payload.plan != old_plan
+    # The plan and everything that follows from it are saved together, under the
+    # lock, so no sweep can see a new plan with the old plan's dates.
+    if plan_changed and payload.plan == "free":
+        # Free is nothing to bill: no invoice, no renewal date, and nothing
+        # left that could make the overdue sweep treat it as a lapsed payer.
+        tenant.plan_renews_at = None
+        tenant.plan_renewal_reminded_at = None
+        tenant.plan_overdue_notified_at = None
+        tenant.plan_overdue_since = None
+        tenant.plan_deletion_warned_at = None
+        tenant.plan_months = 1
+        # Starts the custom domain's grace period, as an automatic lapse does.
+        tenant.plan_lapsed_at = datetime.now(UTC) if old_plan in plans.PAID_PLANS else None
+        # Otherwise login stays blocked for a payment nobody owes any more.
+        # A manual suspension is left alone.
+        if tenant.status == "payment_overdue":
+            tenant.status = "active"
+    elif plan_changed and payload.plan not in ("trial", "demo"):
+        # A month from now, as ever, but time already paid for is never cut
+        # short. No value conversion here (that is for verified payments): an
+        # admin correcting a wrong click would multiply it.
+        month = billing_actions.add_months(datetime.now(UTC), 1)
+        kept = tenant.plan_renews_at if old_plan in plans.PAID_PLANS else None
+        if kept is None or kept <= month:
+            tenant.plan_renews_at = month
+            tenant.plan_months = 1
+        tenant.plan_renewal_reminded_at = None
+        tenant.plan_overdue_notified_at = None
+        tenant.plan_overdue_since = None
+        tenant.plan_deletion_warned_at = None
+        tenant.plan_lapsed_at = None
     tenant = await crud.save(db, tenant)
+    if plan_changed:
+        if tenant.plan == "free":
+            await plan_lapse.hide_extra_products(db, tenant.id)
+        else:
+            await plan_lapse.restore(tenant.id)
     changes = {}
     if payload.plan is not None and payload.plan != old_plan:
         changes["plan"] = [old_plan, payload.plan]
@@ -340,35 +376,8 @@ async def update_tenant(
     # why this is event-triggered rather than a recurring billing job.
     # "trial"/"demo" never get an invoice at all — there's nothing to bill
     # or document for a free plan.
-    plan_changed = payload.plan is not None and payload.plan != old_plan
-    if plan_changed and payload.plan == "free":
-        # Free is nothing to bill: no invoice, no renewal date, and nothing
-        # left that could make the overdue sweep treat it as a lapsed payer.
-        tenant.plan_renews_at = None
-        tenant.plan_renewal_reminded_at = None
-        tenant.plan_overdue_notified_at = None
-        tenant.plan_overdue_since = None
-        tenant.plan_deletion_warned_at = None
-        # Otherwise login stays blocked for a payment nobody owes any more.
-        # A manual suspension is left alone.
-        if tenant.status == "payment_overdue":
-            tenant.status = "active"
-        tenant = await crud.save(db, tenant)
-    elif (
-        plan_changed
-        and payload.plan not in ("trial", "demo")
-    ):
-        # First-time conversion onto a paid plan starts the renewal clock —
-        # see migrations/065's own docstring; every cycle after this one
-        # advances via confirm_plan_renewal below, never reset here again.
+    if plan_changed and payload.plan not in ("trial", "demo", "free"):
         now = datetime.now(UTC)
-        tenant.plan_renews_at = _add_one_month(now)
-        tenant.plan_renewal_reminded_at = None
-        tenant.plan_overdue_notified_at = None
-        tenant.plan_overdue_since = None
-        tenant.plan_deletion_warned_at = None
-        tenant = await crud.save(db, tenant)
-
         invoice = Invoice(
             tenant_id=tenant.id,
             invoice_number=await crud.next_invoice_number(db, tenant.id),
@@ -389,28 +398,18 @@ async def update_tenant(
     return _tenant_out(tenant, aggregates, sites)
 
 
-def _add_one_month(dt: datetime) -> datetime:
-    """Advances a datetime by exactly one calendar month, keeping the same
-    day-of-month where possible (Jan 31 + 1 month -> Feb 28/29, not Mar 3).
-    Python's stdlib has no calendar-aware date math (that's what
-    python-dateutil's relativedelta is for, not a dependency here) — this is
-    the one bit of it confirm_plan_renewal actually needs. See
-    migrations/065's docstring on why a naive +30 days would drift the
-    renewal date earlier every cycle that includes a 31-day month.
-    """
-    year = dt.year + dt.month // 12
-    month = dt.month % 12 + 1
-    day = min(dt.day, calendar.monthrange(year, month)[1])
-    return dt.replace(year=year, month=month, day=day)
-
-
 @router.post("/tenants/{tenant_id}/confirm-renewal", response_model=SuperAdminTenantOut)
-async def confirm_plan_renewal(tenant_id: uuid.UUID, admin: SuperAdminUser, db: DB) -> dict:
+async def confirm_plan_renewal(
+    tenant_id: uuid.UUID,
+    admin: SuperAdminUser,
+    db: DB,
+    months: Literal[1, 3, 6, 12] = 1,
+) -> dict:
     """Manual "payment received, renew" action — the recurring-billing
     counterpart to update_tenant's one-time plan-change invoice above. This
     (plus that first-time set on conversion to a paid plan, above) is the
-    ONLY place plan_renews_at ever advances — always by exactly one
-    calendar month from its own previous value, never "today + 1 month", so
+    ONLY place plan_renews_at ever advances — always by the months
+    paid for (one unless said otherwise) from its own previous value, never "today + 1 month", so
     a merchant who pays a few days late still renews on the same date next
     cycle (migrations/065). Un-suspends a tenant the overdue sweep locked
     out for non-payment (status == "payment_overdue"), but never touches a
@@ -418,7 +417,7 @@ async def confirm_plan_renewal(tenant_id: uuid.UUID, admin: SuperAdminUser, db: 
     separate action (PATCH above), not something a payment should silently
     undo.
     """
-    tenant = (await db.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one_or_none()
+    tenant = await billing_actions.lock_tenant(db, tenant_id)
     if tenant is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Tenant not found")
     if tenant.plan == "free":
@@ -429,7 +428,8 @@ async def confirm_plan_renewal(tenant_id: uuid.UUID, admin: SuperAdminUser, db: 
         )
 
     now = datetime.now(UTC)
-    tenant.plan_renews_at = _add_one_month(tenant.plan_renews_at or now)
+    tenant.plan_renews_at = billing_actions.add_months(tenant.plan_renews_at or now, months)
+    tenant.plan_months = months
     tenant.plan_renewal_reminded_at = None
     tenant.plan_overdue_notified_at = None
     tenant.plan_overdue_since = None
@@ -439,16 +439,17 @@ async def confirm_plan_renewal(tenant_id: uuid.UUID, admin: SuperAdminUser, db: 
     tenant = await crud.save(db, tenant)
     await audit.record(
         admin, "tenant.renewal_confirmed", "tenant", tenant.id, tenant.name,
-        {"plan": tenant.plan, "renews_at": tenant.plan_renews_at.isoformat()},
+        {"plan": tenant.plan, "months": months, "renews_at": tenant.plan_renews_at.isoformat()},
     )
 
     invoice = Invoice(
         tenant_id=tenant.id,
         invoice_number=await crud.next_invoice_number(db, tenant.id),
         plan=tenant.plan,
-        amount_cents=invoices_module.PLAN_PRICES_CENTS.get(tenant.plan, 0),
+        amount_cents=plans.period_price(tenant.plan, months),
+        months=months,
         currency="BDT",
-        period_label=now.strftime("%b %Y"),
+        period_label=invoices_module.period_label(now, months),
         tenant_business_snapshot=tenant.business,
     )
     await crud.save(db, invoice)

@@ -21,7 +21,7 @@ import aio_pika
 import httpx
 from sqlalchemy import Delete, Select, Update, delete, func, select, update
 
-from app import plans
+from app import plan_lapse, plans
 from app.config import settings
 from app.db import SessionLocal, engine
 from app.models import (
@@ -199,6 +199,16 @@ async def handle_detach_domain(payload: dict) -> None:
     if not project_id:
         return
 
+    # Jobs can run out of order, and stores share a project. Never take away a
+    # domain that is wanted now: by this store (asked for again after it was
+    # let go) or by another store that has connected it since.
+    async with SessionLocal() as db:
+        if domain in (site.custom_domain, site.pending_custom_domain) and await _plan_has(db, site.tenant_id, "domain"):
+            log.info("detach_domain: site %s wants %s again, keeping it", site_id, domain)
+            return
+        if (await db.execute(select(Site.id).where(Site.custom_domain == domain, Site.id != site.id))).first():
+            log.info("detach_domain: %s now belongs to another site, keeping it", domain)
+            return
     await vercel.remove_domain_from_project(domain, project_id)
 
 
@@ -1057,6 +1067,12 @@ PLAN_OVERDUE_GRACE_DAYS = 7  # days after plan_renews_at before login is actuall
 _PAID_PLANS = ("starter", "growth", "business")
 
 
+def _renewal_quote(tenant: Tenant) -> tuple[int, int]:
+    """(taka, months) a reminder should quote: the period last paid for."""
+    months = tenant.plan_months or 1
+    return plans.period_price(tenant.plan, months) // 100, months
+
+
 async def notify_upcoming_renewals() -> None:
     """Sends mailer.plan_renewal_upcoming_email once per tenant, exactly
     PLAN_RENEWAL_REMINDER_DAYS before plan_renews_at — the calm, no-warning
@@ -1091,12 +1107,14 @@ async def notify_upcoming_renewals() -> None:
             if owner is None:
                 continue
             days_left = max(0, (tenant.plan_renews_at - now).days)
+            amount_taka, months = _renewal_quote(tenant)
             subject, html_body, text_body = mailer.plan_renewal_upcoming_email(
                 owner.full_name,
                 invoices_module.PLAN_NAMES.get(tenant.plan, tenant.plan.title()),
-                invoices_module.PLAN_PRICES_CENTS.get(tenant.plan, 0) // 100,
+                amount_taka,
                 tenant.plan_renews_at.strftime("%b %d, %Y"),
                 days_left,
+                months=months,
             )
             sent = await mailer.send_email(owner.email, subject, html_body, text_body)
             if not sent:
@@ -1138,11 +1156,15 @@ async def notify_plan_overdue() -> None:
             tenant.plan_overdue_notified_at = func.now()
             if owner is None:
                 continue
+            amount_taka, months = _renewal_quote(tenant)
             subject, html_body, text_body = mailer.plan_payment_due_email(
                 owner.full_name,
                 invoices_module.PLAN_NAMES.get(tenant.plan, tenant.plan.title()),
-                invoices_module.PLAN_PRICES_CENTS.get(tenant.plan, 0) // 100,
+                amount_taka,
                 grace_days=PLAN_OVERDUE_GRACE_DAYS,
+                months=months,
+                to_free=settings.free_plan_enabled,
+                deletion_days=PLAN_DELETION_GRACE_DAYS,
             )
             sent = await mailer.send_email(owner.email, subject, html_body, text_body)
             if not sent:
@@ -1197,6 +1219,10 @@ async def sweep_overdue_plans() -> None:
     from app import mailer
 
     cutoff = datetime.now(UTC) - timedelta(days=PLAN_OVERDUE_GRACE_DAYS)
+    if settings.free_plan_enabled:
+        # Free exists: the store keeps running on it instead of being locked out.
+        await plan_lapse.lapse_overdue(cutoff)
+        return
     async with SessionLocal() as db:
         to_pause = (
             await db.execute(
@@ -1222,10 +1248,13 @@ async def sweep_overdue_plans() -> None:
             paused += 1
             if owner is None:
                 continue
+            amount_taka, months = _renewal_quote(tenant)
             subject, html_body, text_body = mailer.plan_access_paused_email(
                 owner.full_name,
                 invoices_module.PLAN_NAMES.get(tenant.plan, tenant.plan.title()),
-                invoices_module.PLAN_PRICES_CENTS.get(tenant.plan, 0) // 100,
+                amount_taka,
+                months=months,
+                deletion_days=PLAN_DELETION_GRACE_DAYS,
             )
             sent = await mailer.send_email(owner.email, subject, html_body, text_body)
             if not sent:
@@ -1237,6 +1266,9 @@ async def plan_overdue_sweep_loop() -> None:
     while True:
         try:
             await sweep_overdue_plans()
+            # Not behind the switch: admin can move a paid store to Free by hand.
+            await plan_lapse.sweep_domains()
+            await plan_lapse.heal_hidden()
         except Exception:  # noqa: BLE001 - a failed sweep must not kill the worker
             log.exception("plan overdue sweep failed")
         await asyncio.sleep(PLAN_RENEWAL_SWEEP_INTERVAL_SECONDS)
@@ -1296,6 +1328,8 @@ async def notify_plan_deletion_warning() -> None:
     from app import invoices as invoices_module
     from app import mailer
 
+    if settings.free_plan_enabled:
+        return  # nothing will be deleted: these accounts drop to Free instead
     cutoff = datetime.now(UTC) - timedelta(
         days=PLAN_DELETION_GRACE_DAYS - PLAN_DELETION_WARNING_LEAD_DAYS
     )
@@ -1348,6 +1382,8 @@ async def sweep_abandoned_paid_accounts() -> None:
 
     from app import cache, contacts, media, vercel
 
+    if settings.free_plan_enabled:
+        return  # an unpaid account drops to Free instead (app/plan_lapse.py)
     cutoff = datetime.now(UTC) - timedelta(days=PLAN_DELETION_GRACE_DAYS)
     async with SessionLocal() as db:
         expiring_tenant_ids = (await db.execute(deletion_candidates_stmt(cutoff))).scalars().all()

@@ -89,7 +89,8 @@ async def _check_tenant_access(db: AsyncSession, tenant_id: uuid.UUID) -> None:
             status.HTTP_403_FORBIDDEN,
             "Access is paused until your plan payment is confirmed. Contact us on "
             "WhatsApp or email support@softunebd.com with your Transaction ID to "
-            "restore access — your data is untouched and waiting.",
+            # 30 days: worker.PLAN_DELETION_GRACE_DAYS.
+            "restore access. Your data is kept for 30 days after the pause, then deleted.",
         )
     if tenant.plan == "trial" and tenant.trial_expires_at and datetime.now(UTC) > tenant.trial_expires_at:
         raise HTTPException(

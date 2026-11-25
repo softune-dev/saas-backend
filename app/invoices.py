@@ -8,6 +8,7 @@ they came from the same company, not two different templates.
 """
 
 import html
+from datetime import datetime
 
 from app.config import settings
 from app.mailer import BRAND, INK, LINE, MUTED, SURFACE
@@ -21,6 +22,12 @@ from app.plans import PLANS
 PLAN_PRICES_CENTS: dict[str, int] = {key: p.price_cents for key, p in PLANS.items()}
 
 PLAN_NAMES: dict[str, str] = {key: p.name for key, p in PLANS.items()}
+
+
+def period_label(start: datetime, months: int) -> str:
+    """The period line on an invoice: "Nov 2026", or "Nov 2026, 12 months"."""
+    label = start.strftime("%b %Y")
+    return label if months == 1 else f"{label}, {months} months"
 
 
 def _format_money(cents: int, currency: str) -> str:

@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import crud, invoices as invoices_module, mailer
+from app import crud, invoices as invoices_module, mailer, plans
 from app.config import settings
 from app.db import get_db
 from app.models import Invoice, PaymentClaim, Site, Tenant, User
@@ -45,11 +45,14 @@ async def submit_manual_payment(payload: ManualPaymentSubmit, user: CurrentUser,
     someone has to look at it by hand.
     """
     tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
+    # Priced here, never by the client: the SMS has to match this to the cent.
+    amount_cents = plans.period_price(payload.plan, payload.months)
     claim = PaymentClaim(
         tenant_id=user.tenant_id,
         kind="plan",
         plan=payload.plan,
-        amount_cents=invoices_module.PLAN_PRICES_CENTS.get(payload.plan, 0),
+        months=payload.months,
+        amount_cents=amount_cents,
         sender_number=payload.sender_number.strip(),
         trx_id=payload.trx_id.strip(),
         note=payload.note.strip() if payload.note else None,
@@ -72,8 +75,9 @@ async def submit_manual_payment(payload: ManualPaymentSubmit, user: CurrentUser,
         owner_name=owner.full_name if owner else None,
         owner_email=owner.email if owner else "—",
         site_subdomain=site.subdomain if site else None,
-        requested_plan_name=invoices_module.PLAN_NAMES.get(payload.plan, payload.plan),
-        amount_taka=invoices_module.PLAN_PRICES_CENTS.get(payload.plan, 0) // 100,
+        requested_plan_name=invoices_module.PLAN_NAMES.get(payload.plan, payload.plan)
+        + (f" for {payload.months} months" if payload.months > 1 else ""),
+        amount_taka=amount_cents // 100,
         sender_number=payload.sender_number.strip(),
         trx_id=payload.trx_id.strip(),
         note=payload.note.strip() if payload.note else None,

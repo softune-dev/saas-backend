@@ -13,7 +13,7 @@ from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import cache, courier_booking, courier_crypto, crud, media, plan_limits, plans, products, steadfast
+from app import billing_actions, cache, courier_booking, courier_crypto, crud, media, plan_lapse, plan_limits, plans, products, steadfast
 from app.basic_plan import order_out, order_window_start
 from app.db import get_db
 from app.products import first_image_url
@@ -276,8 +276,14 @@ async def update_product(
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
 
     old_image_urls = _product_image_urls(product)
+    switched = "is_active" in data and data["is_active"] != product.is_active
     crud.apply_updates(product, data)
     product = await crud.save(db, product)
+    # A lapsed store shows only its best sellers (app/plan_lapse.py), so switching
+    # one can show or hide another, on any of the tenant's stores.
+    if switched and await plan_lapse.sync_if_free(db, user.tenant_id):
+        await db.refresh(product)
+        await billing_actions.refresh_storefronts(user.tenant_id)
     await cache.invalidate_site(site.subdomain, site.custom_domain)
     await cache.invalidate_dashboard(str(site.id))
 
@@ -302,6 +308,8 @@ async def delete_product(
     # Past order_items survive: their FK is SET NULL and they carry snapshots of
     # name/sku/price. See migrations/003_commerce.sql.
     await crud.delete(db, product)
+    if await plan_lapse.sync_if_free(db, user.tenant_id):
+        await billing_actions.refresh_storefronts(user.tenant_id)
     await cache.invalidate_site(site.subdomain, site.custom_domain)
     await cache.invalidate_dashboard(str(site.id))
     for url in image_urls:

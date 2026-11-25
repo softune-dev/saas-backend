@@ -96,6 +96,12 @@ async def test_free_plan_info_is_exact(account_factory):
             "products": 2, "events": 1, "stores": 1,
             "orders_this_month": 7, "blocked_this_month": 3,
         },
+        # Written out: the dashboard shows exactly these totals, in cents.
+        "prices": {
+            "starter": {"1": 49_900, "3": 142_500, "6": 269_400, "12": 478_800},
+            "growth": {"1": 149_900, "3": 427_500, "6": 809_400, "12": 1_438_800},
+            "business": {"1": 399_900, "3": 1_139_700, "6": 2_159_400, "12": 3_838_800},
+        },
     }
     # The login lookup plus ONE usage query, not one per counter.
     assert len(statements) <= 3, statements

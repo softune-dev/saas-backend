@@ -358,7 +358,7 @@ def manual_payment_submitted_email(
         ("Store", site_subdomain or "—"),
         ("Current plan", current_plan),
         ("Trial ends", trial_expires_at or "—"),
-        ("Requesting plan", f"{requested_plan_name} (৳{amount_taka:,}/mo)"),
+        ("Requesting plan", f"{requested_plan_name} (৳{amount_taka:,})"),
         ("Sent from (bKash number)", sender_number),
         ("Transaction ID", trx_id),
         ("Note", note or "—"),
@@ -618,8 +618,14 @@ def _renewal_contact_line() -> str:
     )
 
 
+def _per(months: int) -> str:
+    """After an amount in the renewal emails: "/mo", or " for 12 months"."""
+    return "/mo" if months == 1 else f" for {months} months"
+
+
 def plan_renewal_upcoming_email(
     recipient_name: str | None, plan_name: str, amount_taka: int, renews_on: str, days_left: int,
+    months: int = 1,
 ) -> tuple[str, str, str]:
     """Sent once, `days_left` days before Tenant.plan_renews_at — see
     app/worker.py's notify_upcoming_renewals. First of three escalating
@@ -638,7 +644,7 @@ def plan_renewal_upcoming_email(
     <p style="margin:0 0 8px 0;font-size:14px;color:{INK};">{greeting}</p>
     <h1 style="margin:0 0 10px 0;font-size:22px;line-height:1.3;font-weight:400;color:{INK};">Renewal coming up</h1>
     <p style="margin:0 0 16px 0;font-size:15px;line-height:1.55;color:{MUTED};">
-      Your {html.escape(plan_name)} plan (৳{amount_taka:,}/mo) renews on {html.escape(renews_on)}
+      Your {html.escape(plan_name)} plan (৳{amount_taka:,}{_per(months)}) renews on {html.escape(renews_on)}
       — {days_left} day{"s" if days_left != 1 else ""} from now.
     </p>
     <p style="margin:0 0 24px 0;font-size:15px;line-height:1.55;color:{MUTED};">
@@ -651,7 +657,7 @@ def plan_renewal_upcoming_email(
     html_body = _shell(f"{plan_name} renews in {days_left} day(s)", body_html)
     text_body = (
         f"{greeting_text}\n\n"
-        f"Your {plan_name} plan (৳{amount_taka:,}/mo) renews on {renews_on} — "
+        f"Your {plan_name} plan (৳{amount_taka:,}{_per(months)}) renews on {renews_on} — "
         f"{days_left} day{'s' if days_left != 1 else ''} from now.\n\n"
         f"{_renewal_contact_line()}\n\n"
         f"Billing: {billing_url}\n\n"
@@ -744,6 +750,7 @@ def credit_purchase_confirmed_email(
 
 def plan_payment_due_email(
     recipient_name: str | None, plan_name: str, amount_taka: int, grace_days: int,
+    months: int = 1, to_free: bool = False, deletion_days: int = 30,
 ) -> tuple[str, str, str]:
     """Sent once, the moment Tenant.plan_renews_at passes with no renewal
     confirmed — see app/worker.py's notify_plan_overdue. Access is still
@@ -755,6 +762,16 @@ def plan_payment_due_email(
     greeting_text = f"Hi {recipient_name}," if recipient_name else "Hi,"
     subject = f"Payment due — your {plan_name} plan"
     billing_url = f"{DASHBOARD}/settings/billing"
+    days = f"{grace_days} day{'s' if grace_days != 1 else ''}"
+    consequence = (
+        f"but your store moves to the Free plan in {days} if we don't hear from you. "
+        "Nothing is deleted."
+        if to_free
+        # Must match worker.PLAN_DELETION_GRACE_DAYS: this email once promised that
+        # nothing is ever deleted, while the sweep deletes an abandoned account.
+        else f"but access will pause in {days} if we don't hear from you. An account that "
+        f"stays unpaid for {deletion_days} days after that is deleted. We email you first."
+    )
 
     body_html = f"""\
 <tr>
@@ -762,10 +779,8 @@ def plan_payment_due_email(
     <p style="margin:0 0 8px 0;font-size:14px;color:{INK};">{greeting}</p>
     <h1 style="margin:0 0 10px 0;font-size:22px;line-height:1.3;font-weight:400;color:{INK};">Payment due today</h1>
     <p style="margin:0 0 16px 0;font-size:15px;line-height:1.55;color:{MUTED};">
-      Your {html.escape(plan_name)} plan (৳{amount_taka:,}/mo) was due today. Your dashboard
-      is still fully open — nothing is paused yet — but access will pause in
-      {grace_days} day{"s" if grace_days != 1 else ""} if we don't hear from you. Nothing is
-      ever deleted either way.
+      Your {html.escape(plan_name)} plan (৳{amount_taka:,}{_per(months)}) was due today. Your dashboard
+      is still fully open — nothing is paused yet — {consequence}
     </p>
     <p style="margin:0 0 24px 0;font-size:15px;line-height:1.55;color:{MUTED};">
       {_renewal_contact_line()}
@@ -777,10 +792,8 @@ def plan_payment_due_email(
     html_body = _shell(f"{plan_name} payment due today", body_html)
     text_body = (
         f"{greeting_text}\n\n"
-        f"Your {plan_name} plan (৳{amount_taka:,}/mo) was due today. Your dashboard is "
-        f"still fully open, but access will pause in {grace_days} "
-        f"day{'s' if grace_days != 1 else ''} if we don't hear from you. Nothing is ever "
-        "deleted either way.\n\n"
+        f"Your {plan_name} plan (৳{amount_taka:,}{_per(months)}) was due today. Your dashboard is "
+        f"still fully open, {consequence}\n\n"
         f"{_renewal_contact_line()}\n\n"
         f"Billing: {billing_url}\n\n"
         "Softunebd — softunebd.com"
@@ -789,7 +802,8 @@ def plan_payment_due_email(
 
 
 def plan_access_paused_email(
-    recipient_name: str | None, plan_name: str, amount_taka: int,
+    recipient_name: str | None, plan_name: str, amount_taka: int, months: int = 1,
+    deletion_days: int = 30,
 ) -> tuple[str, str, str]:
     """Sent once, the moment app/worker.py's sweep_overdue_plans actually
     flips Tenant.status to "payment_overdue" (grace_days after the due
@@ -804,6 +818,11 @@ def plan_access_paused_email(
     greeting_text = f"Hi {recipient_name}," if recipient_name else "Hi,"
     subject = f"Access paused — your {plan_name} plan"
     billing_url = f"{DASHBOARD}/settings/billing"
+    # Must match worker.PLAN_DELETION_GRACE_DAYS, like plan_payment_due_email.
+    kept = (
+        "Your store, products, orders and settings are kept as you left them. An account "
+        f"that stays unpaid for {deletion_days} days from now is deleted. We email you first."
+    )
 
     body_html = f"""\
 <tr>
@@ -811,9 +830,8 @@ def plan_access_paused_email(
     <p style="margin:0 0 8px 0;font-size:14px;color:{INK};">{greeting}</p>
     <h1 style="margin:0 0 10px 0;font-size:22px;line-height:1.3;font-weight:400;color:{INK};">Dashboard access is paused</h1>
     <p style="margin:0 0 16px 0;font-size:15px;line-height:1.55;color:{MUTED};">
-      Your {html.escape(plan_name)} plan (৳{amount_taka:,}/mo) is still unpaid, so login is
-      paused for now. Nothing is deleted or at risk — your store, products, orders, and
-      every setting are exactly as you left them, waiting for you.
+      Your {html.escape(plan_name)} plan (৳{amount_taka:,}{_per(months)}) is still unpaid, so login is
+      paused for now. {kept}
     </p>
     <p style="margin:0 0 24px 0;font-size:15px;line-height:1.55;color:{MUTED};">
       {_renewal_contact_line()} We'll restore access as soon as it's confirmed —
@@ -823,16 +841,63 @@ def plan_access_paused_email(
   </td>
 </tr>
 """
-    html_body = _shell(f"{plan_name} access paused — your data is safe", body_html)
+    html_body = _shell(f"{plan_name} access paused", body_html)
     text_body = (
         f"{greeting_text}\n\n"
-        f"Your {plan_name} plan (৳{amount_taka:,}/mo) is still unpaid, so login is paused "
-        "for now. Nothing is deleted or at risk — your store, products, orders, and every "
-        "setting are exactly as you left them, waiting for you.\n\n"
+        f"Your {plan_name} plan (৳{amount_taka:,}{_per(months)}) is still unpaid, so login is paused "
+        f"for now. {kept}\n\n"
         f"{_renewal_contact_line()} We'll restore access as soon as it's confirmed — "
         "usually within a few hours.\n\n"
         f"Billing: {billing_url}\n\n"
         "Softunebd — softunebd.com"
+    )
+    return subject, html_body, text_body
+
+
+def plan_lapsed_email(
+    recipient_name: str | None, plan_name: str, products_shown: int, domain_days: int,
+) -> tuple[str, str, str]:
+    """Sent when an unpaid plan drops to Free (app/plan_lapse.py). The store is
+    still running and nothing was deleted, so this says exactly what changed and
+    that paying brings everything back."""
+    greeting = f"Hi {html.escape(recipient_name)}," if recipient_name else "Hi,"
+    greeting_text = f"Hi {recipient_name}," if recipient_name else "Hi,"
+    subject = "Your store is now on the Free plan"
+    billing_url = f"{DASHBOARD}/settings/billing"
+    facts = [
+        f"Your {products_shown} best selling products stay on your store. The others are kept and hidden.",
+        f"Your custom domain works for {domain_days} more days, then your store uses its SoftuneBD address.",
+        "Customers, fraud protection, AI and other paid features are locked. Their data is kept.",
+    ]
+    rows = "".join(
+        f'<p style="margin:0 0 8px 0;font-size:15px;line-height:1.55;color:{MUTED};">{html.escape(f)}</p>'
+        for f in facts
+    )
+    body_html = f"""\
+<tr>
+  <td style="padding:28px 36px 8px 36px;">
+    <p style="margin:0 0 8px 0;font-size:14px;color:{INK};">{greeting}</p>
+    <h1 style="margin:0 0 10px 0;font-size:22px;line-height:1.3;font-weight:400;color:{INK};">Your store is on the Free plan</h1>
+    <p style="margin:0 0 16px 0;font-size:15px;line-height:1.55;color:{MUTED};">
+      Your {html.escape(plan_name)} plan was not renewed, so your store moved to Free. It is
+      still live and nothing was deleted.
+    </p>
+    {rows}
+    <p style="margin:16px 0 24px 0;font-size:15px;line-height:1.55;color:{MUTED};">
+      Pay for a plan any time and everything comes back as it was.
+    </p>
+    {_btn(billing_url, "Open Billing")}
+  </td>
+</tr>
+"""
+    html_body = _shell("Your store is now on the Free plan", body_html)
+    text_body = (
+        f"{greeting_text}\n\n"
+        f"Your {plan_name} plan was not renewed, so your store moved to Free. It is still "
+        "live and nothing was deleted.\n\n" + "\n".join(facts) + "\n\n"
+        "Pay for a plan any time and everything comes back as it was.\n\n"
+        f"Billing: {billing_url}\n\n"
+        "Softunebd, softunebd.com"
     )
     return subject, html_body, text_body
 

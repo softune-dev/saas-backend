@@ -200,6 +200,9 @@ class ManualPaymentSubmit(BaseModel):
     purchasable and a downgrade isn't something this flow handles."""
 
     plan: Literal["starter", "growth", "business"]
+    # plans.BILLING_MONTHS. Defaults to one month for dashboard tabs opened before
+    # the period choice existed.
+    months: Literal[1, 3, 6, 12] = 1
     sender_number: str = Field(min_length=6, max_length=20)
     trx_id: str = Field(min_length=3, max_length=40)
     note: str | None = Field(default=None, max_length=500)
@@ -334,6 +337,9 @@ class TenantOut(ORMModel):
     # banner reads this the same way TrialBadge reads trial_expires_at.
     # Null for trial/demo.
     plan_renews_at: datetime | None
+    # The period last paid for, and when a paid plan dropped to Free.
+    plan_months: int = 1
+    plan_lapsed_at: datetime | None = None
     created_at: datetime
 
 
@@ -361,6 +367,8 @@ class PlanInfoOut(BaseModel):
     limits: PlanLimitsOut
     # null when the usage query failed; the plan itself is still right.
     usage: PlanUsageOut | None
+    # {plan: {months: total in cents}}, the only prices the dashboard may show.
+    prices: dict[str, dict[int, int]] = {}
 
 
 class MeOut(BaseModel):
@@ -786,6 +794,8 @@ class ProductOut(ORMModel):
     images: list
     attributes: dict
     is_active: bool
+    # Hidden from the store by the Free plan's limit (app/plan_lapse.py).
+    plan_hidden: bool = False
     video_url: str | None
     serial_number: str | None
     unit: str | None

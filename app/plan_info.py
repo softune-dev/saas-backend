@@ -79,4 +79,5 @@ async def build(db: AsyncSession, tenant) -> PlanInfoOut:
             events=plan.events,
         ),
         usage=usage,
+        prices=plans.PERIOD_PRICES_CENTS,
     )

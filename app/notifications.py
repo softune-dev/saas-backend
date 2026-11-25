@@ -35,6 +35,7 @@ _KNOWN_TYPES = {
     # but the dashboard has no icon/type for it yet, so it stays dropped here
     # until the dashboard supports it.
     "order_limit",
+    "plan_lapsed",
 }
 
 

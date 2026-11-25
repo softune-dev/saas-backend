@@ -224,6 +224,16 @@ async def test_apply_paid_plan_judges_the_plan_the_tenant_had_before(monkeypatch
     monkeypatch.setattr(billing_actions.crud, "save", fake_save)
     monkeypatch.setattr(billing_actions.crud, "next_invoice_number", fake_number)
     monkeypatch.setattr(billing_actions.queue, "publish", fake_publish)
+
+    async def fake_restore(tenant_id):
+        published.append("restore")
+
+    monkeypatch.setattr(billing_actions.plan_lapse, "restore", fake_restore)
+
+    async def same_tenant(db, tenant_id):
+        return tenant
+
+    monkeypatch.setattr(billing_actions, "lock_tenant", same_tenant)
     stale = datetime(2026, 3, 10, tzinfo=UTC)
     tenant = Tenant(
         id=uuid.uuid4(), plan=old_plan, status="payment_overdue",
@@ -231,7 +241,7 @@ async def test_apply_paid_plan_judges_the_plan_the_tenant_had_before(monkeypatch
     )
     invoice = await billing_actions.apply_paid_plan(None, tenant, "growth")
     assert tenant.plan == "growth" and tenant.status == "active" and tenant.plan_overdue_since is None
-    assert invoice.plan == "growth" and len(published) == 1
+    assert invoice.plan == "growth" and len(published) == 2
     if from_now:
         assert tenant.plan_renews_at > datetime.now(UTC) + timedelta(days=27)
     else:
