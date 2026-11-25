@@ -278,6 +278,11 @@ async def test_best_sellers_stay_and_paying_again_shows_everything(account_facto
             db.add(order)
         await db.commit()
         await plan_lapse.hide_extra_products(db, tid)
+    assert await _hidden(acct) == set(), "a paid plan hides nothing"
+    async with SessionLocal() as db:
+        await db.execute(update(Tenant).where(Tenant.id == tid).values(plan="free"))
+        await db.commit()
+        await plan_lapse.hide_extra_products(db, tid)
     hidden = await _hidden(acct)
     assert len(hidden) == 3 and not hidden & set(best)
     assert await _hidden(other) == set(), "another tenant's products are never touched"
@@ -351,3 +356,118 @@ async def test_a_custom_domain_is_released_after_the_grace_period_and_asked_for_
         await db.execute(update(Site).where(Site.id == sid).values(pending_custom_domain=None))
         await db.commit()
     assert (queue.JOB_ATTACH_DOMAIN, {"site_id": acct.site_id, "domain": domain}) in quiet
+
+
+# ---------------------------------------------------------------------------
+#  Races and repairs found in review
+# ---------------------------------------------------------------------------
+
+
+async def test_a_payment_that_loses_the_race_with_a_lapse_still_wins_the_plan(account_factory):
+    """The tenant is loaded on Starter, drops to Free, then the payment is applied."""
+    acct = await account_factory("starter")
+    tid = uuid.UUID(acct.tenant_id)
+    async with SessionLocal() as db:
+        loaded = (await db.execute(select(Tenant).where(Tenant.id == tid))).scalar_one()
+        await db.commit()
+        async with SessionLocal() as other:
+            await other.execute(
+                update(Tenant).where(Tenant.id == tid).values(plan="free", plan_renews_at=None, plan_lapsed_at=datetime.now(UTC))
+            )
+            await other.commit()
+        await billing_actions.apply_paid_plan(db, loaded, "starter", months=3, amount_cents=142_500)
+    tenant = await _tenant(acct.tenant_id)
+    assert (tenant.plan, tenant.plan_lapsed_at, tenant.plan_months) == ("starter", None, 3)
+    assert tenant.plan_renews_at > datetime.now(UTC) + timedelta(days=80)
+
+
+async def test_two_payments_at_once_both_count(account_factory):
+    import asyncio
+
+    acct = await account_factory("starter")
+    tid = uuid.UUID(acct.tenant_id)
+    due = datetime.now(UTC).replace(microsecond=0) + timedelta(days=5)
+    async with SessionLocal() as db:
+        await db.execute(update(Tenant).where(Tenant.id == tid).values(plan_renews_at=due))
+        await db.commit()
+
+    async def pay():
+        async with SessionLocal() as db:
+            tenant = (await db.execute(select(Tenant).where(Tenant.id == tid))).scalar_one()
+            await billing_actions.apply_paid_plan(db, tenant, "starter", months=6, amount_cents=269_400)
+
+    await asyncio.gather(pay(), pay(), return_exceptions=True)
+    tenant = await _tenant(acct.tenant_id)
+    assert tenant.plan_renews_at == billing_actions.add_months(billing_actions.add_months(due, 6), 6)
+
+
+async def test_nothing_stays_hidden_on_a_paid_plan(account_factory):
+    paid = await account_factory("growth")
+    free = await account_factory("free")
+    a, b = await _products(paid, 1), await _products(free, 1)
+    async with SessionLocal() as db:
+        await db.execute(update(Product).where(Product.id.in_([*a, *b])).values(plan_hidden=True))
+        await db.commit()
+        # Only these two products: the statement itself covers every tenant.
+        await db.execute(plan_lapse.heal_stmt().where(Product.id.in_([*a, *b])))
+        await db.commit()
+    assert await _hidden(paid) == set()
+    assert await _hidden(free) == set(b)
+
+
+async def _admin_change(email: str, tenant_id: str, plan: str) -> None:
+    from app.api import superadmin
+    from app.models import User
+    from app.schemas import SuperAdminTenantUpdate
+    from app.security import Principal
+
+    async with SessionLocal() as db:
+        user = (await db.execute(select(User).where(User.email == email))).scalar_one()
+        admin = Principal(user_id=user.id, tenant_id=user.tenant_id, role=user.role, is_superadmin=True)
+        await superadmin.update_tenant(uuid.UUID(tenant_id), SuperAdminTenantUpdate(plan=plan), admin, db)
+
+
+async def test_an_admin_wrong_click_gives_away_nothing_and_takes_nothing(account_factory):
+    acct = await account_factory("starter")
+    tid = uuid.UUID(acct.tenant_id)
+    for due, months in ((datetime.now(UTC) + timedelta(days=20), 1), (datetime.now(UTC) + timedelta(days=300), 12)):
+        async with SessionLocal() as db:
+            await db.execute(update(Tenant).where(Tenant.id == tid).values(plan="starter", plan_renews_at=due, plan_months=months))
+            await db.commit()
+        await _admin_change(acct.email, acct.tenant_id, "business")
+        await _admin_change(acct.email, acct.tenant_id, "starter")
+        tenant = await _tenant(acct.tenant_id)
+        latest = max(due, billing_actions.add_months(datetime.now(UTC), 1))
+        assert abs((tenant.plan_renews_at - latest).total_seconds()) < 120
+        assert tenant.plan_months == months
+
+
+async def test_a_domain_wanted_again_is_not_detached(account_factory, monkeypatch):
+    from app import vercel, worker
+
+    removed = []
+
+    async def remove(domain, project):
+        removed.append(domain)
+
+    monkeypatch.setattr(vercel, "remove_domain_from_project", remove)
+    mine = await account_factory("growth")
+    theirs = await account_factory("growth")
+    domain = f"t{uuid.uuid4().hex[:8]}.example.com"
+    job = {"site_id": mine.site_id, "domain": domain}
+    async with SessionLocal() as db:
+        await db.execute(update(Site).where(Site.id == uuid.UUID(mine.site_id)).values(pending_custom_domain=domain))
+        await db.commit()
+    await worker.handle_detach_domain(job)
+    assert removed == [], "asked for again on a plan that has domains"
+    async with SessionLocal() as db:
+        await db.execute(update(Tenant).where(Tenant.id == uuid.UUID(mine.tenant_id)).values(plan="free"))
+        await db.commit()
+    await worker.handle_detach_domain(job)
+    assert removed == [domain], "Free lets it go"
+    async with SessionLocal() as db:
+        await db.execute(update(Site).where(Site.id == uuid.UUID(mine.site_id)).values(pending_custom_domain=None))
+        await db.execute(update(Site).where(Site.id == uuid.UUID(theirs.site_id)).values(custom_domain=domain))
+        await db.commit()
+    await worker.handle_detach_domain(job)
+    assert removed == [domain], "another store uses it now"

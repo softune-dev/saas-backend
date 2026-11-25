@@ -10,6 +10,7 @@ import calendar
 import logging
 from datetime import UTC, datetime
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import cache, crud, invoices as invoices_module, plan_lapse, plans, queue
@@ -36,6 +37,24 @@ async def refresh_storefronts(tenant_id) -> None:
             await queue.publish(queue.JOB_REVALIDATE_SITE, {"site_id": str(site.id)})
     except Exception:
         log.exception("plan change: could not refresh the stores of tenant %s", tenant_id)
+
+
+async def lock_tenant(db: AsyncSession, tenant_id) -> Tenant | None:
+    """The tenant, read again with its row locked until the next commit.
+
+    Every change of plan or renewal date goes through this. Without it a payment
+    verified while the worker drops the tenant to Free compares against the plan
+    it loaded earlier, sees "no change", and leaves a merchant who just paid on
+    Free; and two payments verified together would both extend the same date,
+    losing one. NO KEY UPDATE, so shoppers' orders are not held up."""
+    return (
+        await db.execute(
+            select(Tenant)
+            .where(Tenant.id == tenant_id)
+            .with_for_update(key_share=True)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
 
 
 def add_months(dt: datetime, months: int) -> datetime:
@@ -76,8 +95,8 @@ def next_renewal(
         return add_months(now, months)
     changing = new_plan is not None and new_plan != old_plan
     if changing and old_plan in plans.PAID_PLANS and new_plan in plans.PAID_PLANS and renews_at > now:
-        ratio = plans.period_price(old_plan) / plans.period_price(new_plan)
-        return add_months(now, months) + (renews_at - now) * ratio
+        unused = (renews_at - now) * plans.period_price(old_plan) // plans.period_price(new_plan)
+        return add_months(now, months) + unused
     return add_months(renews_at, months)
 
 
@@ -93,6 +112,7 @@ async def apply_paid_plan(
     really paid (the claim's own amount), so an invoice can't change because a
     price did between submitting and confirming.
     """
+    tenant = await lock_tenant(db, tenant.id)
     now = datetime.now(UTC)
     tenant.plan_renews_at = next_renewal(
         tenant.plan, tenant.plan_renews_at, now, new_plan=plan, months=months
@@ -107,6 +127,9 @@ async def apply_paid_plan(
     if tenant.status == "payment_overdue":
         tenant.status = "active"
     tenant = await crud.save(db, tenant)
+    # First thing after the plan is saved: a failure below must not leave a paid
+    # store with products hidden.
+    await plan_lapse.restore(tenant.id)
 
     invoice = Invoice(
         tenant_id=tenant.id,
@@ -120,6 +143,5 @@ async def apply_paid_plan(
     )
     await crud.save(db, invoice)
     await queue.publish(queue.JOB_GENERATE_INVOICE_PDF, {"invoice_id": str(invoice.id)})
-    await plan_lapse.restore(tenant.id)
     await refresh_storefronts(tenant.id)
     return invoice

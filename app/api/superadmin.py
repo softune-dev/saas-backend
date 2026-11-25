@@ -318,28 +318,15 @@ async def create_account(
 async def update_tenant(
     tenant_id: uuid.UUID, payload: SuperAdminTenantUpdate, admin: SuperAdminUser, db: DB
 ) -> dict:
-    tenant = (await db.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one_or_none()
+    tenant = await billing_actions.lock_tenant(db, tenant_id)
     if tenant is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Tenant not found")
     old_plan = tenant.plan
     old_status = tenant.status
     tenant = crud.apply_updates(tenant, payload.model_dump(exclude_unset=True))
-    tenant = await crud.save(db, tenant)
-    changes = {}
-    if payload.plan is not None and payload.plan != old_plan:
-        changes["plan"] = [old_plan, payload.plan]
-    if payload.status is not None and payload.status != old_status:
-        changes["status"] = [old_status, payload.status]
-    if changes:
-        action = "tenant.suspend" if changes.get("status", [None, None])[1] == "suspended" else "tenant.update"
-        await audit.record(admin, action, "tenant", tenant.id, tenant.name, changes)
-
-    # A real invoice the moment the team manually switches a tenant onto a
-    # (possibly different) paid plan — see migrations/053's own docstring on
-    # why this is event-triggered rather than a recurring billing job.
-    # "trial"/"demo" never get an invoice at all — there's nothing to bill
-    # or document for a free plan.
     plan_changed = payload.plan is not None and payload.plan != old_plan
+    # The plan and everything that follows from it are saved together, under the
+    # lock, so no sweep can see a new plan with the old plan's dates.
     if plan_changed and payload.plan == "free":
         # Free is nothing to bill: no invoice, no renewal date, and nothing
         # left that could make the overdue sweep treat it as a lapsed payer.
@@ -355,32 +342,42 @@ async def update_tenant(
         # A manual suspension is left alone.
         if tenant.status == "payment_overdue":
             tenant.status = "active"
-        tenant = await crud.save(db, tenant)
-        await plan_lapse.hide_extra_products(db, tenant.id)
-    elif (
-        plan_changed
-        and payload.plan not in ("trial", "demo")
-    ):
-        # First-time conversion onto a paid plan starts the renewal clock —
-        # see migrations/065's own docstring; every cycle after this one
-        # advances via confirm_plan_renewal below, never reset here again.
-        now = datetime.now(UTC)
-        # Months already paid for on another paid plan are converted, not lost
-        # (next_renewal). Anyone else starts a month from now, as before.
-        prepaid = old_plan in plans.PAID_PLANS and (tenant.plan_renews_at or now) > now
-        tenant.plan_renews_at = (
-            billing_actions.next_renewal(old_plan, tenant.plan_renews_at, now, new_plan=tenant.plan)
-            if prepaid
-            else billing_actions.add_months(now, 1)
-        )
+    elif plan_changed and payload.plan not in ("trial", "demo"):
+        # A month from now, as ever, but time already paid for is never cut
+        # short. No value conversion here (that is for verified payments): an
+        # admin correcting a wrong click would multiply it.
+        month = billing_actions.add_months(datetime.now(UTC), 1)
+        kept = tenant.plan_renews_at if old_plan in plans.PAID_PLANS else None
+        if kept is None or kept <= month:
+            tenant.plan_renews_at = month
+            tenant.plan_months = 1
         tenant.plan_renewal_reminded_at = None
         tenant.plan_overdue_notified_at = None
         tenant.plan_overdue_since = None
         tenant.plan_deletion_warned_at = None
-        tenant.plan_months = 1
         tenant.plan_lapsed_at = None
-        tenant = await crud.save(db, tenant)
+    tenant = await crud.save(db, tenant)
+    if plan_changed:
+        if tenant.plan == "free":
+            await plan_lapse.hide_extra_products(db, tenant.id)
+        else:
+            await plan_lapse.restore(tenant.id)
+    changes = {}
+    if payload.plan is not None and payload.plan != old_plan:
+        changes["plan"] = [old_plan, payload.plan]
+    if payload.status is not None and payload.status != old_status:
+        changes["status"] = [old_status, payload.status]
+    if changes:
+        action = "tenant.suspend" if changes.get("status", [None, None])[1] == "suspended" else "tenant.update"
+        await audit.record(admin, action, "tenant", tenant.id, tenant.name, changes)
 
+    # A real invoice the moment the team manually switches a tenant onto a
+    # (possibly different) paid plan — see migrations/053's own docstring on
+    # why this is event-triggered rather than a recurring billing job.
+    # "trial"/"demo" never get an invoice at all — there's nothing to bill
+    # or document for a free plan.
+    if plan_changed and payload.plan not in ("trial", "demo", "free"):
+        now = datetime.now(UTC)
         invoice = Invoice(
             tenant_id=tenant.id,
             invoice_number=await crud.next_invoice_number(db, tenant.id),
@@ -394,8 +391,6 @@ async def update_tenant(
         await queue.publish(queue.JOB_GENERATE_INVOICE_PDF, {"invoice_id": str(invoice.id)})
 
     if plan_changed:
-        if tenant.plan != "free":
-            await plan_lapse.restore(tenant.id)
         await billing_actions.refresh_storefronts(tenant.id)
 
     aggregates = (await _tenant_aggregates(db, [tenant.id]))[tenant.id]
@@ -422,7 +417,7 @@ async def confirm_plan_renewal(
     separate action (PATCH above), not something a payment should silently
     undo.
     """
-    tenant = (await db.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one_or_none()
+    tenant = await billing_actions.lock_tenant(db, tenant_id)
     if tenant is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Tenant not found")
     if tenant.plan == "free":
@@ -444,7 +439,7 @@ async def confirm_plan_renewal(
     tenant = await crud.save(db, tenant)
     await audit.record(
         admin, "tenant.renewal_confirmed", "tenant", tenant.id, tenant.name,
-        {"plan": tenant.plan, "renews_at": tenant.plan_renews_at.isoformat()},
+        {"plan": tenant.plan, "months": months, "renews_at": tenant.plan_renews_at.isoformat()},
     )
 
     invoice = Invoice(

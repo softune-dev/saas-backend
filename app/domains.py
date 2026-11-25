@@ -74,6 +74,8 @@ async def promote(db: AsyncSession, site: Site) -> bool:
     if not plans.has_feature(plan, "domain"):
         return False
     previous = site.custom_domain
+    # Read now: after a rollback the row is expired and cannot be read lazily.
+    site_id = site.id
     site.custom_domain = pending
     site.pending_custom_domain = None
     site.pending_domain_requested_at = None
@@ -81,7 +83,7 @@ async def promote(db: AsyncSession, site: Site) -> bool:
         await crud.save(db, site)
     except HTTPException:
         await db.rollback()
-        site = (await db.execute(select(Site).where(Site.id == site.id))).scalar_one()
+        site = (await db.execute(select(Site).where(Site.id == site_id))).scalar_one()
         site.pending_custom_domain = None
         site.pending_domain_requested_at = None
         await db.commit()

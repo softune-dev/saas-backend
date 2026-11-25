@@ -199,6 +199,16 @@ async def handle_detach_domain(payload: dict) -> None:
     if not project_id:
         return
 
+    # Jobs can run out of order, and stores share a project. Never take away a
+    # domain that is wanted now: by this store (asked for again after it was
+    # let go) or by another store that has connected it since.
+    async with SessionLocal() as db:
+        if domain in (site.custom_domain, site.pending_custom_domain) and await _plan_has(db, site.tenant_id, "domain"):
+            log.info("detach_domain: site %s wants %s again, keeping it", site_id, domain)
+            return
+        if (await db.execute(select(Site.id).where(Site.custom_domain == domain, Site.id != site.id))).first():
+            log.info("detach_domain: %s now belongs to another site, keeping it", domain)
+            return
     await vercel.remove_domain_from_project(domain, project_id)
 
 
@@ -1257,6 +1267,7 @@ async def plan_overdue_sweep_loop() -> None:
             await sweep_overdue_plans()
             # Not behind the switch: admin can move a paid store to Free by hand.
             await plan_lapse.sweep_domains()
+            await plan_lapse.heal_hidden()
         except Exception:  # noqa: BLE001 - a failed sweep must not kill the worker
             log.exception("plan overdue sweep failed")
         await asyncio.sleep(PLAN_RENEWAL_SWEEP_INTERVAL_SECONDS)

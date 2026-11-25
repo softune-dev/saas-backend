@@ -229,6 +229,11 @@ async def test_apply_paid_plan_judges_the_plan_the_tenant_had_before(monkeypatch
         published.append("restore")
 
     monkeypatch.setattr(billing_actions.plan_lapse, "restore", fake_restore)
+
+    async def same_tenant(db, tenant_id):
+        return tenant
+
+    monkeypatch.setattr(billing_actions, "lock_tenant", same_tenant)
     stale = datetime(2026, 3, 10, tzinfo=UTC)
     tenant = Tenant(
         id=uuid.uuid4(), plan=old_plan, status="payment_overdue",

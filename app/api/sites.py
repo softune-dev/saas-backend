@@ -342,6 +342,12 @@ async def publish_site(site_id: uuid.UUID, user: CurrentUser, db: DB) -> Site:
     # just the first one, so a re-publish also self-heals a domain that
     # somehow got detached.
     await queue.publish(queue.JOB_ATTACH_DOMAIN, {"site_id": str(site.id)})
+    if site.pending_custom_domain:
+        # A domain still waiting to connect (the worker checks the plan).
+        await queue.publish(
+            queue.JOB_ATTACH_DOMAIN,
+            {"site_id": str(site.id), "domain": site.pending_custom_domain},
+        )
     # Refreshes the Themes page card's screenshot on every publish, not just
     # the first — the storefront looks different after every real edit.
     await queue.publish(queue.JOB_CAPTURE_SCREENSHOT, {"site_id": str(site.id)})

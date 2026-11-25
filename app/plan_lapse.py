@@ -99,22 +99,50 @@ def hide_stmt(tenant_id: uuid.UUID, limit: int) -> Update:
 
 
 async def hide_extra_products(db: AsyncSession, tenant_id: uuid.UUID) -> None:
-    limit = plans.get_plan("free").products
-    await db.execute(hide_stmt(tenant_id, limit))
+    """Does nothing unless the tenant is on Free right now. The row lock makes a
+    payment wait until this is committed, so its restore() always comes after."""
+    plan = (
+        await db.execute(select(Tenant.plan).where(Tenant.id == tenant_id).with_for_update(key_share=True))
+    ).scalar_one_or_none()
+    if plan == "free":
+        await db.execute(hide_stmt(tenant_id, plans.get_plan("free").products))
     await db.commit()
 
 
-async def sync_if_free(tenant_id: uuid.UUID) -> None:
-    """After a product was switched on or off, or deleted. Own session and best
-    effort: the merchant's change is already saved and must not fail on this."""
+async def sync_if_free(db: AsyncSession, tenant_id: uuid.UUID) -> bool:
+    """After a product was switched on or off, or deleted. On the caller's own
+    session: a paying merchant's save costs one small read, never a second
+    connection. Best effort, the merchant's change is already saved. True when
+    other products may have changed too."""
     try:
-        async with SessionLocal() as db:
-            plan = (await db.execute(select(Tenant.plan).where(Tenant.id == tenant_id))).scalar_one_or_none()
-            if plan != "free":
-                return
-            await hide_extra_products(db, tenant_id)
+        plan = (await db.execute(select(Tenant.plan).where(Tenant.id == tenant_id))).scalar_one_or_none()
+        if plan != "free":
+            return False
+        await hide_extra_products(db, tenant_id)
+        return True
     except Exception:
         log.exception("could not refresh hidden products of tenant %s", tenant_id)
+        await db.rollback()
+        return False
+
+
+def heal_stmt() -> Update:
+    """Nothing may stay hidden on a plan that is not Free. restore() already does
+    this at once; this repairs it if that ever failed."""
+    return (
+        update(Product)
+        .where(Product.plan_hidden, Product.tenant_id.in_(select(Tenant.id).where(Tenant.plan != "free")))
+        .values(plan_hidden=False)
+        .execution_options(synchronize_session=False)
+    )
+
+
+async def heal_hidden() -> None:
+    async with SessionLocal() as db:
+        result = await db.execute(heal_stmt())
+        await db.commit()
+        if result.rowcount:
+            log.warning("showed %d products that were still hidden on a paid plan", result.rowcount)
 
 
 async def restore(tenant_id: uuid.UUID) -> None:
@@ -136,7 +164,6 @@ async def restore(tenant_id: uuid.UUID) -> None:
                 await db.execute(
                     select(Site.id, Site.pending_custom_domain).where(
                         Site.tenant_id == tenant_id,
-                        Site.status == "published",
                         Site.pending_custom_domain.is_not(None),
                     )
                 )
@@ -251,5 +278,7 @@ async def lapse_overdue(cutoff: datetime) -> None:
                         owner.full_name, name, plans.get_plan("free").products, DOMAIN_GRACE.days
                     )
                     await mailer.send_email(owner.email, subject, html_body, text_body)
-        except Exception:  # noqa: BLE001 - the next sweep tries this tenant again
+        # Before the commit nothing happened and the next sweep retries. After
+        # it the store is on Free and only the email or notice may be missing.
+        except Exception:  # noqa: BLE001 - one tenant must not stop the others
             log.exception("could not move tenant %s to Free", tenant_id)
