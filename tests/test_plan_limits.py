@@ -15,7 +15,7 @@ from PIL import Image
 from sqlalchemy import event as sa_event
 from sqlalchemy import func, select
 
-from app import ai_actions, ai_agent, ai_agent_tools, mcp_images, media
+from app import ai_actions, ai_agent, ai_agent_products, ai_agent_tools, mcp_images, media
 from app import ai_site_setup as setup
 from app.db import SessionLocal, engine
 from app.models import Event, Product, Site, Tenant
@@ -105,7 +105,12 @@ async def test_business_is_unlimited_and_never_takes_the_lock(account_factory):
     finally:
         sa_event.remove(engine.sync_engine, "before_cursor_execute", _spy)
     assert res.status_code == 201
-    assert not any("FOR NO KEY UPDATE" in s or "FOR UPDATE" in s for s in statements)
+    assert not any(_is_plan_lock(s) for s in statements)
+
+
+def _is_plan_lock(statement: str) -> bool:
+    # Not activity.touch's SKIP LOCKED, which every authenticated request may run.
+    return "FOR NO KEY UPDATE" in statement and "SKIP LOCKED" not in statement
 
 
 async def test_limited_plan_does_lock_the_tenant_row(account_factory):
@@ -121,7 +126,7 @@ async def test_limited_plan_does_lock_the_tenant_row(account_factory):
     finally:
         sa_event.remove(engine.sync_engine, "before_cursor_execute", _spy)
     assert res.status_code == 201
-    locks = [s for s in statements if "FOR NO KEY UPDATE" in s]
+    locks = [s for s in statements if _is_plan_lock(s)]
     assert len(locks) == 1 and "tenants" in locks[0]
 
 
@@ -147,16 +152,17 @@ async def test_ai_confirm_create_product_is_capped_on_free(account_factory):
 
 
 async def test_agent_and_mcp_create_product_tool_is_capped_on_free(account_factory):
-    """The MCP server dispatches to this same handler table (ai_agent_tools.run
-    over ai_agent_products.HANDLERS), so one test covers both."""
+    """The MCP server dispatches to this same handler table. The handler is
+    called directly: through ai_agent_tools.run a Free tenant is refused before
+    it gets here (the "ai" feature), which tests/test_plan_ai.py covers."""
     free = await account_factory("free")
     await _seed_products(free, 10)
     async with SessionLocal() as db:
-        out = await ai_agent_tools.run(
-            "create_product", {"name": "Over", "price_taka": 100}, db,
-            uuid.UUID(free.tenant_id), ai_agent._AGENT_HANDLERS,
-        )
-    assert "Product limit reached" in out["error"]
+        with pytest.raises(HTTPException) as exc:
+            await ai_agent_products.create_product(
+                db, uuid.UUID(free.tenant_id), name="Over", price_taka=100
+            )
+    assert exc.value.status_code == 403 and "Product limit reached" in exc.value.detail
     assert await _count(Product, free) == 10
 
 
@@ -217,11 +223,11 @@ async def test_agent_and_mcp_create_discount_event_tool_is_capped_on_free(accoun
     free = await account_factory("free")
     await _seed_events(free, 3)
     async with SessionLocal() as db:
-        out = await ai_agent_tools.run(
-            "create_discount_event", {"name": "Over", "discount_percent": 10}, db,
-            uuid.UUID(free.tenant_id), ai_agent._AGENT_HANDLERS,
-        )
-    assert "limit" in out["error"].lower()
+        with pytest.raises(HTTPException) as exc:
+            await ai_agent_tools.create_discount_event(
+                db, uuid.UUID(free.tenant_id), name="Over", discount_percent=10
+            )
+    assert exc.value.status_code == 403 and "limit" in exc.value.detail.lower()
     assert await _count(Event, free) == 3
 
 
