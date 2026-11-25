@@ -6,6 +6,7 @@ yet, so these tenants are the only free ones that exist.
 """
 
 import asyncio
+import dataclasses
 import io
 import uuid
 
@@ -15,7 +16,7 @@ from PIL import Image
 from sqlalchemy import event as sa_event
 from sqlalchemy import func, select
 
-from app import ai_actions, ai_agent, ai_agent_products, ai_agent_tools, mcp_images, media
+from app import ai_actions, ai_agent, ai_agent_products, ai_agent_tools, mcp_images, media, plans
 from app import ai_site_setup as setup
 from app.db import SessionLocal, engine
 from app.models import Event, Product, Site, Tenant
@@ -182,53 +183,32 @@ async def test_agent_create_product_unlimited_on_business(account_factory):
 # ---------------------------------------------------------------------------
 
 
-async def test_free_event_4_is_403_over_http(account_factory):
+async def test_events_are_unlimited_even_on_free(account_factory):
     free = await account_factory("free")
-    await _seed_events(free, 3)
+    await _seed_events(free, 30)
     res = await free.post(f"/sites/{free.site_id}/events", json=_event_body())
-    assert res.status_code == 403
-    assert isinstance(res.json()["detail"], str)
-    assert await _count(Event, free) == 3
+    assert res.status_code == 201, res.text
+    async with SessionLocal() as db:
+        await ai_actions.create_event(db, uuid.UUID(free.tenant_id), name="From the agent", discount_percent=10)
+    assert await _count(Event, free) == 32
 
 
-async def test_free_event_3_is_allowed(account_factory):
+async def test_a_cap_set_in_the_plan_table_is_still_enforced(account_factory, monkeypatch):
+    """The check stays wired: one number in app/plans.py would cap events again."""
+    capped = dataclasses.replace(plans.PLANS["free"], events=1)
+    monkeypatch.setitem(plans.PLANS, "free", capped)
     free = await account_factory("free")
-    await _seed_events(free, 2)
+    await _seed_events(free, 1)
     res = await free.post(f"/sites/{free.site_id}/events", json=_event_body())
-    assert res.status_code == 201
+    assert res.status_code == 403, res.text
 
 
-async def test_two_concurrent_event_creates_at_two_leave_exactly_three(account_factory):
+async def test_the_agent_event_tool_is_not_limited_on_free(account_factory):
     free = await account_factory("free")
-    await _seed_events(free, 2)
-    results = await asyncio.gather(
-        free.post(f"/sites/{free.site_id}/events", json=_event_body("A")),
-        free.post(f"/sites/{free.site_id}/events", json=_event_body("B")),
-    )
-    assert sorted(r.status_code for r in results) == [201, 403]
-    assert await _count(Event, free) == 3
-
-
-async def test_ai_confirm_create_event_is_capped_on_free(account_factory):
-    free = await account_factory("free")
-    await _seed_events(free, 3)
+    await _seed_events(free, 5)
     async with SessionLocal() as db:
-        with pytest.raises(HTTPException) as exc:
-            await ai_actions.create_event(db, uuid.UUID(free.tenant_id), name="Over", discount_percent=10)
-    assert exc.value.status_code == 403
-    assert await _count(Event, free) == 3
-
-
-async def test_agent_and_mcp_create_discount_event_tool_is_capped_on_free(account_factory):
-    free = await account_factory("free")
-    await _seed_events(free, 3)
-    async with SessionLocal() as db:
-        with pytest.raises(HTTPException) as exc:
-            await ai_agent_tools.create_discount_event(
-                db, uuid.UUID(free.tenant_id), name="Over", discount_percent=10
-            )
-    assert exc.value.status_code == 403 and "limit" in exc.value.detail.lower()
-    assert await _count(Event, free) == 3
+        await ai_agent_tools.create_discount_event(db, uuid.UUID(free.tenant_id), name="Sixth", discount_percent=10)
+    assert await _count(Event, free) == 6
 
 
 # ---------------------------------------------------------------------------

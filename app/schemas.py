@@ -349,7 +349,7 @@ class PlanLimitsOut(BaseModel):
     orders_per_month: int | None  # None = unlimited
     stores: int
     ai_per_day: int
-    events: int
+    events: int | None  # None = unlimited
 
 
 class PlanUsageOut(BaseModel):

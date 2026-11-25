@@ -569,7 +569,7 @@ ONLY from this block and from get_billing_status. Anything not stated here,
 returned by a tool, or covered by a documentation article is something you do
 NOT know.
 - Free plan: ৳0, no credit card. {free.products} products, {free.orders_per_month} orders a month,
-  {free.storage_bytes // (1024 * 1024)}MB media storage, {free.stores} store, {free.events} sale events.
+  {free.storage_bytes // (1024 * 1024)}MB media storage, {free.stores} store. Sale events are unlimited on every plan.
 - After the month's {free.orders_per_month} orders on Free, checkout switches to ordering by
   WhatsApp until the next calendar month.
 - Free is free as long as the account is active, NEVER say "free forever": a
