@@ -141,8 +141,6 @@ async def _register(client: AsyncClient, plan: str = "starter") -> Account:
             site_name=f"Test Site {suffix}",
             subdomain=f"test-fixture-{suffix}",
             full_name="Test User",
-            # A trial tenant is stamped with an expiry, as real signup does.
-            trial_days=7 if plan == "trial" else None,
         )
     token = create_access_token(user.id, user.tenant_id, user.role)
     return Account(

@@ -110,15 +110,9 @@ def clean_scope(raw: str | None) -> str:
 
 
 def tenant_allowed(tenant: Tenant | None) -> bool:
-    """Same gate as login (app/api/auth.py): suspended, overdue and expired
-    trial accounts get nothing — and the shared demo account never connects."""
-    if tenant is None or tenant.status != "active" or tenant.plan == "demo":
-        return False
-    return not (
-        tenant.plan == "trial"
-        and tenant.trial_expires_at
-        and datetime.now(UTC) > tenant.trial_expires_at
-    )
+    """Same gate as login (app/api/auth.py): suspended and overdue accounts get
+    nothing — and the shared demo account never connects."""
+    return tenant is not None and tenant.status == "active" and tenant.plan != "demo"
 
 
 # --- client registration (RFC 7591) ------------------------------------------

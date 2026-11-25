@@ -74,6 +74,11 @@ PLANS: dict[str, Plan] = {
 }
 PAID_PLANS: tuple[str, ...] = ("starter", "growth", "business")
 
+# A Free store left unused this long is deleted, after warning emails: "free as
+# long as you're active". Longer for someone who has paid before.
+FREE_INACTIVE_DAYS = 30
+FORMER_PAID_INACTIVE_DAYS = 90
+
 # What a merchant pays in total for a period, in integer cents. Written out
 # instead of computed from a discount: these are the numbers on the pricing
 # page, and an SMS must match one of them to the cent.

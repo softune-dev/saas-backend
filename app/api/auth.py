@@ -72,8 +72,7 @@ DB = Annotated[AsyncSession, Depends(get_db)]
 
 
 async def _check_tenant_access(db: AsyncSession, tenant_id: uuid.UUID) -> None:
-    """Rejects login for a tenant that's suspended, or a trial past its
-    trial_expires_at — same "one message, no distinguishing reasons" spirit
+    """Rejects login for a tenant that's suspended or paused — same "one message, no distinguishing reasons" spirit
     as the invalid-credentials check, since this fires after the password
     already checked out. Called from /login, /verify-login-otp, and
     /refresh (the three places that mint real tokens), not baked into
@@ -92,11 +91,6 @@ async def _check_tenant_access(db: AsyncSession, tenant_id: uuid.UUID) -> None:
             # 30 days: worker.PLAN_DELETION_GRACE_DAYS.
             "restore access. Your data is kept for 30 days after the pause, then deleted.",
         )
-    if tenant.plan == "trial" and tenant.trial_expires_at and datetime.now(UTC) > tenant.trial_expires_at:
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN,
-            "Your 7-day trial has ended — upgrade to keep access.",
-        )
 
 
 def _tokens(user: User) -> TokenOut:
@@ -112,7 +106,7 @@ def _tokens(user: User) -> TokenOut:
 
 
 # No POST /register here — public self-signup is app/api/trial.py's job
-# (creates a real Tenant+User on plan="trial", not a free-forever account).
+# (creates a real Tenant+User on plan="free").
 # A superadmin can still provision a real paid account directly via
 # POST /superadmin/tenants, both paths converging on the same
 # crud.create_tenant_owner_and_site() so "creating an account" never drifts
@@ -148,7 +142,7 @@ async def login_with_google(payload: GoogleCredentialIn, db: DB) -> LoginResultO
     email_verified), which is what our email OTP proves for a password
     login, so this skips that step and returns real tokens straight away.
     No account for the email: 404 with code "no_account", and the screen
-    offers the free trial instead of creating anything here."""
+    offers sign-up instead of creating anything here."""
     identity = await google_auth.verify(payload.credential)
     user = (
         await db.execute(select(User).where(User.email == identity.email))
@@ -158,7 +152,7 @@ async def login_with_google(payload: GoogleCredentialIn, db: DB) -> LoginResultO
             status.HTTP_404_NOT_FOUND,
             {
                 "code": "no_account",
-                "message": "No SoftuneBD account uses this Google email yet. Start a free trial to create one.",
+                "message": "No SoftuneBD account uses this Google email yet. Create a free store to get one.",
             },
         )
     if not user.is_active:
