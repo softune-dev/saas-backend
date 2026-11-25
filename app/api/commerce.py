@@ -13,7 +13,7 @@ from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import cache, courier_booking, courier_crypto, crud, media, plan_limits, plans, products, steadfast
+from app import cache, courier_booking, courier_crypto, crud, media, plan_lapse, plan_limits, plans, products, steadfast
 from app.basic_plan import order_out, order_window_start
 from app.db import get_db
 from app.products import first_image_url
@@ -278,6 +278,10 @@ async def update_product(
     old_image_urls = _product_image_urls(product)
     crud.apply_updates(product, data)
     product = await crud.save(db, product)
+    if "is_active" in data:
+        # A lapsed store shows only its best sellers (app/plan_lapse.py).
+        await plan_lapse.sync_if_free(user.tenant_id)
+        await db.refresh(product)
     await cache.invalidate_site(site.subdomain, site.custom_domain)
     await cache.invalidate_dashboard(str(site.id))
 
@@ -302,6 +306,7 @@ async def delete_product(
     # Past order_items survive: their FK is SET NULL and they carry snapshots of
     # name/sku/price. See migrations/003_commerce.sql.
     await crud.delete(db, product)
+    await plan_lapse.sync_if_free(user.tenant_id)
     await cache.invalidate_site(site.subdomain, site.custom_domain)
     await cache.invalidate_dashboard(str(site.id))
     for url in image_urls:

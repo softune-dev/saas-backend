@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import cache, crud, invoices as invoices_module, plans, queue
+from app import cache, crud, invoices as invoices_module, plan_lapse, plans, queue
 from app.db import SessionLocal
 from app.models import Invoice, Site, Tenant
 
@@ -38,22 +38,33 @@ async def refresh_storefronts(tenant_id) -> None:
         log.exception("plan change: could not refresh the stores of tenant %s", tenant_id)
 
 
-def add_one_month(dt: datetime) -> datetime:
-    """Same date math as app/api/superadmin.py's own _add_one_month
-    (intentionally duplicated, not imported, so neither module depends on
-    the other's internals) — advances by exactly one calendar month, keeping
-    the same day-of-month where possible (Jan 31 + 1 month -> Feb 28/29, not
-    Mar 3). See migrations/065's docstring on why a naive +30 days drifts."""
-    year = dt.year + dt.month // 12
-    month = dt.month % 12 + 1
+def add_months(dt: datetime, months: int) -> datetime:
+    """Advances by calendar months, keeping the day of the month where possible
+    (Jan 31 + 1 month -> Feb 28/29, not Mar 3). One jump, not month by month:
+    Jan 31 + 3 must be Apr 30, not Apr 28. See migrations/065's docstring on
+    why a naive +30 days drifts."""
+    index = dt.year * 12 + dt.month - 1 + months
+    year, month = index // 12, index % 12 + 1
     day = min(dt.day, calendar.monthrange(year, month)[1])
     return dt.replace(year=year, month=month, day=day)
 
 
-def next_renewal(old_plan: str, renews_at: datetime | None, now: datetime) -> datetime:
+def next_renewal(
+    old_plan: str,
+    renews_at: datetime | None,
+    now: datetime,
+    *,
+    new_plan: str | None = None,
+    months: int = 1,
+) -> datetime:
     """The next renewal date, given the plan the tenant had BEFORE this payment.
 
-    A paying tenant always advances one month from its own date, never from
+    Moving between two paid plans with time left: the unused time is worth
+    what it was paid for, so it is turned into time on the new plan at the
+    ratio of the two monthly prices. Carrying it over one to one would let a
+    year of Starter plus one month of Business buy thirteen months of Business.
+
+    A paying tenant staying on its plan advances from its own date, never from
     "today", so paying a few days late doesn't move the due day (migrations/065).
     A tenant that was not on a paid plan (free after a lapse, trial, demo) may
     still carry a date from an earlier paid period: advancing that would charge
@@ -62,22 +73,33 @@ def next_renewal(old_plan: str, renews_at: datetime | None, now: datetime) -> da
     already paid for and is kept.
     """
     if renews_at is None or (old_plan not in plans.PAID_PLANS and renews_at < now):
-        return add_one_month(now)
-    return add_one_month(renews_at)
+        return add_months(now, months)
+    changing = new_plan is not None and new_plan != old_plan
+    if changing and old_plan in plans.PAID_PLANS and new_plan in plans.PAID_PLANS and renews_at > now:
+        ratio = plans.period_price(old_plan) / plans.period_price(new_plan)
+        return add_months(now, months) + (renews_at - now) * ratio
+    return add_months(renews_at, months)
 
 
-async def apply_paid_plan(db: AsyncSession, tenant: Tenant, plan: str) -> Invoice:
+async def apply_paid_plan(
+    db: AsyncSession, tenant: Tenant, plan: str, *, months: int = 1, amount_cents: int | None = None
+) -> Invoice:
     """Puts a tenant onto a paid plan and issues the invoice for it — covers
     both a first-time purchase/upgrade (different plan, or coming off
     trial/demo) and a same-plan renewal, same as
     app/api/superadmin.py's update_tenant + confirm_plan_renewal do by hand.
 
-    The renewal date is next_renewal's decision: one month on from where it
-    already was for a paying tenant, or from now for one that wasn't.
+    The renewal date is next_renewal's decision. `amount_cents` is what was
+    really paid (the claim's own amount), so an invoice can't change because a
+    price did between submitting and confirming.
     """
     now = datetime.now(UTC)
-    tenant.plan_renews_at = next_renewal(tenant.plan, tenant.plan_renews_at, now)
+    tenant.plan_renews_at = next_renewal(
+        tenant.plan, tenant.plan_renews_at, now, new_plan=plan, months=months
+    )
     tenant.plan = plan
+    tenant.plan_months = months
+    tenant.plan_lapsed_at = None
     tenant.plan_renewal_reminded_at = None
     tenant.plan_overdue_notified_at = None
     tenant.plan_overdue_since = None
@@ -90,12 +112,14 @@ async def apply_paid_plan(db: AsyncSession, tenant: Tenant, plan: str) -> Invoic
         tenant_id=tenant.id,
         invoice_number=await crud.next_invoice_number(db, tenant.id),
         plan=tenant.plan,
-        amount_cents=invoices_module.PLAN_PRICES_CENTS.get(tenant.plan, 0),
+        amount_cents=plans.period_price(plan, months) if amount_cents is None else amount_cents,
+        months=months,
         currency="BDT",
-        period_label=now.strftime("%b %Y"),
+        period_label=invoices_module.period_label(now, months),
         tenant_business_snapshot=tenant.business,
     )
     await crud.save(db, invoice)
     await queue.publish(queue.JOB_GENERATE_INVOICE_PDF, {"invoice_id": str(invoice.id)})
+    await plan_lapse.restore(db, tenant.id)
     await refresh_storefronts(tenant.id)
     return invoice

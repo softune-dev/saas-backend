@@ -35,7 +35,9 @@ async def apply_verified_claim(db: AsyncSession, claim: PaymentClaim) -> dict:
     ).scalars().first()
 
     if claim.kind == "plan":
-        await billing_actions.apply_paid_plan(db, tenant, claim.plan)
+        await billing_actions.apply_paid_plan(
+            db, tenant, claim.plan, months=claim.months, amount_cents=claim.amount_cents
+        )
         plan_name = invoices_module.PLAN_NAMES.get(claim.plan, claim.plan)
         if owner is not None:
             subject, html_body, text_body = mailer.plan_payment_confirmed_email(

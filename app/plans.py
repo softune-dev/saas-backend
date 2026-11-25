@@ -74,6 +74,24 @@ PLANS: dict[str, Plan] = {
 }
 PAID_PLANS: tuple[str, ...] = ("starter", "growth", "business")
 
+# What a merchant pays in total for a period, in integer cents. Written out
+# instead of computed from a discount: these are the numbers on the pricing
+# page, and an SMS must match one of them to the cent.
+BILLING_MONTHS: tuple[int, ...] = (1, 3, 6, 12)
+PERIOD_PRICES_CENTS: dict[str, dict[int, int]] = {
+    "starter": {1: 49_900, 3: 142_500, 6: 269_400, 12: 478_800},
+    "growth": {1: 149_900, 3: 427_500, 6: 809_400, 12: 1_438_800},
+    "business": {1: 399_900, 3: 1_139_700, 6: 2_159_400, 12: 3_838_800},
+}
+
+
+def period_price(plan: str, months: int = 1) -> int:
+    """Total for the period. A plan nobody pays for costs 0; a period that is
+    not sold raises, so it can never become an invoice for a made-up amount."""
+    if plan not in PERIOD_PRICES_CENTS:
+        return 0
+    return PERIOD_PRICES_CENTS[plan][months]
+
 
 def get_plan(key: str | None) -> Plan:
     """An unrecognised or missing plan is treated as the most restricted one.

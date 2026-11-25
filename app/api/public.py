@@ -511,7 +511,7 @@ async def list_public_categories(host: str, db: DB) -> list[dict]:
         (
             await db.execute(
                 select(Product.category_id, func.count(Product.id))
-                .where(Product.site_id == site.id, Product.is_active)
+                .where(Product.site_id == site.id, Product.is_active, Product.plan_hidden.is_(False))
                 .group_by(Product.category_id)
             )
         ).all()
@@ -531,7 +531,7 @@ async def list_public_products(
     """Active products for a published site, optionally filtered by category slug."""
     site = await _find_published_site(host, db)
 
-    filters = [Product.site_id == site.id, Product.is_active]
+    filters = [Product.site_id == site.id, Product.is_active, Product.plan_hidden.is_(False)]
     if category:
         cat = (
             await db.execute(
@@ -576,7 +576,7 @@ async def get_public_product(host: str, slug: str, db: DB) -> dict:
         await db.execute(
             select(Product, Category.name)
             .outerjoin(Category, Product.category_id == Category.id)
-            .where(Product.site_id == site.id, Product.slug == slug, Product.is_active)
+            .where(Product.site_id == site.id, Product.slug == slug, Product.is_active, Product.plan_hidden.is_(False))
         )
     ).first()
     if row is None:
@@ -989,7 +989,7 @@ async def create_public_order(
                 .where(
                     Product.id.in_(ids),
                     Product.site_id == site.id,
-                    Product.is_active,
+                    Product.is_active, Product.plan_hidden.is_(False),
                 )
                 .with_for_update()
             )
@@ -1629,7 +1629,7 @@ async def sitemap(host: str, db: DB) -> dict:
         rows = (
             await db.execute(
                 select(Product.slug, Product.updated_at)
-                .where(Product.tenant_id == site.tenant_id, Product.site_id == site.id, Product.is_active)
+                .where(Product.tenant_id == site.tenant_id, Product.site_id == site.id, Product.is_active, Product.plan_hidden.is_(False))
                 .order_by(Product.updated_at.desc())
                 .limit(_SITEMAP_MAX_PRODUCTS)
             )
@@ -1797,10 +1797,12 @@ async def bkash_sms_webhook(request: Request, db: DB) -> dict:
         # webhook existed. Roll back the claim to "pending" instead of
         # leaving it "verified" with nothing actually applied — a later SMS
         # (or a human correction) should still be able to match it.
+        # Read before the rollback, which expires the row.
+        claimed_cents = claim.amount_cents
         await db.rollback()
         log.warning(
             "bkash sms webhook: trx_id %s amount mismatch (claim %s, sms %s)",
-            trx_id, claim.amount_cents, received_cents,
+            trx_id, claimed_cents, received_cents,
         )
         return {"ok": False, "reason": "amount mismatch"}
 

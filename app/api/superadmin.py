@@ -18,10 +18,9 @@ orders, etc.) — an operator who needs to see a customer's storefront data
 still does that the same way as today, not through here.
 """
 
-import calendar
 import uuid
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.concurrency import run_in_threadpool
@@ -29,7 +28,7 @@ from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import contact_checks
-from app import ai_images, audit, billing_actions, cache, contacts as contacts_module, chat_credits as chat_credits_module, crud, invoices as invoices_module, mailer, media, queue, vercel
+from app import ai_images, audit, billing_actions, cache, contacts as contacts_module, chat_credits as chat_credits_module, crud, invoices as invoices_module, mailer, media, plan_lapse, plans, queue, vercel
 from app.config import settings
 from app.db import get_db
 from app.models import (
@@ -349,11 +348,15 @@ async def update_tenant(
         tenant.plan_overdue_notified_at = None
         tenant.plan_overdue_since = None
         tenant.plan_deletion_warned_at = None
+        tenant.plan_months = 1
+        # Starts the custom domain's grace period, as an automatic lapse does.
+        tenant.plan_lapsed_at = datetime.now(UTC) if old_plan in plans.PAID_PLANS else None
         # Otherwise login stays blocked for a payment nobody owes any more.
         # A manual suspension is left alone.
         if tenant.status == "payment_overdue":
             tenant.status = "active"
         tenant = await crud.save(db, tenant)
+        await plan_lapse.hide_extra_products(db, tenant.id)
     elif (
         plan_changed
         and payload.plan not in ("trial", "demo")
@@ -362,11 +365,20 @@ async def update_tenant(
         # see migrations/065's own docstring; every cycle after this one
         # advances via confirm_plan_renewal below, never reset here again.
         now = datetime.now(UTC)
-        tenant.plan_renews_at = _add_one_month(now)
+        # Months already paid for on another paid plan are converted, not lost
+        # (next_renewal). Anyone else starts a month from now, as before.
+        prepaid = old_plan in plans.PAID_PLANS and (tenant.plan_renews_at or now) > now
+        tenant.plan_renews_at = (
+            billing_actions.next_renewal(old_plan, tenant.plan_renews_at, now, new_plan=tenant.plan)
+            if prepaid
+            else billing_actions.add_months(now, 1)
+        )
         tenant.plan_renewal_reminded_at = None
         tenant.plan_overdue_notified_at = None
         tenant.plan_overdue_since = None
         tenant.plan_deletion_warned_at = None
+        tenant.plan_months = 1
+        tenant.plan_lapsed_at = None
         tenant = await crud.save(db, tenant)
 
         invoice = Invoice(
@@ -382,6 +394,8 @@ async def update_tenant(
         await queue.publish(queue.JOB_GENERATE_INVOICE_PDF, {"invoice_id": str(invoice.id)})
 
     if plan_changed:
+        if tenant.plan != "free":
+            await plan_lapse.restore(db, tenant.id)
         await billing_actions.refresh_storefronts(tenant.id)
 
     aggregates = (await _tenant_aggregates(db, [tenant.id]))[tenant.id]
@@ -389,28 +403,18 @@ async def update_tenant(
     return _tenant_out(tenant, aggregates, sites)
 
 
-def _add_one_month(dt: datetime) -> datetime:
-    """Advances a datetime by exactly one calendar month, keeping the same
-    day-of-month where possible (Jan 31 + 1 month -> Feb 28/29, not Mar 3).
-    Python's stdlib has no calendar-aware date math (that's what
-    python-dateutil's relativedelta is for, not a dependency here) — this is
-    the one bit of it confirm_plan_renewal actually needs. See
-    migrations/065's docstring on why a naive +30 days would drift the
-    renewal date earlier every cycle that includes a 31-day month.
-    """
-    year = dt.year + dt.month // 12
-    month = dt.month % 12 + 1
-    day = min(dt.day, calendar.monthrange(year, month)[1])
-    return dt.replace(year=year, month=month, day=day)
-
-
 @router.post("/tenants/{tenant_id}/confirm-renewal", response_model=SuperAdminTenantOut)
-async def confirm_plan_renewal(tenant_id: uuid.UUID, admin: SuperAdminUser, db: DB) -> dict:
+async def confirm_plan_renewal(
+    tenant_id: uuid.UUID,
+    admin: SuperAdminUser,
+    db: DB,
+    months: Literal[1, 3, 6, 12] = 1,
+) -> dict:
     """Manual "payment received, renew" action — the recurring-billing
     counterpart to update_tenant's one-time plan-change invoice above. This
     (plus that first-time set on conversion to a paid plan, above) is the
-    ONLY place plan_renews_at ever advances — always by exactly one
-    calendar month from its own previous value, never "today + 1 month", so
+    ONLY place plan_renews_at ever advances — always by the months
+    paid for (one unless said otherwise) from its own previous value, never "today + 1 month", so
     a merchant who pays a few days late still renews on the same date next
     cycle (migrations/065). Un-suspends a tenant the overdue sweep locked
     out for non-payment (status == "payment_overdue"), but never touches a
@@ -429,7 +433,8 @@ async def confirm_plan_renewal(tenant_id: uuid.UUID, admin: SuperAdminUser, db: 
         )
 
     now = datetime.now(UTC)
-    tenant.plan_renews_at = _add_one_month(tenant.plan_renews_at or now)
+    tenant.plan_renews_at = billing_actions.add_months(tenant.plan_renews_at or now, months)
+    tenant.plan_months = months
     tenant.plan_renewal_reminded_at = None
     tenant.plan_overdue_notified_at = None
     tenant.plan_overdue_since = None
@@ -446,9 +451,10 @@ async def confirm_plan_renewal(tenant_id: uuid.UUID, admin: SuperAdminUser, db: 
         tenant_id=tenant.id,
         invoice_number=await crud.next_invoice_number(db, tenant.id),
         plan=tenant.plan,
-        amount_cents=invoices_module.PLAN_PRICES_CENTS.get(tenant.plan, 0),
+        amount_cents=plans.period_price(tenant.plan, months),
+        months=months,
         currency="BDT",
-        period_label=now.strftime("%b %Y"),
+        period_label=invoices_module.period_label(now, months),
         tenant_business_snapshot=tenant.business,
     )
     await crud.save(db, invoice)

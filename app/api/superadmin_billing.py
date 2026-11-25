@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import audit, claims, invoices as invoices_module
 from app.api.superadmin import site_logo_url
 from app.db import get_db
+from app import plans
 from app.plans import PAID_PLANS
 from app.models import Invoice, PaymentClaim, Site, Tenant, User
 from app.schemas import ORMModel, Page
@@ -108,19 +109,21 @@ async def billing_summary(admin: SuperAdminUser, db: DB) -> dict:
 
     plan_rows = (
         await db.execute(
-            select(Tenant.plan, Tenant.status, func.count(Tenant.id))
+            select(Tenant.plan, Tenant.plan_months, Tenant.status, func.count(Tenant.id))
             .where(Tenant.plan.in_(PAID_PLANS))
-            .group_by(Tenant.plan, Tenant.status)
+            .group_by(Tenant.plan, Tenant.plan_months, Tenant.status)
         )
     ).all()
     paying_by_plan: dict[str, int] = {p: 0 for p in PAID_PLANS}
     mrr = at_risk = 0
-    for plan, tenant_status, n in plan_rows:
+    for plan, plan_months, tenant_status, n in plan_rows:
+        # Someone who paid for a year brings in a twelfth of it each month.
+        monthly = plans.period_price(plan, plan_months) // plan_months
         if tenant_status == "active":
             paying_by_plan[plan] += n
-            mrr += prices.get(plan, 0) * n
+            mrr += monthly * n
         elif tenant_status == "payment_overdue":
-            at_risk += prices.get(plan, 0) * n
+            at_risk += monthly * n
 
     async def billed_between(start: datetime | None, end: datetime | None) -> int:
         q = select(func.coalesce(func.sum(Invoice.amount_cents), 0))
@@ -222,6 +225,7 @@ class ClaimOut(ORMModel):
     owner_email: str | None
     kind: str
     plan: str | None
+    months: int = 1
     pack_id: str | None
     credits: int | None
     amount_cents: int
@@ -247,6 +251,7 @@ def _claim_out(c: PaymentClaim, name: str, logo: str | None, owner: str | None) 
         "owner_email": owner,
         "kind": c.kind,
         "plan": c.plan,
+        "months": c.months,
         "pack_id": c.pack_id,
         "credits": c.credits,
         "amount_cents": c.amount_cents,
@@ -485,7 +490,6 @@ async def list_renewals(
     ids = [t.id for t in rows]
     logos = await _logos(db, ids)
     owners = await _owner_emails(db, ids)
-    prices = invoices_module.PLAN_PRICES_CENTS
     return [
         {
             "tenant_id": t.id,
@@ -494,7 +498,7 @@ async def list_renewals(
             "owner_email": owners.get(t.id),
             "plan": t.plan,
             "status": t.status,
-            "amount_cents": prices.get(t.plan, 0),
+            "amount_cents": plans.period_price(t.plan, t.plan_months),
             "renews_at": t.plan_renews_at,
             "days_left": (t.plan_renews_at - now).days,
         }

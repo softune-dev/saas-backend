@@ -39,7 +39,7 @@ async def _site_data(db: AsyncSession, site: Site, settings: AssistantSettings) 
         await db.execute(
             select(Product, Category.name)
             .outerjoin(Category, Product.category_id == Category.id)
-            .where(*scope, Product.is_active)
+            .where(*scope, Product.is_active, Product.plan_hidden.is_(False))
             .order_by(Product.created_at.desc())
             .limit(500)
         )
@@ -113,7 +113,7 @@ def live_loader(db: AsyncSession, site: Site):
             await db.execute(
                 select(Product).where(
                     Product.tenant_id == site.tenant_id, Product.site_id == site.id,
-                    Product.is_active, Product.id.in_(uids),
+                    Product.is_active, Product.plan_hidden.is_(False), Product.id.in_(uids),
                 )
             )
         ).scalars().all()
