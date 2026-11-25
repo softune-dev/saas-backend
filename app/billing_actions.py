@@ -120,6 +120,6 @@ async def apply_paid_plan(
     )
     await crud.save(db, invoice)
     await queue.publish(queue.JOB_GENERATE_INVOICE_PDF, {"invoice_id": str(invoice.id)})
-    await plan_lapse.restore(db, tenant.id)
+    await plan_lapse.restore(tenant.id)
     await refresh_storefronts(tenant.id)
     return invoice

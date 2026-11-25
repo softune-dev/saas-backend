@@ -117,28 +117,35 @@ async def sync_if_free(tenant_id: uuid.UUID) -> None:
         log.exception("could not refresh hidden products of tenant %s", tenant_id)
 
 
-async def restore(db: AsyncSession, tenant_id: uuid.UUID) -> None:
+async def restore(tenant_id: uuid.UUID) -> None:
     """The tenant is on a paid plan again: everything comes back. A domain that
     was taken off the store is asked for again, and connects by itself if its
-    DNS still points here (app/domains.py)."""
-    await db.execute(
-        update(Product)
-        .where(Product.tenant_id == tenant_id, Product.plan_hidden)
-        .values(plan_hidden=False)
-        .execution_options(synchronize_session=False)
-    )
-    waiting = (
-        await db.execute(
-            select(Site.id, Site.pending_custom_domain).where(
-                Site.tenant_id == tenant_id,
-                Site.status == "published",
-                Site.pending_custom_domain.is_not(None),
+    DNS still points here (app/domains.py).
+
+    Own session and never raises: it runs right after a payment was applied,
+    and the invoice and confirmation must not be lost if this fails."""
+    try:
+        async with SessionLocal() as db:
+            await db.execute(
+                update(Product)
+                .where(Product.tenant_id == tenant_id, Product.plan_hidden)
+                .values(plan_hidden=False)
+                .execution_options(synchronize_session=False)
             )
-        )
-    ).all()
-    await db.commit()
-    for site_id, domain in waiting:
-        await queue.publish(queue.JOB_ATTACH_DOMAIN, {"site_id": str(site_id), "domain": domain})
+            waiting = (
+                await db.execute(
+                    select(Site.id, Site.pending_custom_domain).where(
+                        Site.tenant_id == tenant_id,
+                        Site.status == "published",
+                        Site.pending_custom_domain.is_not(None),
+                    )
+                )
+            ).all()
+            await db.commit()
+        for site_id, domain in waiting:
+            await queue.publish(queue.JOB_ATTACH_DOMAIN, {"site_id": str(site_id), "domain": domain})
+    except Exception:
+        log.exception("could not restore the stores of tenant %s", tenant_id)
 
 
 # ---------------------------------------------------------------------------

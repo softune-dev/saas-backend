@@ -395,7 +395,7 @@ async def update_tenant(
 
     if plan_changed:
         if tenant.plan != "free":
-            await plan_lapse.restore(db, tenant.id)
+            await plan_lapse.restore(tenant.id)
         await billing_actions.refresh_storefronts(tenant.id)
 
     aggregates = (await _tenant_aggregates(db, [tenant.id]))[tenant.id]
