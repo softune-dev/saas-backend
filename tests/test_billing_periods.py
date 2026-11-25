@@ -319,7 +319,8 @@ async def test_switching_products_on_free_cannot_pass_the_limit(account_factory)
     assert (await acct.patch(f"{url}/{spare}", json={"is_active": True})).status_code == 200
     assert len(await _hidden(acct)) == 1
     # Deleting a visible one makes room for the hidden one.
-    visible = next(i for i in [*ids, spare] if i not in await _hidden(acct))
+    hidden = await _hidden(acct)
+    visible = next(i for i in [*ids, spare] if i not in hidden)
     assert (await acct.delete(f"{url}/{visible}")).status_code == 204
     assert await _hidden(acct) == set()
 
