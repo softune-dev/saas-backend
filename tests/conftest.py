@@ -187,9 +187,12 @@ async def account_factory(
 async def two_accounts(
     client: AsyncClient,
 ) -> AsyncGenerator[tuple[Account, Account], None]:
-    """Two unrelated tenants — the fixture the isolation tests are built on."""
-    a = await _register(client)
-    b = await _register(client)
+    """Two unrelated tenants — the fixture the isolation tests are built on.
+    Business, because those tests open a second store per tenant and every
+    plan's store limit applies (FREE_PLAN_ENABLED); isolation does not depend
+    on the plan."""
+    a = await _register(client, "business")
+    b = await _register(client, "business")
     yield a, b
     await _cleanup([a.tenant_id, b.tenant_id])
 
@@ -213,14 +216,8 @@ async def template_id() -> str:
 
 @pytest.fixture
 async def site(account: Account, template_id: str) -> dict:
-    """A site belonging to `account`, ready to hang pages and products off."""
-    response = await account.post(
-        "/sites",
-        json={
-            "template_id": template_id,
-            "name": "Test Site",
-            "subdomain": f"test-{uuid.uuid4().hex[:10]}",
-        },
-    )
-    assert response.status_code == 201, f"site create failed: {response.text}"
+    """The site belonging to `account`, ready to hang pages and products off.
+    Its own store, made with the account: Starter has room for one only."""
+    response = await account.get(f"/sites/{account.site_id}")
+    assert response.status_code == 200, f"site read failed: {response.text}"
     return response.json()

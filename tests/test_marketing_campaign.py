@@ -17,7 +17,7 @@ def test_audience_rejects_unknown_plan_and_status():
         m.AudienceIn(kind="owners", plans=["platinum"])
     with pytest.raises(ValidationError):
         m.AudienceIn(kind="owners", statuses=["vanished"])
-    assert m.AudienceIn(kind="owners", plans=["trial"], statuses=["active"]).plans == ["trial"]
+    assert m.AudienceIn(kind="owners", plans=["free"], statuses=["active"]).plans == ["free"]
 
 
 def test_button_link_must_be_http():

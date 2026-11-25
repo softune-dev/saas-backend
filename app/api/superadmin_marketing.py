@@ -35,7 +35,8 @@ DB = Annotated[AsyncSession, Depends(get_db)]
 # provider's daily limit and get the sending address blocked.
 MAX_RECIPIENTS = 1000
 
-PLANS = ("trial", "starter", "growth", "business")
+# Plans an operator can pick. Free owners are only mailed when Free is picked.
+PLANS = ("free", "starter", "growth", "business")
 _DEFAULT_LIFECYCLES = ("lead", "trial", "customer", "churned", "former_customer")
 STATUSES = ("active", "suspended", "cancelled", "payment_overdue")
 
@@ -110,7 +111,7 @@ class PreviewOut(BaseModel):
 
 class AudienceCountsOut(BaseModel):
     owners: int
-    trial_owners: int
+    free_owners: int
     paid_owners: int
     overdue_owners: int
     demo_leads: int
@@ -167,9 +168,9 @@ async def _resolve(db: AsyncSession, audience: AudienceIn) -> list[str]:
             .join(Tenant, Tenant.id == User.tenant_id)
             .where(User.role == "owner", User.is_active.is_(True))
         )
-        # No plan chosen means every plan that was mailable before Free
-        # existed (PLANS), so free and demo owners are never mailed by default.
-        query = query.where(Tenant.plan.in_(audience.plans or PLANS))
+        # No plan chosen means the paying plans, so free and demo owners are
+        # never mailed by default.
+        query = query.where(Tenant.plan.in_(audience.plans or PAID_PLANS))
         if audience.statuses:
             query = query.where(Tenant.status.in_(audience.statuses))
         emails.update(e.lower() for e in (await db.execute(query)).scalars().all())
@@ -210,7 +211,7 @@ async def audience_counts(admin: SuperAdminUser, db: DB) -> dict:
                 .join(Tenant, Tenant.id == User.tenant_id)
                 .where(
                     User.role == "owner", User.is_active.is_(True),
-                    Tenant.plan.in_(PLANS), *where,
+                    *where,
                 )
             )
         ).scalar_one()
@@ -227,8 +228,8 @@ async def audience_counts(admin: SuperAdminUser, db: DB) -> dict:
     demo_emails = (await db.execute(select(DemoAccessRequest.email))).scalars().all()
     demo = sum(1 for e in demo_emails if contact_checks.is_mailable(e))
     return {
-        "owners": await owners(),
-        "trial_owners": await owners(Tenant.plan == "trial"),
+        "owners": await owners(Tenant.plan.in_(PAID_PLANS)),
+        "free_owners": await owners(Tenant.plan == "free"),
         "paid_owners": await owners(Tenant.plan.in_(PAID_PLANS)),
         "overdue_owners": await owners(Tenant.status == "payment_overdue"),
         "demo_leads": demo,
