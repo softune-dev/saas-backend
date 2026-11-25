@@ -1154,6 +1154,7 @@ async def notify_plan_overdue() -> None:
                 grace_days=PLAN_OVERDUE_GRACE_DAYS,
                 months=months,
                 to_free=settings.free_plan_enabled,
+                deletion_days=PLAN_DELETION_GRACE_DAYS,
             )
             sent = await mailer.send_email(owner.email, subject, html_body, text_body)
             if not sent:

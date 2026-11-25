@@ -750,7 +750,7 @@ def credit_purchase_confirmed_email(
 
 def plan_payment_due_email(
     recipient_name: str | None, plan_name: str, amount_taka: int, grace_days: int,
-    months: int = 1, to_free: bool = False,
+    months: int = 1, to_free: bool = False, deletion_days: int = 30,
 ) -> tuple[str, str, str]:
     """Sent once, the moment Tenant.plan_renews_at passes with no renewal
     confirmed — see app/worker.py's notify_plan_overdue. Access is still
@@ -767,8 +767,10 @@ def plan_payment_due_email(
         f"but your store moves to the Free plan in {days} if we don't hear from you. "
         "Nothing is deleted."
         if to_free
-        else f"but access will pause in {days} if we don't hear from you. Nothing is ever "
-        "deleted either way."
+        # Must match worker.PLAN_DELETION_GRACE_DAYS: this email once promised that
+        # nothing is ever deleted, while the sweep deletes an abandoned account.
+        else f"but access will pause in {days} if we don't hear from you. An account that "
+        f"stays unpaid for {deletion_days} days after that is deleted. We email you first."
     )
 
     body_html = f"""\
