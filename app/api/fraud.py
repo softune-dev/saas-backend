@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import cache, crud, edge_config
 from app.db import get_db
 from app.models import FraudBlocklistEntry, FraudIpBlocklistEntry, Order, Site
+from app.plan_gate import require_feature
 from app.schemas import (
     FraudBlocklistEntryCreate,
     FraudBlocklistEntryOut,
@@ -43,7 +44,14 @@ from app.schemas import (
 )
 from app.security import CurrentUser
 
-router = APIRouter(prefix="/sites/{site_id}/fraud", tags=["fraud"])
+# Only managing the rules is a paid feature. Enforcement reads the tables
+# directly (checkout, and main.py's ip_block), so entries made while paid keep
+# blocking after a downgrade.
+router = APIRouter(
+    prefix="/sites/{site_id}/fraud",
+    tags=["fraud"],
+    dependencies=[Depends(require_feature("fraud"))],
+)
 DB = Annotated[AsyncSession, Depends(get_db)]
 
 

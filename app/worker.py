@@ -19,8 +19,9 @@ from datetime import UTC, datetime, timedelta
 
 import aio_pika
 import httpx
-from sqlalchemy import delete, func, select
+from sqlalchemy import Delete, Select, Update, delete, func, select, update
 
+from app import plans
 from app.config import settings
 from app.db import SessionLocal, engine
 from app.models import (
@@ -110,6 +111,18 @@ async def handle_revalidate_site(payload: dict) -> None:
             log.warning("revalidate: could not reach %s (%s)", host, exc)
 
 
+async def _plan_has(db, tenant_id, feature: str) -> bool:
+    """Read the plan live at job time: a job queued on a paid plan must not
+    act after the merchant dropped to Free. A vanished tenant counts as no."""
+    from app import plan_gate
+    from fastapi import HTTPException
+
+    try:
+        return plans.has_feature(await plan_gate.tenant_plan(db, tenant_id), feature)
+    except HTTPException:
+        return False
+
+
 async def handle_attach_domain(payload: dict) -> None:
     """Attach a just-published site's subdomain to its template's Vercel
     project — see app/vercel.py's module docstring for the full why.
@@ -130,6 +143,15 @@ async def handle_attach_domain(payload: dict) -> None:
     if site is None:
         log.warning("attach_domain: site %s no longer exists, dropping job", site_id)
         return
+    # This job also attaches the plain subdomain of every freshly published
+    # site, which Free needs to be served at all. Only the CUSTOM domain part
+    # is a paid feature, decided live because the job may be queued before a
+    # downgrade.
+    async with SessionLocal() as db:
+        custom_ok = await _plan_has(db, site.tenant_id, "domain")
+    if not custom_ok and payload.get("domain"):
+        log.info("attach_domain: site %s may not use a custom domain on its plan, skipping", site_id)
+        return
     if site.template.framework != "nextjs":
         return
     project_id = site.template.vercel_project_id
@@ -145,7 +167,7 @@ async def handle_attach_domain(payload: dict) -> None:
         # The request was cancelled or replaced while this job waited.
         log.info("attach_domain: %s is no longer requested for site %s", requested, site_id)
         return
-    host = requested or site.custom_domain or f"{site.subdomain}.{settings.site_base_domain}"
+    host = requested or (site.custom_domain if custom_ok else None) or f"{site.subdomain}.{settings.site_base_domain}"
     await vercel.add_domain_to_project(host, project_id)
 
 
@@ -613,6 +635,11 @@ async def handle_send_meta_capi_event(payload: dict) -> None:
             log.warning("meta capi: site %s no longer exists, dropping job", site_id)
             return
 
+        # Tracking is a paid feature; the job may have been queued before a
+        # downgrade, so decide now.
+        if not await _plan_has(db, site.tenant_id, "seo"):
+            return
+
         pixel_id = (site.seo or {}).get("facebook_pixel")
         if not pixel_id:
             # Pixel was disconnected after the order was placed but before
@@ -920,6 +947,22 @@ async def trial_end_notify_loop() -> None:
         await asyncio.sleep(TRIAL_SWEEP_INTERVAL_SECONDS)
 
 
+def _expired_trial(cutoff: datetime) -> tuple:
+    return (Tenant.plan == "trial", Tenant.trial_expires_at < cutoff)
+
+
+def delete_expired_trials_stmt(tenant_ids: list[uuid.UUID], cutoff: datetime) -> Delete:
+    """Re-checks the whole condition inside the DELETE, for the reason given in
+    delete_abandoned_stmt: a trial that pays or becomes free while its contact
+    is being saved must survive, with its media and domains."""
+    return (
+        delete(Tenant)
+        .where(Tenant.id.in_(tenant_ids), *_expired_trial(cutoff))
+        .returning(Tenant.id)
+        .execution_options(synchronize_session=False)
+    )
+
+
 async def sweep_expired_trials() -> None:
     from fastapi.concurrency import run_in_threadpool
 
@@ -929,9 +972,7 @@ async def sweep_expired_trials() -> None:
     async with SessionLocal() as db:
         expiring_tenant_ids = (
             await db.execute(
-                select(Tenant.id).where(
-                    Tenant.plan == "trial", Tenant.trial_expires_at < cutoff
-                )
+                select(Tenant.id).where(*_expired_trial(cutoff))
             )
         ).scalars().all()
         if not expiring_tenant_ids:
@@ -957,12 +998,16 @@ async def sweep_expired_trials() -> None:
             await db.rollback()
             log.exception("couldn't save contacts before deleting; skipping this sweep")
             return
-        result = await db.execute(delete(Tenant).where(Tenant.id.in_(expiring_tenant_ids)))
+        deleted_ids = set(
+            (await db.execute(delete_expired_trials_stmt(list(expiring_tenant_ids), cutoff))).scalars().all()
+        )
         await db.commit()
-        if result.rowcount:
-            log.info("trial sweep: deleted %d expired trial tenant(s)", result.rowcount)
+        if deleted_ids:
+            log.info("trial sweep: deleted %d expired trial tenant(s)", len(deleted_ids))
 
     for site in sites:
+        if site.tenant_id not in deleted_ids:
+            continue
         await cache.invalidate_site(site.subdomain, site.custom_domain)
         # Same reasoning as app/api/superadmin.py::delete_tenant's identical
         # fix — without this, an expired trial's subdomain stays attached
@@ -1116,6 +1161,28 @@ async def plan_renewal_notify_loop() -> None:
         await asyncio.sleep(PLAN_RENEWAL_SWEEP_INTERVAL_SECONDS)
 
 
+def _overdue_paid(cutoff: datetime) -> tuple:
+    return (
+        Tenant.plan.in_(plans.PAID_PLANS),
+        Tenant.status == "active",
+        Tenant.plan_renews_at.isnot(None),
+        Tenant.plan_renews_at < cutoff,
+    )
+
+
+def pause_overdue_stmt(tenant_id: uuid.UUID, cutoff: datetime) -> Update:
+    """Pauses one tenant only if it is still overdue right now. The sweep sends
+    an email per tenant, so by the time it reaches the last one that merchant
+    may have paid or become free."""
+    return (
+        update(Tenant)
+        .where(Tenant.id == tenant_id, *_overdue_paid(cutoff))
+        .values(status="payment_overdue", plan_overdue_since=func.now())
+        .returning(Tenant.id)
+        .execution_options(synchronize_session=False)
+    )
+
+
 async def sweep_overdue_plans() -> None:
     """The only place a paid tenant's login actually gets blocked for
     non-payment — PLAN_OVERDUE_GRACE_DAYS after plan_renews_at, with no
@@ -1133,25 +1200,26 @@ async def sweep_overdue_plans() -> None:
     async with SessionLocal() as db:
         to_pause = (
             await db.execute(
-                select(Tenant).where(
-                    Tenant.plan.in_(_PAID_PLANS),
-                    Tenant.status == "active",
-                    Tenant.plan_renews_at.isnot(None),
-                    Tenant.plan_renews_at < cutoff,
-                )
+                select(Tenant).where(*_overdue_paid(cutoff))
             )
         ).scalars().all()
         if not to_pause:
             return
 
+        paused = 0
         for tenant in to_pause:
             owner = (
                 await db.execute(
                     select(User).where(User.tenant_id == tenant.id, User.role == "owner")
                 )
             ).scalars().first()
-            tenant.status = "payment_overdue"
-            tenant.plan_overdue_since = func.now()
+            # Saved before the email, so nobody is told about a pause that did
+            # not happen.
+            still = (await db.execute(pause_overdue_stmt(tenant.id, cutoff))).first()
+            await db.commit()
+            if still is None:
+                continue
+            paused += 1
             if owner is None:
                 continue
             subject, html_body, text_body = mailer.plan_access_paused_email(
@@ -1162,8 +1230,7 @@ async def sweep_overdue_plans() -> None:
             sent = await mailer.send_email(owner.email, subject, html_body, text_body)
             if not sent:
                 log.warning("access-paused email: failed to send to %s", owner.email)
-        await db.commit()
-        log.info("plan renewal: paused access for %d overdue tenant(s)", len(to_pause))
+        log.info("plan renewal: paused access for %d overdue tenant(s)", paused)
 
 
 async def plan_overdue_sweep_loop() -> None:
@@ -1186,6 +1253,41 @@ PLAN_DELETION_GRACE_DAYS = 30
 PLAN_DELETION_WARNING_LEAD_DAYS = 7
 
 
+def _abandoned_paid(cutoff: datetime) -> tuple:
+    """A paid account paused for non-payment since before `cutoff`. The plan
+    condition is what keeps this whole lifecycle off free stores, which have
+    their own, differently timed rules: a lapsed store moved to free may still
+    carry payment_overdue and an old plan_overdue_since."""
+    return (
+        Tenant.status == "payment_overdue",
+        Tenant.plan_overdue_since.isnot(None),
+        Tenant.plan_overdue_since < cutoff,
+        Tenant.plan.in_(plans.PAID_PLANS),
+    )
+
+
+# The three statements are functions so tests can check them against one tenant
+# of their own, without ever running a sweep.
+def deletion_warning_candidates_stmt(cutoff: datetime) -> Select:
+    return select(Tenant).where(*_abandoned_paid(cutoff), Tenant.plan_deletion_warned_at.is_(None))
+
+
+def deletion_candidates_stmt(cutoff: datetime) -> Select:
+    return select(Tenant.id).where(*_abandoned_paid(cutoff))
+
+
+def delete_abandoned_stmt(tenant_ids: list[uuid.UUID], cutoff: datetime) -> Delete:
+    """Re-checks the whole condition inside the DELETE: saving contacts takes a
+    while, and a merchant who pays or is moved to free in between must survive.
+    RETURNING because the caller may only clean up what really was deleted."""
+    return (
+        delete(Tenant)
+        .where(Tenant.id.in_(tenant_ids), *_abandoned_paid(cutoff))
+        .returning(Tenant.id)
+        .execution_options(synchronize_session=False)
+    )
+
+
 async def notify_plan_deletion_warning() -> None:
     """Sends mailer.plan_deletion_warning_email once, PLAN_DELETION_WARNING_LEAD_DAYS
     before sweep_abandoned_paid_accounts below would actually delete the
@@ -1198,16 +1300,7 @@ async def notify_plan_deletion_warning() -> None:
         days=PLAN_DELETION_GRACE_DAYS - PLAN_DELETION_WARNING_LEAD_DAYS
     )
     async with SessionLocal() as db:
-        at_risk = (
-            await db.execute(
-                select(Tenant).where(
-                    Tenant.status == "payment_overdue",
-                    Tenant.plan_overdue_since.isnot(None),
-                    Tenant.plan_overdue_since < cutoff,
-                    Tenant.plan_deletion_warned_at.is_(None),
-                )
-            )
-        ).scalars().all()
+        at_risk = (await db.execute(deletion_warning_candidates_stmt(cutoff))).scalars().all()
         if not at_risk:
             return
 
@@ -1257,15 +1350,7 @@ async def sweep_abandoned_paid_accounts() -> None:
 
     cutoff = datetime.now(UTC) - timedelta(days=PLAN_DELETION_GRACE_DAYS)
     async with SessionLocal() as db:
-        expiring_tenant_ids = (
-            await db.execute(
-                select(Tenant.id).where(
-                    Tenant.status == "payment_overdue",
-                    Tenant.plan_overdue_since.isnot(None),
-                    Tenant.plan_overdue_since < cutoff,
-                )
-            )
-        ).scalars().all()
+        expiring_tenant_ids = (await db.execute(deletion_candidates_stmt(cutoff))).scalars().all()
         if not expiring_tenant_ids:
             return
 
@@ -1285,12 +1370,17 @@ async def sweep_abandoned_paid_accounts() -> None:
             await db.rollback()
             log.exception("couldn't save contacts before deleting; skipping this sweep")
             return
-        result = await db.execute(delete(Tenant).where(Tenant.id.in_(expiring_tenant_ids)))
+        deleted_ids = set(
+            (await db.execute(delete_abandoned_stmt(list(expiring_tenant_ids), cutoff))).scalars()
+        )
         await db.commit()
-        if result.rowcount:
-            log.info("plan renewal: deleted %d abandoned paid tenant(s)", result.rowcount)
+        if deleted_ids:
+            log.info("plan renewal: deleted %d abandoned paid tenant(s)", len(deleted_ids))
 
     for site in sites:
+        # A tenant the DELETE spared is live: its media and domains stay.
+        if site.tenant_id not in deleted_ids:
+            continue
         await cache.invalidate_site(site.subdomain, site.custom_domain)
         project_id = site.template.vercel_project_id if site.template else None
         if project_id and site.template.framework == "nextjs":

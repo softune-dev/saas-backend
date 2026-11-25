@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import audit, claims, invoices as invoices_module
 from app.api.superadmin import site_logo_url
 from app.db import get_db
+from app.plans import PAID_PLANS
 from app.models import Invoice, PaymentClaim, Site, Tenant, User
 from app.schemas import ORMModel, Page
 from app.security import SuperAdminUser
@@ -35,7 +36,6 @@ from app.security import SuperAdminUser
 router = APIRouter(prefix="/superadmin/billing", tags=["superadmin-billing"])
 DB = Annotated[AsyncSession, Depends(get_db)]
 
-PAID_PLANS = ("starter", "growth", "business")
 
 
 async def _logos(db: AsyncSession, tenant_ids: list[uuid.UUID]) -> dict[uuid.UUID, str | None]:

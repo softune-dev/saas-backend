@@ -13,10 +13,12 @@ from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import cache, courier_booking, courier_crypto, crud, media, products, steadfast
+from app import cache, courier_booking, courier_crypto, crud, media, plan_limits, plans, products, steadfast
+from app.basic_plan import order_out, order_window_start
 from app.db import get_db
 from app.products import first_image_url
-from app.models import Category, Inquiry, Order, OrderItem, Product, Site, Tenant
+from app.models import Category, Inquiry, Order, OrderItem, Product, Site
+from app.plan_gate import require_feature, tenant_plan
 from app.schemas import (
     CategoryCreate,
     CategoryOut,
@@ -225,14 +227,8 @@ async def create_product(
 ) -> Product:
     site = await _owned_site(db, user.tenant_id, site_id)
 
-    # Not crud.get_scoped: a tenant reading its OWN plan isn't an ownership
-    # check the way looking up a site/product is — same reasoning as
-    # app/api/ai.py's _tenant_plan. Tenant.id IS the tenant_id here.
-    tenant = (
-        await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))
-    ).scalar_one()
-    existing_count = await crud.count_scoped(db, Product, user.tenant_id)
-    products.ensure_within_product_limit(existing_count, tenant.plan)
+    # Counts and locks the tenant row; the lock lasts until crud.save commits.
+    await plan_limits.ensure_room_and_lock(db, user.tenant_id, "product")
 
     if payload.category_id:
         category = await crud.get_scoped(db, Category, user.tenant_id, payload.category_id)
@@ -339,6 +335,15 @@ async def list_orders(
     await _owned_site(db, user.tenant_id, site_id)
 
     filters = [Order.site_id == site_id]
+    # Read before the cache and given its own cache kind, so neither plan is
+    # ever served the other's list. The window's start is part of the key:
+    # it moves at midnight, the cached page must not outlive it.
+    plan = await tenant_plan(db, user.tenant_id)
+    cache_kind, window = "orders", ""
+    if not plans.has_feature(plan, "full_analytics"):
+        start = order_window_start()
+        filters.append(Order.created_at >= start)
+        cache_kind, window = "orders_basic", f"{start.date()}:"
     if order_status:
         filters.append(Order.status == order_status)
     if q:
@@ -354,7 +359,7 @@ async def list_orders(
         )
 
     cache_key = cache.dashboard_key(
-        str(site_id), "orders", f"{order_status or ''}:{q or ''}:{limit}:{offset}"
+        str(site_id), cache_kind, f"{window}{order_status or ''}:{q or ''}:{limit}:{offset}"
     )
     cached = await cache.get_json(cache_key)
     if cached is not None:
@@ -367,15 +372,21 @@ async def list_orders(
         db, Order, user.tenant_id, filters=filters,
         order_by=Order.created_at.desc(), limit=limit, offset=offset,
     )
+    items = [order_out(row, plan) for row in rows]
     await cache.set_json(
         cache_key,
-        {"items": [OrderOut.model_validate(r).model_dump(mode="json") for r in rows], "total": total},
+        {"items": [item.model_dump(mode="json") for item in items], "total": total},
     )
-    return {"items": rows, "total": total, "limit": limit, "offset": offset}
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
 @router.post(
-    "/sites/{site_id}/orders", response_model=OrderOut, status_code=status.HTTP_201_CREATED
+    "/sites/{site_id}/orders",
+    response_model=OrderOut,
+    status_code=status.HTTP_201_CREATED,
+    # Whatever the channel: the caller chooses it, so gating only "pos" would
+    # be walked round by leaving it out. Shoppers use /public, not this.
+    dependencies=[Depends(require_feature("pos"))],
 )
 async def create_order(
     site_id: uuid.UUID, payload: OrderCreate, user: CurrentUser, db: DB
@@ -482,9 +493,10 @@ async def create_order(
 @router.get("/sites/{site_id}/orders/{order_id}", response_model=OrderOut)
 async def get_order(
     site_id: uuid.UUID, order_id: uuid.UUID, user: CurrentUser, db: DB
-) -> Order:
+) -> OrderOut:
     await _owned_site(db, user.tenant_id, site_id)
-    return await crud.get_scoped(db, Order, user.tenant_id, order_id)
+    order = await crud.get_scoped(db, Order, user.tenant_id, order_id)
+    return order_out(order, await tenant_plan(db, user.tenant_id))
 
 
 @router.patch("/sites/{site_id}/orders/{order_id}", response_model=OrderOut)
@@ -494,20 +506,21 @@ async def update_order(
     payload: OrderUpdate,
     user: CurrentUser,
     db: DB,
-) -> Order:
+) -> OrderOut:
     """Only status and notes are editable — totals are immutable history."""
     await _owned_site(db, user.tenant_id, site_id)
     order = await crud.get_scoped(db, Order, user.tenant_id, order_id)
+    plan = await tenant_plan(db, user.tenant_id)
     crud.apply_updates(order, payload.model_dump(exclude_unset=True))
     order = await crud.save(db, order)
     await cache.invalidate_dashboard(str(site_id))
-    return order
+    return order_out(order, plan)
 
 
 @router.post("/sites/{site_id}/orders/{order_id}/courier/book", response_model=OrderOut)
 async def book_order_courier(
     site_id: uuid.UUID, order_id: uuid.UUID, user: CurrentUser, db: DB
-) -> Order:
+) -> OrderOut:
     """Books this order with the site's connected Steadfast account and
     records the resulting consignment on the order. See
     app/courier_booking.py's book_order — same helper the automatic
@@ -526,6 +539,8 @@ async def book_order_courier(
             "Connect a working Steadfast account in Couriers before booking.",
         )
 
+    # Read before booking: nothing may fail once the parcel is booked.
+    plan = await tenant_plan(db, user.tenant_id)
     ok, error = await courier_booking.book_order(db, order, connection)
     if not ok:
         code = status.HTTP_409_CONFLICT if "already booked" in (error or "") else (
@@ -534,7 +549,7 @@ async def book_order_courier(
         raise HTTPException(code, error)
 
     await cache.invalidate_dashboard(str(site_id))
-    return order
+    return order_out(order, plan)
 
 
 @router.post("/sites/{site_id}/orders/courier/bulk-book")

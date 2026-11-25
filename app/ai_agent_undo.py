@@ -12,13 +12,17 @@ from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
-from app import ai_agent_admin, ai_agent_settings, cache, crud
+from app import ai_agent_admin, ai_agent_settings, ai_plan, cache, crud
 from app.ai_agent_tools import _forget_tool_cache, _template_key, _write_theme
 from app.models import AiAgentChange, Category, Event, Product, Site
 
 async def undo(db: AsyncSession, tenant_id: uuid.UUID, change_id: uuid.UUID) -> dict:
     # get_scoped: another tenant's change id is a 404, never a 403 (rule 3).
     change = await crud.get_scoped(db, AiAgentChange, tenant_id, change_id)
+    # Live plan, and the feature of the column the change wrote: a change made
+    # before a downgrade must not put SEO or fraud rules back on a plan that
+    # no longer has them. After the scope check so another tenant still gets 404.
+    await ai_plan.ensure_undo(db, tenant_id, change.undo or {})
     if change.undone_at is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, "That change was already undone.")
     site = await crud.get_scoped(db, Site, tenant_id, change.site_id)

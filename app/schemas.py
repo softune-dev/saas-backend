@@ -337,9 +337,37 @@ class TenantOut(ORMModel):
     created_at: datetime
 
 
+class PlanLimitsOut(BaseModel):
+    products: int | None  # None = unlimited
+    storage_bytes: int
+    orders_per_month: int | None  # None = unlimited
+    stores: int
+    ai_per_day: int
+    events: int
+
+
+class PlanUsageOut(BaseModel):
+    products: int
+    events: int
+    stores: int
+    orders_this_month: int
+    blocked_this_month: int
+
+
+class PlanInfoOut(BaseModel):
+    key: str
+    name: str
+    features: list[str]
+    limits: PlanLimitsOut
+    # null when the usage query failed; the plan itself is still right.
+    usage: PlanUsageOut | None
+
+
 class MeOut(BaseModel):
     user: UserOut
     tenant: TenantOut
+    # Filled by GET and PATCH /auth/me (app/plan_info.py).
+    plan_info: PlanInfoOut | None = None
 
 
 # =============================================================================
@@ -1031,7 +1059,8 @@ class OrderOut(ORMModel):
     items: list[OrderItemOut]
     channel: str
     device_id: str | None
-    fraud_status: str
+    # Null only when hidden by the plan (app/basic_plan.py); the column isn't.
+    fraud_status: str | None
     fraud_reason: str | None
     ip_address: str | None
     courier_provider: str | None
@@ -1268,7 +1297,7 @@ class MarketingConnectionOut(ORMModel):
 #  Superadmin — platform operator, cross-tenant. See app/api/superadmin.py.
 # =============================================================================
 
-TenantPlan = Literal["trial", "demo", "starter", "growth", "business"]
+TenantPlan = Literal["free", "trial", "demo", "starter", "growth", "business"]
 TenantStatus = Literal["active", "suspended", "cancelled", "payment_overdue"]
 
 

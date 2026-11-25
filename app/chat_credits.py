@@ -1,5 +1,5 @@
 """Purchasable chat-credit ledger — extends the free daily text-chat
-allowance (app/ai.py's PLAN_AI_DAILY_CAP, a Redis-only counter, unaffected
+allowance (the ai_per_day limit in app/plans.py, a Redis-only counter, unaffected
 by this) rather than replacing it. Once a tenant burns through today's free
 count, _check_ai_access spends one of these instead of a hard 429.
 

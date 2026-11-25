@@ -31,7 +31,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
-from app import ai_actions, cache, crud, queue
+from app import ai_actions, ai_plan, cache, crud, queue
 from app.config import settings
 from app.models import AiAgentChange, Site, Template
 
@@ -386,10 +386,18 @@ async def run(name: str, args: dict, db: AsyncSession, tenant_id: uuid.UUID, han
     adjust, instead of crashing the whole reply."""
     handler = (handlers or HANDLERS)[name]
     try:
+        # The one place every agent and ChatGPT tool passes through, so the
+        # plan is checked live here: a turn that began before a downgrade
+        # stops at its next tool call. See app/ai_plan.py.
+        await ai_plan.ensure_tool(db, tenant_id, name, args, need_ai=True)
         return await handler(db, tenant_id, **args)
     except HTTPException as exc:
         await db.rollback()
-        return {"error": str(exc.detail)}
+        # A plan_locked detail is a dict: show its message, never the dict.
+        out = {"error": ai_plan.detail_message(exc.detail)}
+        if code := ai_plan.locked_code(exc.detail):
+            out["code"] = code
+        return out
     except TypeError:
         await db.rollback()
         return {"error": "Invalid arguments for that tool."}

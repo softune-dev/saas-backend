@@ -21,7 +21,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import cache, events
+from app import cache, events, plan_gate, plans
 from app.products import stock_status
 from app.assistant.index import build_index
 from app.assistant.schemas import AssistantSettings
@@ -63,6 +63,11 @@ async def _site_data(db: AsyncSession, site: Site, settings: AssistantSettings) 
             )
         )
     ).scalars().all()
+
+    # The storefront hides gateways on Free (api/public.py), so the assistant
+    # must not offer them either. Only the display list changes.
+    if plans.get_plan(await plan_gate.tenant_plan(db, site.tenant_id)).key == "free":
+        payments = [p for p in payments if p.provider not in plans.GATED_PAYMENT_PROVIDERS]
 
     return {
         "name": site.name,

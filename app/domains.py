@@ -17,9 +17,9 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import cache, crud, edge_config, queue, vercel
+from app import cache, crud, edge_config, plans, queue, vercel
 from app.config import settings
-from app.models import Site
+from app.models import Site, Tenant
 
 log = logging.getLogger(__name__)
 
@@ -68,6 +68,11 @@ async def promote(db: AsyncSession, site: Site) -> bool:
     pending = site.pending_custom_domain
     if not pending:
         return False
+    # Here, not in the callers: both the dashboard and the worker sweep come
+    # through. The request stays pending, so upgrading again connects it.
+    plan = (await db.execute(select(Tenant.plan).where(Tenant.id == site.tenant_id))).scalar_one()
+    if not plans.has_feature(plan, "domain"):
+        return False
     previous = site.custom_domain
     site.custom_domain = pending
     site.pending_custom_domain = None
@@ -94,14 +99,24 @@ async def promote(db: AsyncSession, site: Site) -> bool:
     return True
 
 
+def pending_stmt():
+    """The sites the sweep looks at. A tenant whose plan has no custom domain
+    (Free) is left out: no Vercel call, and the request stays pending instead
+    of expiring, so upgrading again connects it. A separate function so a test
+    can run it for its own tenant without running the sweep."""
+    allowed = [key for key, plan in plans.PLANS.items() if "domain" in plan.features]
+    return select(Site).where(
+        Site.pending_custom_domain.is_not(None),
+        Site.tenant_id.in_(select(Tenant.id).where(Tenant.plan.in_(allowed))),
+    )
+
+
 async def sweep_pending(db: AsyncSession) -> tuple[int, int]:
     """Promote every pending domain that has connected and drop any that sat
     unconnected past PENDING_DOMAIN_TTL. Returns (promoted, expired). Run
     periodically by the worker, so a merchant who finishes their DNS setup
     and closes the tab still gets their domain."""
-    sites = (
-        await db.execute(select(Site).where(Site.pending_custom_domain.is_not(None)))
-    ).scalars().all()
+    sites = (await db.execute(pending_stmt())).scalars().all()
     promoted = expired = 0
     now = datetime.now(UTC)
     for site in sites:

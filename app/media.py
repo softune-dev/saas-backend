@@ -34,6 +34,7 @@ log = logging.getLogger(__name__)
 from fastapi import HTTPException, status
 
 from app.config import settings
+from app.plans import get_plan
 
 VALID_CATEGORIES = {"hero", "products", "categories", "events", "other"}
 
@@ -48,38 +49,87 @@ IMAGE_MAX_BYTES = 10 * 1024 * 1024
 IMAGE_MAX_MEGAPIXELS = 25
 VIDEO_MAX_BYTES = 100 * 1024 * 1024
 
-# Real per-plan total storage ceiling — separate from IMAGE_MAX_BYTES above
-# (that's a per-FILE limit, same for everyone; this is a per-SITE running
-# total, different per plan). Mirrors app/ai.py's PLAN_AI_DAILY_CAP: a plain
-# dict, not a database column, so pricing can change with a one-line edit.
-# Scoped per SITE, not aggregated across a tenant's sites — every plan
-# except Business is one storefront anyway, and the dashboard's own media
-# views (ShopInfoPanel, Site Settings → Media) are already per-current-site,
-# so a per-site ceiling is what those screens can actually show truthfully.
-PLAN_STORAGE_LIMIT_BYTES: dict[str, int] = {
-    "demo": 800 * 1024 * 1024,        # 800 MB
-    "trial": 500 * 1024 * 1024,       # 500 MB — same as starter, a trial previews it exactly
-    "starter": 500 * 1024 * 1024,     # 500 MB
-    "growth": 2 * 1024 * 1024 * 1024,  # 2 GB
-    "business": 3 * 1024 * 1024 * 1024,  # 3 GB
-}
-DEFAULT_STORAGE_LIMIT_BYTES = PLAN_STORAGE_LIMIT_BYTES["starter"]
+# Real per-plan total storage ceiling lives in app/plans.py — separate from
+# IMAGE_MAX_BYTES above (that's a per-FILE limit, same for everyone; this is a
+# per-SITE running total, different per plan). Scoped per SITE, not aggregated
+# across a tenant's sites — every plan except Business is one storefront
+# anyway, and the dashboard's own media views (ShopInfoPanel, Site Settings
+# -> Media) are already per-current-site, so a per-site ceiling is what those
+# screens can actually show truthfully.
 
 
 def plan_storage_limit(plan: str) -> int:
-    return PLAN_STORAGE_LIMIT_BYTES.get(plan, DEFAULT_STORAGE_LIMIT_BYTES)
+    return get_plan(plan).storage_bytes
 
 
-def site_storage_used_bytes(subdomain: str) -> int:
-    """Live total across all four upload categories for one site's
-    Cloudinary folder — same per-category listing list_all_media already
-    does, exposed standalone so the upload path can check it BEFORE
-    accepting a file, not just report it after the fact."""
-    return sum(
-        (r.get("bytes") or 0)
-        for category in sorted(VALID_CATEGORIES)
-        for r in list_images(subdomain, category)
-    )
+# The full count is one prefix listing per resource type, 500 files a page.
+# Cloudinary's Admin API is rate limited (hourly), so the walk is capped: 10
+# pages x 500 = 5000 files per type, far more than 100 MB of real uploads.
+FULL_SCAN_PAGE_SIZE = 500
+FULL_SCAN_MAX_PAGES = 10
+
+
+def site_storage_used_bytes(subdomain: str, *, full: bool = False) -> int:
+    """Live total for one site's Cloudinary folder, so the upload path can
+    check it BEFORE accepting a file, not just report it after the fact.
+
+    full=False is the long-standing count, kept byte-for-byte for paying
+    plans: images only, the first 100 per category (a paying plan's ceiling is
+    far above what that undercounts, and the extra calls are not worth it).
+
+    full=True is for the Free plan, whose 100 MB is small enough that the
+    shortcuts matter: it counts videos too and follows next_cursor. It lists
+    the whole site prefix once per resource type instead of once per category.
+    Like the short count it leaves out "_system" (our own screenshots).
+
+    Both are blocking SDK calls: callers on the event loop use
+    run_in_threadpool. A Cloudinary outage raises here and the upload is
+    refused (the caller 500s), exactly as it does for the short count.
+    """
+    if not full:
+        return sum(
+            (r.get("bytes") or 0)
+            for category in sorted(VALID_CATEGORIES)
+            for r in list_images(subdomain, category)
+        )
+
+    _ensure_configured()
+    root = settings.cloudinary_root_folder.strip("/")
+    prefix = f"{root}/{subdomain}/"
+    system_prefix = f"{prefix}_system/"
+    total = 0
+    for resource_type in ("image", "video"):
+        cursor = None
+        for _ in range(FULL_SCAN_MAX_PAGES):
+            kwargs: dict[str, Any] = {
+                "type": "upload",
+                "prefix": prefix,
+                "resource_type": resource_type,
+                "max_results": FULL_SCAN_PAGE_SIZE,
+            }
+            if cursor:
+                kwargs["next_cursor"] = cursor
+            result = cloudinary.api.resources(**kwargs)
+            total += sum(
+                (r.get("bytes") or 0)
+                for r in result.get("resources", [])
+                if not r.get("public_id", "").startswith(system_prefix)
+            )
+            cursor = result.get("next_cursor")
+            if not cursor:
+                break
+        else:
+            # Thousands of tiny files: the rest is uncounted, so refuse rather
+            # than let an uncounted remainder become unlimited storage.
+            log.warning("storage count for %s stopped at %d pages", subdomain, FULL_SCAN_MAX_PAGES)
+            total = max(total, get_plan("free").storage_bytes)
+    return total
+
+
+def storage_used_for_plan(plan: str, subdomain: str) -> int:
+    """The count each upload path should check against the plan's limit: the
+    thorough one for Free, today's for everyone else."""
+    return site_storage_used_bytes(subdomain, full=get_plan(plan).key == "free")
 
 
 _configured = False
@@ -262,6 +312,51 @@ def list_images(subdomain: str, category: str) -> list[dict]:
     ]
 
 
+def list_everything(subdomain: str) -> list[dict]:
+    """Every image AND video of a site, without list_images' 100 per category.
+
+    For the Free gallery: what counts toward its 100 MB must be visible there,
+    or a merchant who is full has nothing to delete. Same scan and page cap as
+    site_storage_used_bytes(full=True), and the same "_system" left out.
+    """
+    _ensure_configured()
+    root = settings.cloudinary_root_folder.strip("/")
+    prefix = f"{root}/{subdomain}/"
+    out: list[dict] = []
+    for resource_type in ("image", "video"):
+        cursor = None
+        for _ in range(FULL_SCAN_MAX_PAGES):
+            kwargs: dict[str, Any] = {
+                "type": "upload",
+                "prefix": prefix,
+                "resource_type": resource_type,
+                "max_results": FULL_SCAN_PAGE_SIZE,
+            }
+            if cursor:
+                kwargs["next_cursor"] = cursor
+            result = cloudinary.api.resources(**kwargs)
+            for r in result.get("resources", []):
+                category = r["public_id"][len(prefix) :].split("/", 1)[0]
+                if category == "_system":
+                    continue
+                out.append(
+                    {
+                        "url": r["secure_url"],
+                        "public_id": r["public_id"],
+                        "created_at": r.get("created_at"),
+                        "bytes": r.get("bytes"),
+                        "width": r.get("width"),
+                        "height": r.get("height"),
+                        "kind": resource_type,
+                        "category": category if category in VALID_CATEGORIES else "other",
+                    }
+                )
+            cursor = result.get("next_cursor")
+            if not cursor:
+                break
+    return out
+
+
 def owns(public_id: str, subdomain: str) -> bool:
     """True if `public_id` lives inside this site's own folder tree.
 
@@ -276,6 +371,14 @@ def owns(public_id: str, subdomain: str) -> bool:
 def delete_image(public_id: str) -> None:
     _ensure_configured()
     cloudinary.uploader.destroy(public_id)
+
+
+def delete_video(public_id: str) -> None:
+    """Cloudinary keeps images and videos apart: destroy() without a resource
+    type looks for an image and silently finds nothing. Only called for an
+    explicit delete in the gallery, never by the automatic cleanups."""
+    _ensure_configured()
+    cloudinary.uploader.destroy(public_id, resource_type="video")
 
 
 # Matches ".../upload/v1712345678/{public_id}.jpg" (also handles the

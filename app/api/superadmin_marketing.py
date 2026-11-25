@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import audit, contact_checks, mailer, queue
 from app.db import get_db
+from app.plans import PAID_PLANS
 from app.models import DemoAccessRequest, EmailCampaign, MarketingContact, Tenant, User
 from app.schemas import ORMModel, Page
 from app.security import SuperAdminUser
@@ -35,6 +36,7 @@ DB = Annotated[AsyncSession, Depends(get_db)]
 MAX_RECIPIENTS = 1000
 
 PLANS = ("trial", "starter", "growth", "business")
+_DEFAULT_LIFECYCLES = ("lead", "trial", "customer", "churned", "former_customer")
 STATUSES = ("active", "suspended", "cancelled", "payment_overdue")
 
 
@@ -59,7 +61,7 @@ class AudienceIn(BaseModel):
     @field_validator("lifecycles")
     @classmethod
     def _lifecycles(cls, v: list[str]) -> list[str]:
-        ok = {"lead", "trial", "customer", "churned", "former_customer"}
+        ok = {"lead", "trial", "free", "customer", "churned", "former_customer"}
         bad = [x for x in v if x not in ok]
         if bad:
             raise ValueError(f"Unknown contact group: {bad[0]}")
@@ -147,8 +149,12 @@ async def _resolve(db: AsyncSession, audience: AudienceIn) -> list[str]:
         emails.update(filter(None, (_clean_email(e) for e in audience.emails)))
     elif audience.kind == "contacts":
         query = select(MarketingContact.email)
-        if audience.lifecycles:
-            query = query.where(MarketingContact.lifecycle.in_(audience.lifecycles))
+        # "Any group" must mean the groups that existed before the Free plan:
+        # free signups were never mailed, so they join a campaign only when
+        # the operator picks "free" on purpose.
+        query = query.where(
+            MarketingContact.lifecycle.in_(audience.lifecycles or _DEFAULT_LIFECYCLES)
+        )
         # Contacts and demo leads hold unverified addresses from before the
         # form checks existed. Mailing those bounces and hurts delivery.
         emails.update(e.lower() for e in (await db.execute(query)).scalars().all() if contact_checks.is_mailable(e))
@@ -161,8 +167,9 @@ async def _resolve(db: AsyncSession, audience: AudienceIn) -> list[str]:
             .join(Tenant, Tenant.id == User.tenant_id)
             .where(User.role == "owner", User.is_active.is_(True))
         )
-        if audience.plans:
-            query = query.where(Tenant.plan.in_(audience.plans))
+        # No plan chosen means every plan that was mailable before Free
+        # existed (PLANS), so free and demo owners are never mailed by default.
+        query = query.where(Tenant.plan.in_(audience.plans or PLANS))
         if audience.statuses:
             query = query.where(Tenant.status.in_(audience.statuses))
         emails.update(e.lower() for e in (await db.execute(query)).scalars().all())
@@ -201,14 +208,20 @@ async def audience_counts(admin: SuperAdminUser, db: DB) -> dict:
             await db.execute(
                 select(func.count(func.distinct(User.email)))
                 .join(Tenant, Tenant.id == User.tenant_id)
-                .where(User.role == "owner", User.is_active.is_(True), *where)
+                .where(
+                    User.role == "owner", User.is_active.is_(True),
+                    Tenant.plan.in_(PLANS), *where,
+                )
             )
         ).scalar_one()
 
     async def contact_count(lifecycle: str | None) -> int:
         q = select(func.count(MarketingContact.id)).where(MarketingContact.unsubscribed_at.is_(None))
-        if lifecycle:
-            q = q.where(MarketingContact.lifecycle == lifecycle)
+        q = q.where(
+            MarketingContact.lifecycle == lifecycle
+            if lifecycle
+            else MarketingContact.lifecycle.in_(_DEFAULT_LIFECYCLES)
+        )
         return (await db.execute(q)).scalar_one()
 
     demo_emails = (await db.execute(select(DemoAccessRequest.email))).scalars().all()
@@ -216,7 +229,7 @@ async def audience_counts(admin: SuperAdminUser, db: DB) -> dict:
     return {
         "owners": await owners(),
         "trial_owners": await owners(Tenant.plan == "trial"),
-        "paid_owners": await owners(Tenant.plan.in_(("starter", "growth", "business"))),
+        "paid_owners": await owners(Tenant.plan.in_(PAID_PLANS)),
         "overdue_owners": await owners(Tenant.status == "payment_overdue"),
         "demo_leads": demo,
         "expired_trials": await contact_count("churned"),

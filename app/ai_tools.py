@@ -18,12 +18,14 @@ import math
 import uuid
 from datetime import UTC, date, datetime, timedelta
 
+from fastapi import HTTPException
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import cache, crud, invoices as invoices_module, media, risk_score as risk_score_module
+from app import ai_plan, cache, plan_gate, plans, crud, invoices as invoices_module, media, risk_score as risk_score_module
 from app.config import settings
+from app.plans import get_plan
 from app.models import (
     Category,
     CourierConnection,
@@ -321,7 +323,7 @@ async def _get_site_info(db: AsyncSession, tenant_id: uuid.UUID) -> dict:
     about = site.about or {}
     currency = await _tenant_currency(db, tenant_id)
 
-    return {
+    info = {
         "site_name": site.name,
         "site_status": site.status,
         "subdomain": f"{site.subdomain}.{settings.site_base_domain}",
@@ -367,6 +369,18 @@ async def _get_site_info(db: AsyncSession, tenant_id: uuid.UUID) -> dict:
         "privacy_policy_published": bool(legal.get("privacy", {}).get("published")),
         "terms_published": bool(legal.get("terms", {}).get("published")),
     }
+    # A stream or ChatGPT call that began before a downgrade must not read what
+    # the plan no longer includes: drop those keys instead of blanking them.
+    plan = await plan_gate.tenant_plan(db, tenant_id)
+    if not plans.has_feature(plan, "seo"):
+        for key in [k for k in info if k.startswith(("seo_", "og_")) or k in (
+            "meta_description", "keywords", "favicon_set", "indexing_hidden", "sitemap_enabled",
+            "google_analytics_connected", "search_console_connected", "facebook_pixel_connected",
+        )]:
+            info.pop(key)
+    if not plans.has_feature(plan, "domain"):
+        info.pop("custom_domain")
+    return info
 
 
 async def _get_media_stats(db: AsyncSession, tenant_id: uuid.UUID) -> dict:
@@ -418,14 +432,6 @@ async def _get_media_stats(db: AsyncSession, tenant_id: uuid.UUID) -> dict:
     }
 
 
-# Mirrors app/ai.py's PLAN_AI_DAILY_CAP — duplicated, not imported, since
-# app/ai.py imports THIS module (ai_tools), so importing back would be
-# circular. Same tradeoff this codebase already makes between app/media.py's
-# and app/ai.py's own separate per-plan dicts — keep in sync if it changes.
-_PLAN_AI_DAILY_CAP: dict[str, int] = {"demo": 50, "starter": 15, "growth": 80, "business": 120}
-_DEFAULT_AI_DAILY_CAP = 80
-
-
 async def _get_billing_status(db: AsyncSession, tenant_id: uuid.UUID) -> dict:
     tenant = (
         await db.execute(select(Tenant).where(Tenant.id == tenant_id))
@@ -433,7 +439,7 @@ async def _get_billing_status(db: AsyncSession, tenant_id: uuid.UUID) -> dict:
     if tenant is None:
         return {"error": "No account found."}
     plan = tenant.plan
-    ai_cap = _PLAN_AI_DAILY_CAP.get(plan, _DEFAULT_AI_DAILY_CAP)
+    ai_cap = get_plan(plan).ai_per_day
 
     # Same cache key format + raw-integer-counter shape as app/ai.py's
     # _usage_key/get_usage (client.incr writes a plain int, not JSON).
@@ -452,7 +458,9 @@ async def _get_billing_status(db: AsyncSession, tenant_id: uuid.UUID) -> dict:
     storage_limit_mb = round(media.plan_storage_limit(plan) / 1_048_576, 1)
     if site is not None:
         try:
-            used_bytes = await run_in_threadpool(media.site_storage_used_bytes, site.subdomain)
+            # The count the upload paths enforce (the thorough one on Free), so
+            # the figure the assistant quotes matches what blocks an upload.
+            used_bytes = await run_in_threadpool(media.storage_used_for_plan, plan, site.subdomain)
             storage_used_mb = round(used_bytes / 1_048_576, 1)
         except Exception as exc:  # noqa: BLE001
             log.warning("get_billing_status: media lookup failed: %s", exc)
@@ -1084,6 +1092,13 @@ async def execute_tool(
     handler = _HANDLERS.get(name)
     if handler is None:
         return {"error": f"Unknown tool '{name}'."}
+
+    # Before the cache: a read cached while the tenant had the feature must
+    # not be served after a downgrade.
+    try:
+        await ai_plan.ensure_tool(db, tenant_id, name, args, need_ai=False)
+    except HTTPException as exc:
+        return {"error": ai_plan.detail_message(exc.detail)}
 
     cache_key = f"ai:tool:{tenant_id}:{name}:{json.dumps(args, sort_keys=True)}"
     cached = await cache.get_json(cache_key)

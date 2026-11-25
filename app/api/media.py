@@ -9,7 +9,7 @@ import asyncio
 import io
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
@@ -25,7 +25,7 @@ from app.media import (
     VALID_CATEGORIES,
     VIDEO_MAX_BYTES,
     plan_storage_limit,
-    site_storage_used_bytes,
+    storage_used_for_plan,
 )
 from app.models import Category as CategoryModel
 from app.models import Product, Site, Tenant
@@ -48,7 +48,9 @@ async def _assert_storage_available(
 ) -> None:
     plan = await _tenant_plan(db, user.tenant_id)
     limit = plan_storage_limit(plan)
-    used = site_storage_used_bytes(site.subdomain)
+    # Blocking Cloudinary calls (the Free plan's full count is several) run
+    # off the event loop; the incoming file is part of the sum.
+    used = await run_in_threadpool(storage_used_for_plan, plan, site.subdomain)
     if used + incoming_bytes > limit:
         raise HTTPException(
             status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
@@ -172,13 +174,14 @@ async def delete_media(
     public_id: str,
     user: CurrentUser,
     db: DB,
+    kind: Literal["image", "video"] = "image",
 ) -> None:
     site = await crud.get_scoped(db, Site, user.tenant_id, site_id)
     if not media.owns(public_id, site.subdomain):
         # Not this site's folder — 404, not 403, same reasoning as
         # crud.get_scoped: don't confirm whether the id is real.
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Media not found")
-    await run_in_threadpool(media.delete_image, public_id)
+    await run_in_threadpool(media.delete_video if kind == "video" else media.delete_image, public_id)
 
 
 # Anything uploaded more recently than this is left alone even if nothing
@@ -229,6 +232,33 @@ async def _referenced_urls(db: AsyncSession, site: Site) -> set[str]:
     return referenced
 
 
+async def _everything(db: AsyncSession, site: Site, referenced: set[str], plan: str) -> dict:
+    """The gallery on Free: everything its storage limit counts, videos too."""
+    videos = (
+        await db.execute(
+            select(Product.video_url).where(Product.site_id == site.id, Product.video_url.is_not(None))
+        )
+    ).scalars().all()
+    in_use = referenced | set(videos)
+    items = [
+        {**r, "in_use": r["url"] in in_use}
+        for r in await run_in_threadpool(media.list_everything, site.subdomain)
+    ]
+    items.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+    by_category = {c: {"count": 0, "bytes": 0} for c in sorted(VALID_CATEGORIES)}
+    for r in items:
+        by_category[r["category"]]["count"] += 1
+        by_category[r["category"]]["bytes"] += r.get("bytes") or 0
+    return {
+        "images": items,
+        "total_count": len(items),
+        "total_bytes": sum(r.get("bytes") or 0 for r in items),
+        "by_category": by_category,
+        "limit_bytes": plan_storage_limit(plan),
+        "plan": plan,
+    }
+
+
 @router.get("/all")
 async def list_all_media(site_id: uuid.UUID, user: CurrentUser, db: DB) -> dict:
     """Every uploaded image across all four categories, with size/dimensions
@@ -238,6 +268,10 @@ async def list_all_media(site_id: uuid.UUID, user: CurrentUser, db: DB) -> dict:
     """
     site = await crud.get_scoped(db, Site, user.tenant_id, site_id)
     referenced = await _referenced_urls(db, site)
+
+    plan = await _tenant_plan(db, user.tenant_id)
+    if plan == "free":
+        return await _everything(db, site, referenced, plan)
 
     images: list[dict] = []
     by_category: dict[str, dict] = {}
@@ -263,13 +297,12 @@ async def list_all_media(site_id: uuid.UUID, user: CurrentUser, db: DB) -> dict:
 
     images.sort(key=lambda r: r.get("created_at") or "", reverse=True)
     total_bytes = sum(r.get("bytes") or 0 for r in images)
-    plan = await _tenant_plan(db, user.tenant_id)
     return {
         "images": images,
         "total_count": len(images),
         "total_bytes": total_bytes,
         "by_category": by_category,
-        # Real per-plan ceiling — see app/media.py's PLAN_STORAGE_LIMIT_BYTES.
+        # Real per-plan ceiling — see plan_storage_limit in app/media.py (the table is app/plans.py).
         # Replaces the dashboard's old hardcoded 1GB display value.
         "limit_bytes": plan_storage_limit(plan),
         "plan": plan,

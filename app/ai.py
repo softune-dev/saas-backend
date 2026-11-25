@@ -30,34 +30,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import ai_log, ai_tools, cache, invoices as invoices_module
 from app.config import settings
+from app.plans import get_plan
 
 log = logging.getLogger(__name__)
 
-# Daily AI request cap per tenant plan. NOT finalized pricing — deliberately
-# just a dict, not a database column or migration, so it's a one-line change
-# whenever the real plan lineup settles.
-#   - demo: the one shared, read-only "click and look around" account
-#     (app/api/demo_access.py) — enough allowance to actually try
-#     the assistant, not a token amount. Distinct from trial below.
-#   - trial: self-serve 7-day signup (app/api/trial.py) — gets exactly the
-#     Starter cap, same as the plan it's a preview of. Was silently falling
-#     through to DEFAULT_AI_DAILY_CAP (80, Growth's cap) before this entry
-#     existed, which is wrong on purpose only for plan values that are truly
-#     unrecognized, not for a real, named plan we forgot to list.
-#   - starter: every paying customer gets real AI access, just a lower cap
-#     than the higher tiers — not 0.
-#   - growth / business: real paid-tier allowances.
-# Any OTHER plan value not listed falls back to DEFAULT_AI_DAILY_CAP (same
-# as growth) rather than silently 0 — an unrecognized plan should never
-# look like "AI isn't included."
-PLAN_AI_DAILY_CAP: dict[str, int] = {
-    "demo": 50,
-    "trial": 15,
-    "starter": 15,
-    "growth": 80,
-    "business": 120,
-}
-DEFAULT_AI_DAILY_CAP = 80
+# Daily AI request cap per tenant plan lives in app/plans.py (ai_per_day;
+# 0 means AI isn't included, which the checks below turn into a 403). Trial
+# and demo have their own entries there, so a real named plan can no longer
+# fall through to some other plan's cap.
 
 
 def _usage_key(tenant_id: str) -> str:
@@ -65,7 +45,7 @@ def _usage_key(tenant_id: str) -> str:
 
 
 def plan_cap(plan: str) -> int:
-    return PLAN_AI_DAILY_CAP.get(plan, DEFAULT_AI_DAILY_CAP)
+    return get_plan(plan).ai_per_day
 
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
@@ -274,6 +254,32 @@ async def _check_chat_access(tenant_id: str, plan: str, db: AsyncSession) -> Non
         return
 
     await _spend_credit_or_block(db, tenant_id, cap)
+
+
+# The sign-up chat door (a plan with no AI, onboarding unfinished): messages a day.
+ONBOARDING_CHAT_PER_DAY = 15
+
+
+async def _check_onboarding_chat(tenant_id: str) -> None:
+    """Counter for the sign-up chat door. Unlike every other AI counter this
+    FAILS CLOSED when Redis is down (a door nobody pays for must not open
+    because the limiter broke), and it never spends a purchased credit."""
+    try:
+        client = cache.client()
+        key = _usage_key(tenant_id)
+        count = await client.incr(key)
+        if count == 1:
+            await client.expire(key, 60 * 60 * 25)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("onboarding chat counter failed, refusing: %s", exc)
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "The assistant isn't available right now. Please try again shortly."
+        ) from exc
+    if count > ONBOARDING_CHAT_PER_DAY:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            {"code": "ai_limit_reached", "message": "You've used today's messages. Come back tomorrow."},
+        )
 
 
 async def get_usage(tenant_id: str, plan: str) -> dict:
@@ -1038,7 +1044,8 @@ def _extract_action(text: str) -> tuple[str, dict | None]:
 
 
 async def chat_reply(
-    message: str, history: list[dict], tenant_id: str, db: AsyncSession, plan: str
+    message: str, history: list[dict], tenant_id: str, db: AsyncSession, plan: str,
+    text_only: bool = False,
 ) -> tuple[str, list[str], dict | None]:
     """Conversational reply for the general AI chat sidebar. Tenant-scoped
     business data comes in only through app/ai_tools.py's read-only,
@@ -1052,7 +1059,12 @@ async def chat_reply(
     caller never executes it, only shows it as a confirm card.
     """
     _ensure_configured()
-    await _check_chat_access(tenant_id, plan, db)
+    # text_only is the sign-up door for a plan without AI: no tools are offered
+    # to the model, none will run, and no action card comes back.
+    if text_only:
+        await _check_onboarding_chat(tenant_id)
+    else:
+        await _check_chat_access(tenant_id, plan, db)
 
     tenant_uuid = uuid.UUID(tenant_id)
     tools_used: list[str] = []
@@ -1071,7 +1083,7 @@ async def chat_reply(
         body = {
             "systemInstruction": {"parts": [{"text": _CHAT_SYSTEM_PROMPT}]},
             "contents": contents,
-            "tools": [{"functionDeclarations": ai_tools.TOOL_DECLARATIONS}],
+            **({} if text_only else {"tools": [{"functionDeclarations": ai_tools.TOOL_DECLARATIONS}]}),
             # Low temperature: this reply's shape (plain text vs. a
             # structured action block) has to be reliable, not creative —
             # variance here means the same clear request sometimes silently
@@ -1105,10 +1117,13 @@ async def chat_reply(
                 status.HTTP_502_BAD_GATEWAY, "The AI didn't return a usable reply."
             ) from exc
 
-        calls = [p["functionCall"] for p in parts if "functionCall" in p]
+        # A model that calls a tool anyway is ignored when text_only.
+        calls = [] if text_only else [p["functionCall"] for p in parts if "functionCall" in p]
         if not calls:
             text = "".join(p.get("text", "") for p in parts).strip()
             cleaned, action = _extract_action(text)
+            if text_only:
+                action = None
             return (cleaned or "I don't have anything to add on that.", tools_used, action)
 
         # The model's own turn (including the call) must be replayed back

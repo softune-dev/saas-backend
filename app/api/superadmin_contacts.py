@@ -26,7 +26,7 @@ from app.security import SuperAdminUser
 router = APIRouter(prefix="/superadmin/contacts", tags=["superadmin-contacts"])
 DB = Annotated[AsyncSession, Depends(get_db)]
 
-Lifecycle = Literal["lead", "trial", "customer", "churned", "former_customer"]
+Lifecycle = Literal["lead", "trial", "free", "customer", "churned", "former_customer"]
 
 
 class ContactOut(ORMModel):
@@ -131,7 +131,7 @@ async def summary(admin: SuperAdminUser, db: DB) -> dict:
     ).one()
     return {
         "total": totals[0],
-        "by_lifecycle": {k: by.get(k, 0) for k in ("lead", "trial", "customer", "churned", "former_customer")},
+        "by_lifecycle": {k: by.get(k, 0) for k in ("lead", "trial", "free", "customer", "churned", "former_customer")},
         "with_phone": totals[1],
         "unsubscribed": totals[2],
         "added_7d": totals[3],

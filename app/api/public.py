@@ -21,7 +21,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,7 +29,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from app import pay_matching
 from app import products as products_module
-from app import ai_images, billing_actions, bkash, claims, cache, chat_credits, courier_crypto, crud, events, fraud, invoices as invoices_module, mailer, nagad, notifications, queue, recaptcha, sslcommerz, steadfast
+from app import ai_images, billing_actions, bkash, claims, cache, chat_credits, courier_crypto, crud, events, fraud, invoices as invoices_module, mailer, nagad, notifications, order_limit, plan_gate, plans, queue, recaptcha, sslcommerz, steadfast
 from app.ratelimit import _client_ip, rate_limit
 from app.config import settings
 from app.db import get_db
@@ -204,6 +204,18 @@ def _json_ld(site: Site) -> dict[str, Any] | None:
     return data
 
 
+# Site-wide ids a Free store does not get. Verification (search console) and
+# keywords are not tracking, so they stay.
+_TRACKING_KEYS = ("google_analytics", "facebook_pixel", "tiktok_pixel", "gtm_container_id")
+# What a Free shopper may pick at checkout: cash on delivery, and manual, which
+# is also how Softune Pay matches a wallet SMS to the order.
+_FREE_PAYMENT_METHODS = ("cod", "manual")
+
+
+async def _on_free_plan(db: AsyncSession, tenant_id: uuid.UUID) -> bool:
+    return plans.get_plan(await plan_gate.tenant_plan(db, tenant_id)).key == "free"
+
+
 @router.get("/site/{host}")
 async def get_site_config(host: str, db: DB) -> dict:
     """Everything a template needs to render a site. Cached in Redis.
@@ -252,7 +264,22 @@ async def get_site_config(host: str, db: DB) -> dict:
         for pc in payment_connections
     ]
 
+    # What the plan changes on the storefront: ordering and the badge.
+    plan_flags, ttl = await order_limit.storefront_flags(db, site.tenant_id)
+
+    # Free shows no tracking and no payment gateways. Hidden here, in the
+    # PUBLIC copy only: the stored row keeps the merchant's ids and connections
+    # so they come back the moment the plan does. A plan change drops this
+    # cache (billing_actions.refresh_storefronts). Paid plans are untouched.
+    seo = site.seo
+    if await _on_free_plan(db, site.tenant_id):
+        seo = {**seo, **{key: "" for key in _TRACKING_KEYS}}
+        payment_methods = [
+            m for m in payment_methods if m["provider"] not in plans.GATED_PAYMENT_PROVIDERS
+        ]
+
     config = {
+        **plan_flags,
         "site": {
             "id": str(site.id),
             "name": site.name,
@@ -266,14 +293,14 @@ async def get_site_config(host: str, db: DB) -> dict:
             # once per site rather than per page: tracking script ids,
             # keywords, and the sitemap on/off toggle.
             "seo": {
-                "keywords": site.seo.get("keywords", ""),
-                "sitemap_enabled": site.seo.get("sitemap_enabled", True),
-                "google_analytics": site.seo.get("google_analytics", ""),
-                "google_search_console": site.seo.get("google_search_console", ""),
-                "facebook_pixel": site.seo.get("facebook_pixel", ""),
-                "tiktok_pixel": site.seo.get("tiktok_pixel", ""),
-                "gtm_container_id": site.seo.get("gtm_container_id", ""),
-                "favicon": site.seo.get("favicon", ""),
+                "keywords": seo.get("keywords", ""),
+                "sitemap_enabled": seo.get("sitemap_enabled", True),
+                "google_analytics": seo.get("google_analytics", ""),
+                "google_search_console": seo.get("google_search_console", ""),
+                "facebook_pixel": seo.get("facebook_pixel", ""),
+                "tiktok_pixel": seo.get("tiktok_pixel", ""),
+                "gtm_container_id": seo.get("gtm_container_id", ""),
+                "favicon": seo.get("favicon", ""),
             },
             "faqs": site.faqs,
             "legal": site.legal,
@@ -298,7 +325,7 @@ async def get_site_config(host: str, db: DB) -> dict:
         "updated_at": site.updated_at.isoformat(),
     }
 
-    await cache.set_json(key, config)
+    await cache.set_json(key, config, ttl=ttl)
     return config
 
 
@@ -768,7 +795,7 @@ async def capture_abandoned_checkout(host: str, payload: AbandonedCheckoutCaptur
     dependencies=[Depends(rate_limit("checkout", limit=8, window_seconds=300))],
 )
 async def create_public_order(
-    host: str, payload: PublicOrderCreate, request: Request, db: DB
+    host: str, payload: PublicOrderCreate, request: Request, db: DB, background: BackgroundTasks
 ) -> PublicOrderOut:
     """What a real storefront checkout submits. No auth — anonymous
     customers use this.
@@ -936,6 +963,19 @@ async def create_public_order(
                     "This store can't accept a new order from you right now. "
                     "Please contact us directly to complete your purchase.",
                 )
+
+    # Read before the stock rows are locked below, so no lock waits for it.
+    tenant = await order_limit.load_tenant(db, site.tenant_id)
+    # Live from the database, like the config's hidden gateways: a client cannot
+    # pick a method the storefront never offered (no extra query, plan is here).
+    if (
+        plans.get_plan(tenant.plan).key == "free"
+        and payload.payment_method not in _FREE_PAYMENT_METHODS
+    ):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "That payment method isn't available at this store. Please choose another.",
+        )
 
     ids = [item.product_id for item in payload.items]
     products = {
@@ -1152,10 +1192,14 @@ async def create_public_order(
         rules=site.fraud_rules or {},
     )
 
+    order_number = await crud.next_order_number(db, site.id)
+    # Free's monthly limit, in this transaction so a failed save is not counted.
+    # It locks the tenant's counter: nothing slow between here and crud.save.
+    claimed = await order_limit.claim_for_order(db, tenant, site)
     order = Order(
         site_id=site.id,
         tenant_id=site.tenant_id,
-        order_number=await crud.next_order_number(db, site.id),
+        order_number=order_number,
         customer=payload.customer,
         customer_id=customer_record.id if customer_record else None,
         subtotal_cents=subtotal,
@@ -1179,6 +1223,7 @@ async def create_public_order(
         ip_address=order_ip,
     )
     order = await crud.save(db, order)
+    background.add_task(order_limit.after_order, claimed)
 
     # Softune Pay: shoppers often pay first and place the order second, so the
     # wallet SMS may already be here. Best-effort; never fails the order.
@@ -1417,6 +1462,8 @@ async def init_gateway_payment(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Unknown or unsupported gateway '{provider}'")
 
     site, order = await _find_order_by_number(host, order_number, db)
+    if await _on_free_plan(db, site.tenant_id):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{provider} isn't set up for this store.")
     if order.status != "pending":
         raise HTTPException(status.HTTP_409_CONFLICT, "This order has already been paid or cancelled.")
 

@@ -36,7 +36,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import ai_agent_media, ai_agent_products, ai_agent_settings, ai_agent_tools, ai_agent_undo, ai_log, ai_tools, cache, mcp_images, oauth_server
+from app import ai_agent_media, ai_plan, ai_agent_products, ai_agent_settings, ai_agent_tools, ai_agent_undo, ai_log, ai_tools, cache, mcp_images, oauth_server
 from app.config import settings
 from app.models import AiAgentChange, OAuthToken
 
@@ -209,6 +209,17 @@ def _clean_error(message: str) -> str:
     return cleaned or "That isn't available for this store right now."
 
 
+_NOT_AVAILABLE = "That isn't available for this store right now."
+
+
+def _error_result(detail: Any) -> dict:
+    """An HTTPException detail as ChatGPT's error. A plan lock names no plan
+    (the plugin rules forbid plan text), and a dict is never shown as a dict."""
+    if ai_plan.locked_code(detail) == "plan_locked":
+        return {"error": _NOT_AVAILABLE}
+    return {"error": _clean_error(ai_plan.detail_message(detail))}
+
+
 def _shape_write(result: dict) -> dict:
     """A write's result without the heavy parts only our dashboard needs (the
     whole theme, the template key), keeping what the model must relay."""
@@ -289,6 +300,11 @@ async def call_tool(db: AsyncSession, token: OAuthToken | None, name: str, args:
             {"error": "This connection isn't allowed to do that."}, is_error=True,
             meta=_challenge("insufficient_scope", "Reconnect SoftuneBD and allow changes to continue"),
         )
+    # The plan is read live: a token minted before a downgrade stops working on
+    # its next call, is NOT revoked, and works again the moment the store is
+    # upgraded. Plain words only, as _clean_error's rule requires.
+    if not await ai_plan.tenant_has_feature(db, token.tenant_id, "chatgpt"):
+        return _tool_result({"error": _NOT_AVAILABLE}, is_error=True)
     is_write = needed == "store.write"
     if not await _within_limits(token.tenant_id, is_write):
         return _tool_result({"error": "Too many requests for this store just now. Wait a minute and try again."}, is_error=True)
@@ -303,11 +319,13 @@ async def call_tool(db: AsyncSession, token: OAuthToken | None, name: str, args:
         result = await _execute(name, args, db, token.tenant_id)
     except HTTPException as exc:
         await db.rollback()
-        result = {"error": _clean_error(str(exc.detail))}
+        result = _error_result(exc.detail)
     except Exception:  # noqa: BLE001 - one broken tool must not break the connection
         log.exception("mcp tool %s failed", name)
         await db.rollback()
         result = {"error": "Something went wrong running that. Please try again."}
+    if result.get("code") == "plan_locked":
+        result = _error_result({"code": "plan_locked"})  # a handler's own lock, same plain words
     if "error" in result:
         result["error"] = _clean_error(str(result["error"]))
         tracker.status = "error"

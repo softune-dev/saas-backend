@@ -18,7 +18,7 @@ from PIL import Image
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import ai_images, ai_log, crud, mailer, media
+from app import ai_images, ai_log, ai_plan, crud, mailer, media, plan_gate, plans
 from app.ai_art_director import art_direct
 from app.ai_image_presets import (
     ALWAYS_TEXT_FREE_CATEGORIES,
@@ -32,7 +32,7 @@ from app.ai_image_presets import (
 )
 from app.config import settings
 from app.db import get_db
-from app.media import IMAGE_MAX_BYTES, IMAGE_MAX_MEGAPIXELS, plan_storage_limit, site_storage_used_bytes
+from app.media import IMAGE_MAX_BYTES, IMAGE_MAX_MEGAPIXELS, plan_storage_limit, storage_used_for_plan
 from app.models import PaymentClaim, Site, Tenant, User
 from app.schemas import (
     CreditPurchaseSubmit,
@@ -247,6 +247,44 @@ async def _finish_image_log(tracker: ai_log.Tracker, result: GeneratedImageOut) 
     tracker.thumbnail = await ai_log.make_thumbnail(base64.b64decode(result.image_base64))
 
 
+async def _ensure_generate_allowed(db: AsyncSession, tenant_id, payload: GenerateImageIn) -> None:
+    """Images are an AI feature. The one exception is the sign-up door: a Free
+    store may spend its free images while onboarding is unfinished, and only
+    by asking for them (use_onboarding_free). Credits bought earlier don't
+    open it, and neither does a finished onboarding."""
+    plan = await plan_gate.tenant_plan(db, tenant_id)
+    if plans.has_feature(plan, "ai"):
+        return
+    if (
+        payload.use_onboarding_free
+        and await ai_plan.onboarding_open(db, tenant_id)
+        and await ai_images.get_onboarding_free_remaining(db, tenant_id) > 0
+    ):
+        return
+    plans.ensure_feature(plan, "ai")
+
+
+async def _direct_freeform(
+    db: AsyncSession, tenant_id, payload: GenerateImageIn, prompt: str, tracker: ai_log.Tracker
+) -> str:
+    """Freeform words get a real design brief (presets are already authored).
+    This is a billable Gemini text call, so it runs only AFTER the credit
+    charge or the free-image claim has succeeded: with it first, a zero-credit
+    account got unlimited art-director calls and a 402 at the end."""
+    if payload.preset_id:
+        return prompt
+    first = payload.reference_images[0] if payload.reference_images else None
+    directed = await _art_directed(
+        payload.prompt or "", await _business_context_line(db, tenant_id),
+        aspect_ratio=payload.aspect_ratio, include_text=payload.include_text,
+        reference=(base64.b64decode(first.data_base64), first.mime_type) if first else None,
+        copy=_copy_instruction(payload) if payload.include_text else "",
+    )
+    prompt = directed or prompt
+    tracker.input["prompt_sent"] = prompt
+    return prompt
+
+
 @router.post("/generate", response_model=GeneratedImageOut)
 async def generate(payload: GenerateImageIn, user: CurrentUser, db: DB) -> GeneratedImageOut:
     """Charges credits BEFORE calling Gemini, refunds them if the call
@@ -254,17 +292,8 @@ async def generate(payload: GenerateImageIn, user: CurrentUser, db: DB) -> Gener
     received (see app/ai_images.py's charge_credits/refund_credits
     docstrings for why the ordering is this way round, not the reverse).
     """
+    await _ensure_generate_allowed(db, user.tenant_id, payload)
     prompt = await _resolve_prompt(db, user.tenant_id, payload)
-    if not payload.preset_id:
-        # Freeform words get a real design brief; presets are already authored.
-        first = payload.reference_images[0] if payload.reference_images else None
-        directed = await _art_directed(
-            payload.prompt or "", await _business_context_line(db, user.tenant_id),
-            aspect_ratio=payload.aspect_ratio, include_text=payload.include_text,
-            reference=(base64.b64decode(first.data_base64), first.mime_type) if first else None,
-            copy=_copy_instruction(payload) if payload.include_text else "",
-        )
-        prompt = directed or prompt
     use_free = await _should_use_free(db, user.tenant_id, payload.tier, payload.use_onboarding_free)
 
     async with ai_log.track(
@@ -279,13 +308,14 @@ async def generate(payload: GenerateImageIn, user: CurrentUser, db: DB) -> Gener
         },
     ) as tracker:
         if use_free:
-            result = await _generate_with_onboarding_free(payload, prompt, user.tenant_id, db)
+            result = await _generate_with_onboarding_free(payload, prompt, user.tenant_id, db, tracker)
         else:
             credits = ai_images.tier_credit_cost(payload.tier)
             balance = await ai_images.charge_credits(
                 db, user.tenant_id, credits, reason="generate", reference=payload.preset_id or "custom"
             )
             try:
+                prompt = await _direct_freeform(db, user.tenant_id, payload, prompt, tracker)
                 reference_images = [
                     (base64.b64decode(r.data_base64), r.mime_type) for r in payload.reference_images
                 ]
@@ -306,7 +336,7 @@ async def generate(payload: GenerateImageIn, user: CurrentUser, db: DB) -> Gener
 
 
 async def _generate_with_onboarding_free(
-    payload: GenerateImageIn, prompt: str, tenant_id, db: AsyncSession
+    payload: GenerateImageIn, prompt: str, tenant_id, db: AsyncSession, tracker: ai_log.Tracker
 ) -> GeneratedImageOut:
     """The free-allowance path: standard tier only, one atomic claim per
     image (see ai_images.claim_onboarding_free), released again if Gemini
@@ -319,6 +349,7 @@ async def _generate_with_onboarding_free(
         )
     free_remaining = await ai_images.claim_onboarding_free(db, tenant_id)
     try:
+        prompt = await _direct_freeform(db, tenant_id, payload, prompt, tracker)
         reference_images = [
             (base64.b64decode(r.data_base64), r.mime_type) for r in payload.reference_images
         ]
@@ -343,6 +374,9 @@ async def edit(payload: EditImageIn, user: CurrentUser, db: DB) -> GeneratedImag
     cheaper "just a tweak" price, so there's no way to game the tier
     pricing into a discount loop (see app/ai_images.py's top docstring).
     """
+    # Even with credits bought earlier: editing is an AI feature, and the
+    # sign-up free images are for /generate only.
+    plans.ensure_feature(await plan_gate.tenant_plan(db, user.tenant_id), "ai")
     async with ai_log.track(
         "image_edit",
         tenant_id=user.tenant_id,
@@ -441,7 +475,7 @@ async def save_to_gallery(payload: SaveImageToGalleryIn, user: CurrentUser, db: 
 
     tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
     limit = plan_storage_limit(tenant.plan)
-    used = site_storage_used_bytes(site.subdomain)
+    used = await run_in_threadpool(storage_used_for_plan, tenant.plan, site.subdomain)
     if used + len(image_bytes) > limit:
         raise HTTPException(
             status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
@@ -454,7 +488,12 @@ async def save_to_gallery(payload: SaveImageToGalleryIn, user: CurrentUser, db: 
     )
 
 
-@router.post("/purchase-credits", status_code=status.HTTP_202_ACCEPTED)
+@router.post(
+    "/purchase-credits", status_code=status.HTTP_202_ACCEPTED,
+    # New purchases need AI; a claim already submitted still settles through the
+    # payment webhook, which never reads the plan.
+    dependencies=[Depends(plan_gate.require_feature("ai"))],
+)
 async def submit_credit_purchase(payload: CreditPurchaseSubmit, user: CurrentUser, db: DB) -> dict:
     """Same self-serve "I already sent the money" boundary as
     app/api/billing.py's submit_manual_payment — persists a PaymentClaim

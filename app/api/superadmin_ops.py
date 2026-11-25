@@ -35,6 +35,7 @@ from app.models import (
     Tenant,
     User,
 )
+from app.plans import PAID_PLANS
 from app.schemas import ORMModel, Page
 from app.security import SuperAdminUser
 
@@ -196,7 +197,7 @@ async def theme_usage(admin: SuperAdminUser, db: DB) -> list[dict]:
                 Site.template_id,
                 func.count(Site.id),
                 func.count(Site.id).filter(Site.status == "published"),
-                func.count(func.distinct(Site.tenant_id)).filter(Tenant.plan.in_(("starter", "growth", "business"))),
+                func.count(func.distinct(Site.tenant_id)).filter(Tenant.plan.in_(PAID_PLANS)),
                 func.count(Site.id).filter(Site.created_at >= since),
             )
             .join(Tenant, Tenant.id == Site.tenant_id)

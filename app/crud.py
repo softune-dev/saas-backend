@@ -186,6 +186,11 @@ def _explain(exc: IntegrityError) -> str:
         "uq_assistant_questions_site_key": "That question is already in the list.",
         "idx_payment_claims_trx_id": "That Transaction ID has already been submitted.",
         "payment_claims_kind_check": "Unknown payment claim type.",
+        "tenants_plan_check": "Unknown plan.",
+        "marketing_contacts_lifecycle_check": "Unknown contact group.",
+        "notifications_type_check": "Unknown notification type.",
+        "tenant_order_months_orders_check": "Order count cannot be negative.",
+        "tenant_order_months_blocked_check": "Blocked count cannot be negative.",
         "payment_claims_kind_fields_check": "That payment claim's fields don't match its type.",
     }
     for name, message in known.items():
@@ -436,10 +441,13 @@ async def create_tenant_owner_and_site(
         plan=plan,
         onboarding_free_images_remaining=0 if plan == "demo" else settings.onboarding_free_images,
     )
-    if trial_days is not None:
-        from datetime import UTC, datetime, timedelta
+    from datetime import UTC, datetime, timedelta
 
-        now = datetime.now(UTC)
+    now = datetime.now(UTC)
+    # Explicit even though the column defaults to now(): a new account starts
+    # "active" at creation (migrations/087).
+    tenant.last_active_at = now
+    if trial_days is not None:
         tenant.trial_started_at = now
         tenant.trial_expires_at = now + timedelta(days=trial_days)
     db.add(tenant)
