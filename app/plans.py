@@ -45,13 +45,11 @@ class Plan:
 _MB = 1024 * 1024
 _GB = 1024 * _MB
 
-# Every plan has the same payment gateways. Kept as a feature so that gating
-# them again would be a change to this table only.
-_EVERY_PLAN = frozenset({"gateways"})
 # Plans are cumulative: each paid tier is the one below it plus a few more.
-_STARTER_FEATURES = _EVERY_PLAN | frozenset(
+_STARTER_FEATURES = frozenset(
     {
-        "customers", "pos", "seo", "fraud", "domain", "ai", "chatgpt",
+        # Every paid plan has the same payment gateways; Free has none.
+        "gateways", "customers", "pos", "seo", "fraud", "domain", "ai", "chatgpt",
         "theme_switch", "ecourier", "full_analytics", "no_badge",
     }
 )
@@ -60,7 +58,7 @@ _GROWTH_FEATURES = _STARTER_FEATURES | {"all_couriers", "dropship"}
 PLANS: dict[str, Plan] = {
     p.key: p
     for p in (
-        Plan("free", "Free", 0, 10, 100 * _MB, 50, 1, 0, None, _EVERY_PLAN),
+        Plan("free", "Free", 0, 10, 100 * _MB, 50, 1, 0, None, frozenset()),
         Plan("starter", "Starter", 49_900, 50, 500 * _MB, None, 1, 30, None, _STARTER_FEATURES),
         Plan("growth", "Growth", 149_900, 500, 2 * _GB, None, 1, 100, None, _GROWTH_FEATURES),
         Plan("business", "Business", 399_900, None, 3 * _GB, None, 2, 150, None, _GROWTH_FEATURES),
@@ -147,8 +145,8 @@ def ensure_feature(key: str, feature: str) -> None:
 # Real payment gateways needing a merchant credential/account. Cash on
 # Delivery and Manual (customer pays the merchant's own number, then
 # submits a transaction id/screenshot to verify by hand) need no gateway
-# account and are never gated. These four follow the "gateways" feature, which
-# every plan currently has.
+# account and are never gated. These four need the "gateways" feature, which
+# every paid plan has and Free does not.
 GATED_PAYMENT_PROVIDERS = {"bkash", "nagad", "sslcommerz", "rocket"}
 
 

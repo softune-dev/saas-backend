@@ -38,7 +38,7 @@ LIMITS = {
     "demo": (50, 800 * MB, None, 1, 50, None, 0),
 }
 FEATURE_SETS = {
-    "free": {"gateways"},
+    "free": set(),
     "starter": STARTER_FEATURES,
     "growth": GROWTH_FEATURES,
     "business": GROWTH_FEATURES,
@@ -79,7 +79,7 @@ def test_unknown_or_missing_plan_falls_to_free():
 
 def test_needed_plan_is_the_cheapest_paid_plan_with_the_feature():
     assert plans.needed_plan("domain") == "starter"
-    assert plans.needed_plan("gateways") == "starter"  # every paid plan, and Free
+    assert plans.needed_plan("gateways") == "starter"
     assert plans.needed_plan("all_couriers") == "growth"
     assert plans.needed_plan("dropship") == "growth"
 
@@ -184,10 +184,19 @@ def test_starter_may_switch_themes_trial_may_not():
         plans.ensure_theme_switch_allowed("free")
 
 
-@pytest.mark.parametrize("key", ["free", "starter", "growth", "business", "trial", "demo"])
-def test_every_plan_has_every_payment_method(key):
+@pytest.mark.parametrize("key", ["starter", "growth", "business", "trial", "demo"])
+def test_gateways_open_on_every_paid_plan(key):
     for provider in sorted(plans.GATED_PAYMENT_PROVIDERS) + ["cod", "manual"]:
         plans.ensure_payment_provider_allowed(key, provider)
+
+
+def test_gateways_locked_on_free_but_cash_and_manual_open():
+    for provider in sorted(plans.GATED_PAYMENT_PROVIDERS):
+        with pytest.raises(HTTPException) as exc:
+            plans.ensure_payment_provider_allowed("free", provider)
+        assert exc.value.status_code == 403 and exc.value.detail["needed_plan"] == "starter"
+    for provider in ("cod", "manual"):
+        plans.ensure_payment_provider_allowed("free", provider)
 
 
 @pytest.mark.parametrize("key", ["starter", "trial"])
@@ -286,11 +295,12 @@ async def test_require_feature_lets_a_plan_that_has_it_through(account_factory):
 @pytest.mark.parametrize(
     ("check", "provider", "feature", "needed"),
     [
+        (plans.ensure_payment_provider_allowed, "bkash", "gateways", "starter"),
         (plans.ensure_courier_allowed, "ecourier", "ecourier", "starter"),
         (plans.ensure_courier_allowed, "pathao", "all_couriers", "growth"),
     ],
 )
-def test_free_gets_the_structured_lock_for_couriers(check, provider, feature, needed):
+def test_free_gets_the_structured_lock_for_gateways_and_couriers(check, provider, feature, needed):
     with pytest.raises(HTTPException) as exc:
         check("free", provider)
     assert exc.value.status_code == 403

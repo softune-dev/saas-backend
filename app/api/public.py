@@ -267,10 +267,10 @@ async def get_site_config(host: str, db: DB) -> dict:
     # What the plan changes on the storefront: ordering and the badge.
     plan_flags, ttl = await order_limit.storefront_flags(db, site.tenant_id)
 
-    # Free shows no tracking. Hidden here, in the PUBLIC copy only: the stored
-    # row keeps the merchant's ids so they come back the moment the plan does. A
-    # plan change drops this cache (billing_actions.refresh_storefronts). A plan
-    # without gateways would hide those the same way; every plan has them now.
+    # Free shows no tracking and no payment gateways. Hidden here, in the
+    # PUBLIC copy only: the stored row keeps the merchant's ids and connections
+    # so they come back the moment the plan does. A plan change drops this
+    # cache (billing_actions.refresh_storefronts).
     seo = site.seo
     if await _on_free_plan(db, site.tenant_id):
         seo = {**seo, **{key: "" for key in _TRACKING_KEYS}}
