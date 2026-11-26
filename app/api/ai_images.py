@@ -214,7 +214,11 @@ async def build_generation_prompt(db: AsyncSession, tenant_id, payload: Generate
 
 async def _should_use_free(db: AsyncSession, tenant_id, tier: str, requested: bool = False) -> bool:
     """Standard-quality generations spend the free allowance first, wherever
-    they're asked for — the merchant never has to know a flag exists."""
+    they're asked for — the merchant never has to know a flag exists. On Free
+    the free images are for sign-up only: once setup is done, an image costs a
+    credit."""
+    if await plan_gate.tenant_plan(db, tenant_id) == "free" and not await ai_plan.onboarding_open(db, tenant_id):
+        return False
     if requested:
         return True
     return tier == "standard" and await ai_images.get_onboarding_free_remaining(db, tenant_id) > 0

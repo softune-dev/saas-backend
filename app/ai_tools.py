@@ -22,7 +22,7 @@ from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import ai_plan, cache, plan_gate, plans, crud, invoices as invoices_module, media, risk_score as risk_score_module
+from app import ai_plan, basic_plan, cache, plan_gate, plans, crud, invoices as invoices_module, media, risk_score as risk_score_module
 from app.config import settings
 from app.plans import get_plan
 from app.models import (
@@ -250,6 +250,15 @@ async def _tenant_currency(db: AsyncSession, tenant_id: uuid.UUID) -> str:
     return row or "USD"
 
 
+BASIC_REPORT_DAYS = 7  # the same window as api/analytics._basic_analytics
+
+
+async def _basic_reports(db: AsyncSession, tenant_id: uuid.UUID) -> bool:
+    """True on a plan without full analytics. The AI then reports no more than
+    the dashboard does (api/analytics.py, basic_plan.py)."""
+    return not plans.has_feature(await plan_gate.tenant_plan(db, tenant_id), "full_analytics")
+
+
 async def _get_business_overview(db: AsyncSession, tenant_id: uuid.UUID) -> dict:
     site = (
         await db.execute(select(Site).where(Site.tenant_id == tenant_id).limit(1))
@@ -268,7 +277,9 @@ async def _get_business_overview(db: AsyncSession, tenant_id: uuid.UUID) -> dict
         )
     ).one()
 
-    since = datetime.now(UTC) - timedelta(days=30)
+    basic = await _basic_reports(db, tenant_id)
+    days = BASIC_REPORT_DAYS if basic else 30
+    since = datetime.now(UTC) - timedelta(days=days)
     orders_30d, revenue_30d = (
         await db.execute(
             select(func.count(), func.coalesce(func.sum(Order.total_cents), 0)).where(
@@ -284,17 +295,18 @@ async def _get_business_overview(db: AsyncSession, tenant_id: uuid.UUID) -> dict
         )
     ).one()
 
-    return {
+    out = {
         "site_name": site.name if site else None,
         "site_status": site.status if site else None,
         "total_products": total_products,
         "active_products": active_products,
         "low_stock_products": low_stock,
-        "orders_last_30_days": orders_30d,
-        "revenue_last_30_days": _money(revenue_30d, currency),
-        "orders_all_time": orders_all,
-        "revenue_all_time": _money(revenue_all, currency),
+        f"orders_last_{days}_days": orders_30d,
+        f"revenue_last_{days}_days": _money(revenue_30d, currency),
     }
+    if not basic:
+        out |= {"orders_all_time": orders_all, "revenue_all_time": _money(revenue_all, currency)}
+    return out
 
 
 async def _get_site_info(db: AsyncSession, tenant_id: uuid.UUID) -> dict:
@@ -612,6 +624,8 @@ async def _list_orders(
 ) -> dict:
     limit = min(max(limit or 10, 1), 25)
     stmt = select(Order).where(Order.tenant_id == tenant_id)
+    if await _basic_reports(db, tenant_id):
+        stmt = stmt.where(Order.created_at >= basic_plan.order_window_start())
     if status:
         stmt = stmt.where(Order.status == status)
     stmt = stmt.order_by(Order.created_at.desc()).limit(limit)
@@ -659,7 +673,8 @@ async def _get_order(db: AsyncSession, tenant_id: uuid.UUID, order_number: str) 
 
 
 async def _get_sales_summary(db: AsyncSession, tenant_id: uuid.UUID, days: int = 30) -> dict:
-    days = min(max(days or 30, 1), 365)
+    basic = await _basic_reports(db, tenant_id)
+    days = min(max(days or 30, 1), BASIC_REPORT_DAYS if basic else 365)
     since = datetime.now(UTC) - timedelta(days=days)
     currency = await _tenant_currency(db, tenant_id)
 
@@ -687,7 +702,8 @@ async def _get_sales_summary(db: AsyncSession, tenant_id: uuid.UUID, days: int =
         "order_count": count,
         "revenue": _money(revenue, currency),
         "average_order": _money(int(revenue / count) if count else 0, currency),
-        "top_products": [{"name": name, "quantity": int(qty)} for name, qty in top_rows],
+        # Best sellers are part of full analytics.
+        **({} if basic else {"top_products": [{"name": name, "quantity": int(qty)} for name, qty in top_rows]}),
     }
 
 
@@ -759,7 +775,7 @@ async def get_suggested_prompts(
         candidates.append({"text": T("Draft FAQs based on what I sell", "আমি যা বিক্রি করি তার ওপর ভিত্তি করে সাধারণ প্রশ্নোত্তর লিখে দাও"), "icon": _ICON["content"]})
     if not info.get("meta_description"):
         candidates.append({"text": T("Write an SEO meta description for my store", "আমার স্টোরের জন্য একটি SEO মেটা বিবরণ লিখে দাও"), "icon": _ICON["content"]})
-    if (overview.get("orders_last_30_days") or 0) == 0 and (overview.get("total_products") or 0) > 0:
+    if (overview.get("orders_last_30_days", overview.get("orders_last_7_days")) or 0) == 0 and (overview.get("total_products") or 0) > 0:
         candidates.append({"text": T("Suggest ways to get my first sales this month", "এই মাসে প্রথম বিক্রি পাওয়ার উপায়গুলো বলো"), "icon": _ICON["sales"]})
     if not info.get("custom_domain"):
         candidates.append({"text": T("How do I connect my own domain to my store?", "আমার নিজের ডোমেইন স্টোরে কীভাবে যুক্ত করব?"), "icon": _ICON["org"]})
@@ -1063,6 +1079,10 @@ _HANDLERS = {
 }
 
 
+# Tools whose answer depends on the plan.
+_PLAN_SHAPED_TOOLS = {"get_business_overview", "list_orders", "get_sales_summary"}
+
+
 async def execute_tool(
     name: str, args: dict, db: AsyncSession, tenant_id: uuid.UUID
 ) -> dict:
@@ -1086,6 +1106,9 @@ async def execute_tool(
         return {"error": ai_plan.detail_message(exc.detail)}
 
     cache_key = f"ai:tool:{tenant_id}:{name}:{json.dumps(args, sort_keys=True)}"
+    # A report cached on a paid plan must not be served after a downgrade.
+    if name in _PLAN_SHAPED_TOOLS and await _basic_reports(db, tenant_id):
+        cache_key += ":basic"
     cached = await cache.get_json(cache_key)
     if cached is not None:
         return cached["result"]

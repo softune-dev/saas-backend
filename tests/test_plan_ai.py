@@ -104,9 +104,9 @@ def test_a_dict_detail_becomes_its_message_never_a_python_dict():
     assert "{" not in mcp_server._error_result({"code": "x", "message": "Nope."})["error"]
 
 
-# --- sign-up keeps working on Free, everything else is locked --------------------
+# --- Free: setup has its own doors, then the ordinary AI with 10 a day -----------
 
-async def test_free_signup_door_then_everything_locked(account_factory, monkeypatch):
+async def test_free_signup_doors_then_the_ordinary_ai(account_factory, monkeypatch):
     account = await account_factory("free")
     seen: dict = {"plans": [], "art": 0}
 
@@ -146,8 +146,7 @@ async def test_free_signup_door_then_everything_locked(account_factory, monkeypa
     # The chat door is bounded by the trial's daily counter, not unlimited.
     assert seen["plans"] == [("free", True)]
     assert (await account.get("/ai/usage")).status_code == 200
-    # Without asking for the free images, Free gets none: no use_onboarding_free, no door.
-    _locked(await account.post("/ai/images/generate", json=free))
+    # During setup a standard image uses a free one, as on every plan.
     ok = await account.post("/ai/images/generate", json={**free, "use_onboarding_free": True})
     assert ok.status_code == 200, ok.text
     assert ok.json()["credits_charged"] == 0 and ok.json()["onboarding_free_remaining"] == start - 1
@@ -160,49 +159,22 @@ async def test_free_signup_door_then_everything_locked(account_factory, monkeypa
     )
     assert saved_ok.status_code == 200, saved_ok.text
 
-    # Edit is never part of sign-up, even with credits bought earlier.
-    await _tenant_values(account, ai_image_credits=50)
-    edit = {"prompt": "brighter", "source_image": {"data_base64": _png_b64(), "mime_type": "image/png"}}
-    _locked(await account.post("/ai/images/edit", json=edit))
-    _locked(await account.post("/ai/images/generate", json={**free, "tier": "premium"}))
-    assert (await account.get("/ai/images/balance")).json()["balance"] == 50
+    # Edit and the premium tier cost credits, as on every plan.
+    await _tenant_values(account, ai_image_credits=0, onboarding_free_images_remaining=3)
 
-    # Free images used up: the door closes.
-    await _tenant_values(account, onboarding_free_images_remaining=0)
-    _locked(await account.post("/ai/images/generate", json={**free, "use_onboarding_free": True}))
-
-    # Onboarding finished: chat closes too, and so does every other AI route.
-    await _tenant_values(account, onboarding_free_images_remaining=3)
+    # Setup finished: chat is the normal one, no longer the text-only door.
     await _finish_onboarding(account)
-    _locked(await account.post("/ai/chat", json={"message": "hello"}))
-    _locked(await account.post("/ai/images/generate", json={**free, "use_onboarding_free": True}))
-    assert len(seen["plans"]) == 1, "a locked chat must not reach the model"
-
-    pack = {"pack_id": "starter", "sender_number": "01700000000", "trx_id": "TRX12345"}
-    _locked(await account.post(f"/sites/{account.site_id}/ai/suggest", json={"prompt": "dark and gold"}))
-    _locked(await account.post("/ai/generate-text", json={"kind": "product_description", "context": {"name": "Bag"}}))
-    _locked(await account.post("/ai/agent/chat", json={"message": "hi"}))
-    _locked(await account.post("/ai/chat-credits/purchase", json=pack))
-    _locked(await account.post("/ai/images/purchase-credits", json=pack))
-    for path, body in (
-        ("set-categories", {"categories": ["A"]}),
-        ("add-category", {"name": "A"}),
-        ("create-product", {"product": {"name": "A"}}),
-        ("create-product", {}),
-        ("update-product", {"product": {"product_name": "A"}}),
-        ("update-product", {}),
-        ("update-order-status", {"order_number": "1", "status": "paid"}),
-        ("create-event", {"name": "Sale", "discount_percent": 10}),
-        ("create-ticket", {"subject": "s", "category": "c", "message": "m"}),
-    ):
-        _locked(await account.post(f"/ai/actions/{path}", json=body))
-
-    # Still open: balance, presets, usage, and saving an image the merchant owns.
-    assert (await account.get("/ai/images/balance")).status_code == 200
-    assert (await account.get("/ai/images/presets")).status_code == 200
-    assert (await account.get("/ai/chat-credits/balance")).status_code == 200
-    # No chat credit or image credit was spent by any refused call.
-    assert (await account.get("/ai/images/balance")).json()["balance"] == 50
+    chat = await account.post("/ai/chat", json={"message": "hello"})
+    assert chat.status_code == 200, chat.text
+    assert seen["plans"][-1] == ("free", False)
+    assert (await account.get("/ai/usage")).json()["limit"] == 10
+    # The unused sign-up images are for setup only: with no credits, nothing is made.
+    late = await account.post("/ai/images/generate", json={**free, "use_onboarding_free": True})
+    assert late.status_code == 402, late.text
+    assert (await account.get("/ai/images/balance")).json()["onboarding_free_remaining"] == 3
+    # ChatGPT is not part of Free.
+    async with SessionLocal() as db:
+        assert not await ai_plan.tenant_has_feature(db, uuid.UUID(account.tenant_id), "chatgpt")
 
 
 async def test_art_direct_never_runs_before_the_credit_check(account, monkeypatch):
@@ -254,7 +226,6 @@ async def test_a_downgrade_stops_agent_tools_and_undo_of_locked_columns(account_
         ("request_custom_domain", {"domain": "shop.example.com"}),
         ("get_store_admin_info", {"section": "domain"}),
         ("get_store_admin_info", {"section": "fraud"}),
-        ("update_storefront_design", {"primary_color": "#445566"}),
     ):
         out = await _tool(account, name, **args)
         assert out.get("code") == "plan_locked", (name, out)
@@ -268,13 +239,15 @@ async def test_a_downgrade_stops_agent_tools_and_undo_of_locked_columns(account_
             assert "error" in out and "{" not in out["error"], (read, out)
 
     # A change recorded before the downgrade can't be undone now.
-    for change in (seo, fraud, theme):
-        _locked(await account.post(f"/ai/changes/{change['change']['id']}/undo"))
+    # Colours and fonts are Free's to edit, so that tool and its undo stay open.
+    for change, feature in ((seo, "seo"), (fraud, "fraud")):
+        _locked(await account.post(f"/ai/changes/{change['change']['id']}/undo"), feature)
     async with SessionLocal() as db:
         site = (await db.execute(select(Site).where(Site.id == uuid.UUID(account.site_id)))).scalar_one()
         assert site.seo.get("title_suffix") == "Before the downgrade"
         rows = (await db.execute(select(AiAgentChange.undone_at).where(AiAgentChange.tenant_id == uuid.UUID(account.tenant_id)))).scalars().all()
         assert rows and all(r is None for r in rows)
+    assert (await account.post(f"/ai/changes/{theme['change']['id']}/undo")).status_code == 200
 
     # What the plan no longer includes is dropped from the reads, not blanked.
     async with SessionLocal() as db:
@@ -432,18 +405,52 @@ async def test_the_chat_door_is_text_only_capped_and_fails_closed(monkeypatch):
     assert exc.value.status_code == 503
 
 
-async def test_the_chat_door_closes_for_a_store_older_than_a_week(account_factory, monkeypatch):
+async def test_the_setup_chat_door_closes_after_a_week(account_factory, monkeypatch):
     from datetime import UTC, datetime, timedelta
 
     account = await account_factory("free")
+    doors: list = []
 
-    async def fake_chat(*a, **kw):
+    async def fake_chat(message, history, tenant_id, db, plan, text_only=False):
+        doors.append(text_only)
         return "ok", [], None
 
     monkeypatch.setattr(ai, "chat_reply", fake_chat)
     assert (await account.post("/ai/chat", json={"message": "hi"})).status_code == 200
     await _tenant_values(account, created_at=datetime.now(UTC) - timedelta(days=8))
-    _locked(await account.post("/ai/chat", json={"message": "hi"}))
+    assert (await account.post("/ai/chat", json={"message": "hi"})).status_code == 200
+    assert doors == [True, False]
+
+
+async def test_free_ai_reports_no_more_than_the_dashboard(account_factory):
+    from datetime import UTC, datetime, timedelta
+
+    from app import basic_plan
+    from app.models import Order
+
+    account = await account_factory("starter")
+    tid, sid = uuid.UUID(account.tenant_id), uuid.UUID(account.site_id)
+    old = basic_plan.order_window_start() - timedelta(days=3)
+    async with SessionLocal() as db:
+        for number, when in (("NEW-1", datetime.now(UTC) - timedelta(days=1)), ("OLD-1", old)):
+            db.add(Order(tenant_id=tid, site_id=sid, order_number=number, status="pending", subtotal_cents=500,
+                         total_cents=500, currency="BDT", customer={"name": "Buyer"}, created_at=when))
+        await db.commit()
+
+    async def ask(name: str, **args) -> dict:
+        async with SessionLocal() as db:
+            return await ai_tools.execute_tool(name, args, db, tid)
+
+    paid = await ask("get_sales_summary", days=365)
+    assert paid["days"] == 365 and paid["order_count"] == 2 and "top_products" in paid
+    assert "orders_all_time" in await ask("get_business_overview")
+
+    await _set_plan(account, "free")
+    free = await ask("get_sales_summary", days=365)
+    assert free["days"] == 7 and free["order_count"] == 1 and "top_products" not in free
+    overview = await ask("get_business_overview")
+    assert overview["orders_last_7_days"] == 1 and "orders_all_time" not in overview
+    assert [o["order_number"] for o in (await ask("list_orders"))["orders"]] == ["NEW-1"]
 
 
 # --- refunds and settlement -----------------------------------------------------------

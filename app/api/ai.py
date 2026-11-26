@@ -106,14 +106,12 @@ class ChatOut(BaseModel):
 @chat_router.post("", response_model=ChatOut)
 async def chat(payload: ChatIn, user: CurrentUser, db: DB) -> ChatOut:
     plan = await _tenant_plan(db, user.tenant_id)
-    # Free has no AI. The one sign-up door is text-only chat while onboarding is
-    # unfinished and the store is new (ai_plan.onboarding_chat_open), bounded by
-    # ai._check_onboarding_chat.
-    door = False
-    if not plans.has_feature(plan, "ai"):
-        if not await ai_plan.onboarding_chat_open(db, user.tenant_id):
-            plans.ensure_feature(plan, "ai")
-        door = True
+    # While a new Free store is still being set up, the wizard's chat is
+    # text-only and has its own daily allowance (ai._check_onboarding_chat), so
+    # setting up doesn't use up the store's 10 daily requests.
+    door = plan == "free" and await ai_plan.onboarding_chat_open(db, user.tenant_id)
+    if not door:
+        plans.ensure_feature(plan, "ai")
     history = [t.model_dump() for t in payload.history]
     async with ai_log.track(
         "chat",

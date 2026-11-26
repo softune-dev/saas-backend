@@ -58,7 +58,9 @@ _GROWTH_FEATURES = _STARTER_FEATURES | {"all_couriers", "dropship"}
 PLANS: dict[str, Plan] = {
     p.key: p
     for p in (
-        Plan("free", "Free", 0, 10, 100 * _MB, 50, 1, 0, None, frozenset()),
+        # Free has the AI itself (10 requests a day, like the paid plans' daily
+        # cap). ChatGPT and the locked features stay paid.
+        Plan("free", "Free", 0, 10, 100 * _MB, 50, 1, 10, None, frozenset({"ai"})),
         Plan("starter", "Starter", 49_900, 50, 500 * _MB, None, 1, 30, None, _STARTER_FEATURES),
         Plan("growth", "Growth", 149_900, 500, 2 * _GB, None, 1, 100, None, _GROWTH_FEATURES),
         Plan("business", "Business", 399_900, None, 3 * _GB, None, 2, 150, None, _GROWTH_FEATURES),
