@@ -47,6 +47,9 @@ FEATURES = [
 ]
 # The scrolling announcement bar sits above the hero for some stores and
 # below it for others; each store picks its own (BAR_BELOW_HERO).
+# No mobile banner: phones show the desktop one at 16:9, so the demos show
+# both styles.
+DESKTOP_HERO_ONLY = {"swarna", "oudh", "freshkart", "tinytots", "stride"}
 BAR_BELOW_HERO = {"swarna", "voltix", "pawpal", "ghorkona", "stride"}
 SECTIONS = ["banner", "hero", "categories", "featureProducts", "events", "productShowcase",
             "categoryShowcase", "whyChooseUs", "features", "bannerCta", "testimonials", "footer"]
@@ -185,7 +188,7 @@ def theme(s: dict, u: dict, cat_ids: list[str], featured: list[str], showcase: s
         "sections": [{"id": f"s{i + 1}", "type": ty} for i, ty in enumerate(sections_for(s["slug"]))],
         "heroMediaType": "image", "heroVideo": "",
         "heroImages": [u["hero-1.png"], u["hero-2.png"]],
-        "heroImagesSquare": [u["hero-1-mobile.png"], u["hero-2-mobile.png"]],
+        "heroImagesSquare": [] if s["slug"] in DESKTOP_HERO_ONLY else [u["hero-1-mobile.png"], u["hero-2-mobile.png"]],
         "categoriesTitle": ti.get("categories", "Shop by category"), "selectedCategoryIds": cat_ids,
         "featureProductsTitle": ti.get("featured", "Bestsellers"), "selectedProductIds": featured,
         "selectedEventIds": event_ids, "showcaseProductId": showcase,
