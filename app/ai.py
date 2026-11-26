@@ -570,6 +570,9 @@ returned by a tool, or covered by a documentation article is something you do
 NOT know.
 - Free plan: ৳0, no credit card. {free.products} products, {free.orders_per_month} orders a month,
   {free.storage_bytes // (1024 * 1024)}MB media storage, {free.stores} store. Sale events are unlimited on every plan.
+- AI requests a day: Free {free.ai_per_day}, Starter {plans.PLANS["starter"].ai_per_day},
+  Growth {plans.PLANS["growth"].ai_per_day}, Business {plans.PLANS["business"].ai_per_day}. Unused requests don't carry over.
+  Connecting ChatGPT needs a paid plan.
 - After the month's {free.orders_per_month} orders on Free, checkout switches to ordering by
   WhatsApp until the next calendar month.
 - Free is free as long as the account is active, NEVER say "free forever": a

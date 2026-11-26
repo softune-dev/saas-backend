@@ -30,7 +30,7 @@ GROWTH_FEATURES = STARTER_FEATURES | {"all_couriers", "dropship"}
 
 # key: (products, storage, orders, stores, ai/day, events, price)
 LIMITS = {
-    "free": (10, 100 * MB, 50, 1, 0, None, 0),
+    "free": (10, 100 * MB, 50, 1, 10, None, 0),
     "starter": (50, 500 * MB, None, 1, 30, None, 49_900),
     "growth": (500, 2 * GB, None, 1, 100, None, 149_900),
     "business": (None, 3 * GB, None, 2, 150, None, 399_900),
@@ -38,7 +38,7 @@ LIMITS = {
     "demo": (50, 800 * MB, None, 1, 50, None, 0),
 }
 FEATURE_SETS = {
-    "free": set(),
+    "free": {"ai"},
     "starter": STARTER_FEATURES,
     "growth": GROWTH_FEATURES,
     "business": GROWTH_FEATURES,
