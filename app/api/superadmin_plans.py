@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import contacts, order_limit, plans
+from app import contacts, order_limit, plans, storage_report
 from app.db import get_db
 from app.inactivity import inactive_limit
 from app.models import DeletedAccount, PaymentClaim, Product, Site, Tenant, TenantOrderMonth, User
@@ -61,6 +61,9 @@ class PlanTenantOut(ORMModel):
     orders_this_month: int
     order_limit: int | None
     blocked_this_month: int
+    # Across the tenant's stores. Null until Cloudinary has been listed once.
+    storage_bytes: int | None = None
+    storage_limit_bytes: int
     # Free only: when the inactivity job would delete it if nothing changes.
     # Null for paid, internal, suspended and staff accounts, which it never
     # deletes.
@@ -138,6 +141,13 @@ async def plan_tenants(
         )).all():
             subdomains.setdefault(tid, sub)
     paid = await contacts.paid_before(db, ids) if ids else set()
+    # Never waits for Cloudinary: a stale or missing listing is renewed behind.
+    storage_report.refresh_in_background()
+    folders = storage_report.cached_folders()
+    all_subdomains: dict[uuid.UUID, list[str]] = {}
+    if ids:
+        for tid, sub in (await db.execute(select(Site.tenant_id, Site.subdomain).where(Site.tenant_id.in_(ids)))).all():
+            all_subdomains.setdefault(tid, []).append(sub)
 
     items = []
     for t, staff in rows:
@@ -150,6 +160,11 @@ async def plan_tenants(
             "products": products.get(t.id, 0), "product_limit": plan.products,
             "orders_this_month": orders, "order_limit": plan.orders_per_month,
             "blocked_this_month": blocked,
+            "storage_bytes": None if folders is None else sum(
+                folders.get(sub, {}).get("bytes", 0) for sub in all_subdomains.get(t.id, [])
+            ),
+            # The limit is per store.
+            "storage_limit_bytes": plan.storage_bytes * max(1, len(all_subdomains.get(t.id, []))),
             "deletes_at": _deletes_at(t, t.id in paid, staff),
         })
     return {"items": items, "total": total, "limit": limit, "offset": offset, "counts": counts}
