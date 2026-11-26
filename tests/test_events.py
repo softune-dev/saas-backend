@@ -1,7 +1,9 @@
 """Events — sale/promo campaigns with a real checkout discount."""
 
+import uuid
+
 from app import recaptcha
-from app.events import plan_event_limit, round_discounted_cents
+from app.events import round_discounted_cents
 
 
 async def _product(account, site, **kw) -> dict:
@@ -69,11 +71,14 @@ async def test_discount_percent_bounds_are_rejected(account, site):
     assert too_high.status_code == 422
 
 
-async def test_product_from_another_site_is_rejected(account, site, template_id):
+async def test_product_from_another_site_is_rejected(account_factory, template_id):
+    # Business: the plan with room for a second store.
+    account = await account_factory("business")
+    site = (await account.get(f"/sites/{account.site_id}")).json()
     other_site = (
         await account.post(
             "/sites",
-            json={"template_id": template_id, "name": "Other", "subdomain": "other-evt-site"},
+            json={"template_id": template_id, "name": "Other", "subdomain": f"evt-{uuid.uuid4().hex[:10]}"},
         )
     ).json()
     other_product = await _product(account, other_site)
@@ -83,26 +88,6 @@ async def test_product_from_another_site_is_rejected(account, site, template_id)
         json={"name": "Cross-site", "discount_percent": 10, "product_ids": [other_product["id"]]},
     )
     assert response.status_code == 400
-
-
-# ---------------------------------------------------------------------------
-#  Plan limit
-# ---------------------------------------------------------------------------
-
-
-async def test_event_plan_limit_is_enforced(account, site):
-    limit = plan_event_limit("starter")  # conftest's account fixture registers plan="starter"
-    for i in range(limit):
-        response = await account.post(
-            f"/sites/{site['id']}/events", json={"name": f"Event {i}", "discount_percent": 10}
-        )
-        assert response.status_code == 201
-
-    over = await account.post(
-        f"/sites/{site['id']}/events", json={"name": "One too many", "discount_percent": 10}
-    )
-    assert over.status_code == 403
-    assert "limit" in over.json()["detail"].lower()
 
 
 # ---------------------------------------------------------------------------

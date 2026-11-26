@@ -321,7 +321,9 @@ async def test_too_many_at_once_deletes_none_and_tells_the_owner(account_factory
     monkeypatch.setattr(inactivity, "_alerted_on", None)
 
     report = await sweep([first, second], days=31)
-    again = await sweep([first, second], days=31.04)
+    # Seconds later: a longer gap can cross midnight UTC, where a second
+    # day's alert is correct.
+    again = await sweep([first, second], days=31.0001)
 
     assert report.capped and report.deleted == [] and again.deleted == []
     assert await _exists(first) and await _exists(second)
