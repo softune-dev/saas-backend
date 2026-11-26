@@ -40,6 +40,7 @@ from app.api import (
     superadmin_marketing,
     superadmin_overview,
     superadmin_plans,
+    superadmin_storage,
     trial,
 )
 from app.security import block_demo_writes
@@ -109,6 +110,7 @@ api_router.include_router(superadmin_ops.router)
 api_router.include_router(superadmin_marketing.router)
 api_router.include_router(superadmin_overview.router)
 api_router.include_router(superadmin_plans.router)
+api_router.include_router(superadmin_storage.router)
 # NOT gated by _demo_guard — trial signup has no tenant/site at all until
 # POST /trial/complete creates one, and there's no bearer token during
 # signup for block_demo_writes (which resolves CurrentUser) to even check.
