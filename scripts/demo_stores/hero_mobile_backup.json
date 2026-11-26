@@ -1,0 +1,22 @@
+{
+  "freshkart": [
+    "https://res.cloudinary.com/ds19gltup/image/upload/v1795205437/softune/demo/freshkart/hero-1-mobile.webp",
+    "https://res.cloudinary.com/ds19gltup/image/upload/v1795205439/softune/demo/freshkart/hero-2-mobile.webp"
+  ],
+  "oudhhouse": [
+    "https://res.cloudinary.com/ds19gltup/image/upload/v1795205368/softune/demo/oudh/hero-1-mobile.webp",
+    "https://res.cloudinary.com/ds19gltup/image/upload/v1795205370/softune/demo/oudh/hero-2-mobile.webp"
+  ],
+  "stride": [
+    "https://res.cloudinary.com/ds19gltup/image/upload/v1795205402/softune/demo/stride/hero-1-mobile.webp",
+    "https://res.cloudinary.com/ds19gltup/image/upload/v1795205404/softune/demo/stride/hero-2-mobile.webp"
+  ],
+  "swarnajewels": [
+    "https://res.cloudinary.com/ds19gltup/image/upload/v1795205332/softune/demo/swarna/hero-1-mobile.webp",
+    "https://res.cloudinary.com/ds19gltup/image/upload/v1795205334/softune/demo/swarna/hero-2-mobile.webp"
+  ],
+  "tinytots": [
+    "https://res.cloudinary.com/ds19gltup/image/upload/v1795202711/softune/demo/tinytots/hero-1-mobile.webp",
+    "https://res.cloudinary.com/ds19gltup/image/upload/v1795202713/softune/demo/tinytots/hero-2-mobile.webp"
+  ]
+}
