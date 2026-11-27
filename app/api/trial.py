@@ -26,7 +26,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import cache, crud, free_signup, google_auth, mailer, queue, recaptcha
+from app import cache, crud, free_signup, google_auth, mailer, queue, recaptcha, social_links
 from app.config import settings
 from app.db import get_db
 from app.models import Site, SitePage, Tenant, User
@@ -48,6 +48,7 @@ DB = Annotated[AsyncSession, Depends(get_db)]
 
 _OTP_TTL_MINUTES = 10
 _OTP_MAX_ATTEMPTS = 5
+_PROFILE_FIELDS = ("whatsapp", "facebook", "instagram", "tiktok", "youtube", "district")
 
 
 def _redis_key(signup_token: str) -> str:
@@ -242,6 +243,8 @@ async def update_details(payload: TrialDetailsIn, db: DB) -> dict:
     pending["phone"] = payload.phone
     pending["tagline"] = payload.tagline
     pending["category"] = payload.category
+    for field in _PROFILE_FIELDS:
+        pending[field] = (getattr(payload, field) or "").strip() or None
     await _save_pending(payload.signup_token, pending)
     return {"signup_token": payload.signup_token, "email_verified": True}
 
@@ -305,6 +308,10 @@ async def complete(payload: TrialCompleteIn, db: DB) -> dict:
         business_overrides["phone"] = pending["phone"]
     if pending.get("category"):
         business_overrides["type"] = pending["category"]
+    # Site.business is sent to every storefront visitor, so only the social
+    # pages go in it (the footer shows them).
+    if socials := social_links.public_socials(pending):
+        business_overrides["socials"] = socials
 
     # The lock lasts until create_tenant_owner_and_site commits.
     await free_signup.lock_phone(db, pending["phone"])
@@ -339,6 +346,14 @@ async def complete(payload: TrialCompleteIn, db: DB) -> dict:
     site.status = "published"
     site.published_at = datetime.now(UTC)
     site.seo = {**(site.seo or {}), "noindex": False}
+
+    # What they typed on the sign-up form, kept private in Tenant.settings
+    # for follow-up: WhatsApp and district must never reach the storefront.
+    profile = {f: pending[f] for f in _PROFILE_FIELDS if pending.get(f)}
+    if profile:
+        tenant = await db.get(Tenant, user.tenant_id)
+        if tenant is not None:
+            tenant.settings = {**(tenant.settings or {}), "signup_profile": profile}
 
     # Which ad brought them (utm_*, fbclid), so a signup can be tied back to
     # the campaign later. Kept in Tenant.settings, no column of its own.

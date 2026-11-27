@@ -1558,6 +1558,15 @@ class TrialDetailsIn(BaseModel):
     # with no server-side allowlist either. Keeping the option list itself
     # frontend-only means adding a category later needs no backend change.
     category: str | None = Field(default=None, max_length=40)
+    # Lead details from the sign-up form, all optional. Social pages are typed
+    # free-form (link or username); app/social_links.py decides what is safe
+    # to publish. WhatsApp and district are never published.
+    whatsapp: str | None = Field(default=None, max_length=32)
+    facebook: str | None = Field(default=None, max_length=200)
+    instagram: str | None = Field(default=None, max_length=200)
+    tiktok: str | None = Field(default=None, max_length=200)
+    youtube: str | None = Field(default=None, max_length=200)
+    district: str | None = Field(default=None, max_length=60)
 
     @field_validator("phone")
     @classmethod
@@ -1566,6 +1575,11 @@ class TrialDetailsIn(BaseModel):
         if phone is None:
             raise ValueError("Please enter your mobile number.")
         return phone
+
+    @field_validator("whatsapp")
+    @classmethod
+    def _whatsapp(cls, value: str | None) -> str | None:
+        return _validate_bd_phone(value)
 
 
 class TrialThemeIn(BaseModel):
