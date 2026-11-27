@@ -22,7 +22,7 @@ import json
 import logging
 import re
 import uuid
-from datetime import date
+from datetime import UTC, date, datetime, time, timedelta
 
 import httpx
 from fastapi import HTTPException, status
@@ -43,6 +43,13 @@ log = logging.getLogger(__name__)
 
 def _usage_key(tenant_id: str) -> str:
     return f"ai:suggestions:{tenant_id}:{date.today().isoformat()}"
+
+
+def usage_resets_at() -> datetime:
+    """When today's count starts again: the next midnight of the same clock
+    _usage_key takes its date from (UTC on the server, 6 AM in Bangladesh)."""
+    tomorrow = datetime.combine(date.today() + timedelta(days=1), time.min)
+    return tomorrow.astimezone(UTC)
 
 
 def plan_cap(plan: str) -> int:
@@ -295,7 +302,10 @@ async def get_usage(tenant_id: str, plan: str) -> dict:
         used = int(raw) if raw else 0
     except Exception as exc:  # noqa: BLE001 - a display glitch, not a hard failure
         log.warning("AI usage lookup failed: %s", exc)
-    return {"used": used, "limit": cap, "remaining": max(0, cap - used)}
+    return {
+        "used": used, "limit": cap, "remaining": max(0, cap - used),
+        "resets_at": usage_resets_at(),
+    }
 
 
 def _validate_patch(raw: dict) -> dict:
