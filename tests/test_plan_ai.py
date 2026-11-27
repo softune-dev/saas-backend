@@ -5,6 +5,7 @@ production one, so nothing here may reach an outside service. Every write below
 is to a tenant the test created itself.
 """
 
+from datetime import UTC, datetime, timedelta
 import base64
 import io
 import json
@@ -167,7 +168,11 @@ async def test_free_signup_doors_then_the_ordinary_ai(account_factory, monkeypat
     chat = await account.post("/ai/chat", json={"message": "hello"})
     assert chat.status_code == 200, chat.text
     assert seen["plans"][-1] == ("free", False)
-    assert (await account.get("/ai/usage")).json()["limit"] == 10
+    usage = (await account.get("/ai/usage")).json()
+    assert usage["limit"] == 10
+    # The dashboard counts down to this: the next midnight on the server's clock.
+    resets = datetime.fromisoformat(usage["resets_at"])
+    assert timedelta(0) < resets - datetime.now(UTC) <= timedelta(hours=24)
     # The unused sign-up images are for setup only: with no credits, nothing is made.
     late = await account.post("/ai/images/generate", json={**free, "use_onboarding_free": True})
     assert late.status_code == 402, late.text

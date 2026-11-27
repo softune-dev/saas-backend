@@ -8,6 +8,7 @@ docstring for the validation it performs before a value ever gets here.
 """
 
 import uuid
+from datetime import datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -142,6 +143,8 @@ class AIUsageOut(BaseModel):
     used: int
     limit: int
     remaining: int
+    # When the daily count starts again, for the dashboard's countdown.
+    resets_at: datetime
 
 
 @usage_router.get("/usage", response_model=AIUsageOut)
